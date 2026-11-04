@@ -20,6 +20,8 @@ void SleepNano(uint64_t nanos);
 bool IsMainThread();
 // Unique per thread; never reused by another thread.
 int GetThreadIdUnique();
+// Lowers the calling thread's priority so the game's own threads run first (the shader workers).
+void LowerPriority();
 // Gives the calling thread the host's top-ranked physical core, which other emulator threads
 // leave. Returns the lowest logical processor it reserves, or -1 when no core is reserved.
 int ReserveCoreForCurrentThread();

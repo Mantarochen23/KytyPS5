@@ -9,6 +9,14 @@
 #include <thread>
 #include <tuple>
 
+#if defined(__APPLE__)
+#include <pthread.h>
+#elif KYTY_PLATFORM != KYTY_PLATFORM_WINDOWS
+#include <sys/resource.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#endif
+
 #ifdef __linux__
 #include <fstream>
 #include <map>
@@ -224,6 +232,17 @@ void Thread::SleepNano(uint64_t nanos) {
 
 bool Thread::IsMainThread() {
 	return g_main_thread == std::this_thread::get_id();
+}
+
+void Thread::LowerPriority() {
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+#elif defined(__APPLE__)
+	pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);
+#else
+	// On Linux a nice value applies to the calling thread alone.
+	setpriority(PRIO_PROCESS, static_cast<id_t>(syscall(SYS_gettid)), 5);
+#endif
 }
 
 int Thread::ReserveCoreForCurrentThread() {
