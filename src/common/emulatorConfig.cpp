@@ -313,6 +313,10 @@ bool ShaderCacheRetryFailed() {
 	return g_config->shader_cache_retry_failed;
 }
 
+bool AsyncShaderCompileEnabled() {
+	return g_config->async_shader_compile_enabled;
+}
+
 LogDirection GetShaderLogDirection() {
 	return g_config->shader_log_direction;
 }

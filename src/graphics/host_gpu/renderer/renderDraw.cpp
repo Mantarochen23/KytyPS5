@@ -883,7 +883,7 @@ bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCal
 		return false;
 	}
 
-	return true;
+	return m_context.GetPipelineCache().EnsureGraphicsPipeline(buffer, state, m_targets);
 }
 
 static PreparedIndexBuffer PrepareIndexBuffer(CommandBuffer&               buffer,

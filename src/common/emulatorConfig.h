@@ -95,6 +95,7 @@ struct ConfigOptions {
 	bool                   shader_cache_enabled        = false;
 	bool                   shader_cache_keep_enabled   = false;
 	bool                   shader_cache_retry_failed   = false;
+	bool                   async_shader_compile_enabled = true;
 	LogDirection           shader_log_direction        = LogDirection::Silent;
 	std::filesystem::path  shader_log_folder           = "_Shaders";
 	bool                   command_buffer_dump_enabled = false;
@@ -182,6 +183,7 @@ const std::vector<uint64_t>& GetSkipShaderHashes();
 bool                   ShaderCacheEnabled();
 bool                   ShaderCacheKeepEnabled();
 bool                   ShaderCacheRetryFailed();
+bool                   AsyncShaderCompileEnabled();
 LogDirection           GetShaderLogDirection();
 std::filesystem::path  GetShaderLogFolder();
 

@@ -90,6 +90,9 @@ static void PrintUsage() {
 	         "                                       dropping only records that fail to load.\n");
 	::printf("  --shader-cache-retry-failed          Ignore negative-cache entries in the shader store,\n"
 	         "                                       forcing failed shaders to retranslate.\n");
+	::printf("  --no-async-shader-compile            Compile shaders on the render thread, which waits for\n"
+	         "                                       them. By default they compile on worker threads and\n"
+	         "                                       draws using a shader still being compiled are skipped.\n");
 	::printf("  --tessellation                      Draw tessellation patches; skipped by default.\n");
 	::printf("  --occlusion-queries                  Count occlusion query samples on the GPU.\n");
 	::printf("  --relaxed-shader-float               Native GPU float ops in shaders; faster, can be inaccurate.\n");
@@ -230,6 +233,8 @@ static constexpr Flag FLAGS[] = {
     {"--shader-cache", &ConfigOptions::shader_cache_enabled},
     {"--shader-cache-keep", &ConfigOptions::shader_cache_keep_enabled},
     {"--shader-cache-retry-failed", &ConfigOptions::shader_cache_retry_failed},
+    {"--async-shader-compile", &ConfigOptions::async_shader_compile_enabled},
+    {"--no-async-shader-compile", &ConfigOptions::async_shader_compile_enabled, false},
     {"--tessellation", &ConfigOptions::tessellation_enabled},
     {"--occlusion-queries", &ConfigOptions::occlusion_queries_enabled},
     {"--relaxed-shader-float", &ConfigOptions::relaxed_shader_float},
