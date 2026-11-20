@@ -324,6 +324,9 @@ PipelineCache::CompiledStage PipelineCache::CompileStage(
 	auto        result =
 	    ShaderRecompiler::CompileProgram(std::move(translated), options, specialization, push_data);
 	auto info = std::move(result.program).TakeCompiledInfo();
+	if (const auto* workgroup = ShaderWorkgroupInput(key.stage, options.input_info)) {
+		info.subgroup_size = std::min(info.wave_size, workgroup->host_subgroup_size);
+	}
 
 	// The same inputs give the same module id across runs.
 	ShaderRecompiler::IR::Writer inputs;
@@ -1200,6 +1203,18 @@ void PipelineCache::GetGraphicsPrograms(const CommandBuffer& command, DrawRender
 	}
 }
 
+void PipelineCache::LimitComputeSubgroup(ShaderComputeInputInfo& input_info) const {
+	// A wave64 group over the host's invocation limit cannot be created with 64-wide host
+	// invocations; it runs in the two-lanes-per-invocation mode with 32-lane subgroups.
+	const auto threads =
+	    input_info.threads_num[0] * input_info.threads_num[1] * input_info.threads_num[2];
+	if (Config::PortEnabled(Config::Port::Wave64OverLimit32) && input_info.wave_size == 64u &&
+	    threads > m_graphics.GetPhysicalDeviceProperties().limits.maxComputeWorkGroupInvocations &&
+	    m_graphics.compute_subgroup_size_control_enabled && m_graphics.min_subgroup_size <= 32u) {
+		input_info.host_subgroup_size = 32u;
+	}
+}
+
 const ShaderModule* PipelineCache::GetComputeProgram(const HW::ComputeShaderInfo& regs,
                                                      ShaderComputeInputInfo&      input_info,
                                                      bool*                        pending) {
@@ -1210,10 +1225,11 @@ const ShaderModule* PipelineCache::GetComputeProgram(const HW::ComputeShaderInfo
 	if (m_async != nullptr) {
 		m_async->reason = Async::StallReason::Compute;
 	}
+	const auto& limits            = m_graphics.GetPhysicalDeviceProperties().limits;
 	input_info.host_subgroup_size = m_graphics.SupportsComputeWave64() ? 64u : 32u;
 	const auto        params      = PrepareProgram(regs, input_info);
-	input_info.lds_storage = input_info.lds_size_dwords * 4u >
-	    m_graphics.GetPhysicalDeviceProperties().limits.maxComputeSharedMemorySize;
+	LimitComputeSubgroup(input_info);
+	input_info.lds_storage = input_info.lds_size_dwords * 4u > limits.maxComputeSharedMemorySize;
 	ShaderRecompiler::IR::PushData::Window push_data;
 	const auto mode = (m_async != nullptr && pending != nullptr) ? AsyncMode::On : AsyncMode::Off;
 	const auto* module = GetProgram(params, input_info, push_data, mode);
@@ -1243,6 +1259,7 @@ bool PipelineCache::PrefetchComputeProgram(const HW::CsStageRegisters& cs_regs,
 	if (!TryPrepareComputeProgram(regs, input_info, params, code_owner)) {
 		return false;
 	}
+	LimitComputeSubgroup(input_info);
 	input_info.lds_storage = input_info.lds_size_dwords * 4u >
 	    m_graphics.GetPhysicalDeviceProperties().limits.maxComputeSharedMemorySize;
 	m_lookup_key.stage           = ShaderType::Compute;

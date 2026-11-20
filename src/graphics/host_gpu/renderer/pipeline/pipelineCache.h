@@ -211,6 +211,8 @@ public:
 	const ShaderModule* GetComputeProgram(const HW::ComputeShaderInfo& regs,
 	                                      ShaderComputeInputInfo&      input_info,
 	                                      bool*                        pending = nullptr);
+	// Port wave64-over-limit-32: oversized wave64 groups get 32-lane host subgroups.
+	void LimitComputeSubgroup(ShaderComputeInputInfo& input_info) const;
 	// Starts translating a compute shader discovered by PM4 lookahead on a worker thread.
 	bool PrefetchComputeProgram(const HW::CsStageRegisters& cs_regs,
 	                            bool dispatch_thread_dimensions, bool async_compute);
