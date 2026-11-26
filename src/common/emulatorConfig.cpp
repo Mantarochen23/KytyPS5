@@ -489,4 +489,8 @@ uint32_t HangDumpWaitSeconds() {
 	return g_config != nullptr ? g_config->hang_dump_wait_seconds : 60u;
 }
 
+bool ShaderKeyIndexEnabled() {
+	return g_config != nullptr && g_config->shader_key_index_enabled;
+}
+
 } // namespace Config

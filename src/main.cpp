@@ -141,6 +141,8 @@ static void PrintUsage() {
 	for (const auto& port: Config::PORTS) {
 		::printf("                                         %s (%s)\n", port.name, port.source);
 	}
+	::printf("  --shader-key-index                   Persist a shader hash -> ProgramKey index in the\n"
+	         "                                       shader store for next-boot lookup. Default: off.\n");
 }
 
 static bool NextArg(int argc, char* argv[], int& index, std::string& out) {
@@ -273,6 +275,7 @@ static constexpr Flag FLAGS[] = {
     {"--redzone", &ConfigOptions::red_zone_protection_enabled},
 #endif
     {"--bda-table-validate", &ConfigOptions::bda_table_validate_enabled},
+    {"--shader-key-index", &ConfigOptions::shader_key_index_enabled},
 };
 
 static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_help) {

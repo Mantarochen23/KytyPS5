@@ -141,6 +141,7 @@ struct ConfigOptions {
 	uint32_t                 loop_guard_limit           = 0;
 	// --disable-port: names from common/ports.h whose ported behaviour is turned off.
 	std::vector<std::string> disabled_ports;
+	bool                     shader_key_index_enabled   = false;
 };
 
 void Load(const ConfigOptions& cfg);
@@ -241,6 +242,7 @@ uint32_t HangDumpWaitSeconds();
 bool     BufferProbeShader(uint64_t hash);
 bool     BufferProbeEnabled();
 uint32_t LoopGuardLimit();
+bool ShaderKeyIndexEnabled();
 
 } // namespace Config
 
