@@ -6,6 +6,7 @@
 #include "common/emulatorConfig.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
+#include "common/shaderRegLedger.h"
 #include "common/stringUtils.h"
 #include "graphics/guest_gpu/gpu_defs.h"
 #include "graphics/guest_gpu/graphicsRun.h"
@@ -60,6 +61,24 @@ static std::deque<ComputeShaderPrefetch>                               g_compute
 static std::mutex                                                      g_prefetch_notify_mutex;
 static Common::UniqueFunction<void>                                    g_prefetch_notifier;
 
+// The same coarse buckets are used for first use in the pipeline cache. Guest halves map to the
+// stage they are consumed as; a front shader is its own bucket.
+static Common::ShaderRegLedger::Stage LedgerStage(Prospero::ShaderBinaryType type) {
+	using Stage = Common::ShaderRegLedger::Stage;
+	switch (type) {
+		case Prospero::ShaderBinaryType::kCs: return Stage::Compute;
+		case Prospero::ShaderBinaryType::kPs: return Stage::Pixel;
+		case Prospero::ShaderBinaryType::kGs:
+		case Prospero::ShaderBinaryType::kGsFront:
+		case Prospero::ShaderBinaryType::kGsBack: return Stage::Geometry;
+		case Prospero::ShaderBinaryType::kHs:
+		case Prospero::ShaderBinaryType::kHsFront:
+		case Prospero::ShaderBinaryType::kHsBack: return Stage::Hull;
+		case Prospero::ShaderBinaryType::kFs: return Stage::Front;
+		default: return Stage::Unknown;
+	}
+}
+
 void ShaderInit() {
 	EXIT_IF(g_shader_map != nullptr);
 
@@ -93,6 +112,7 @@ void ShaderMapUserData(uint64_t addr, const ShaderMappedData& data) {
 	// Translation reads the bytes the hash covers.
 	mapped.code_size_bytes = ShaderProgramSize(binary, data.code_size_bytes);
 	const auto hash        = XXH3_64bits(binary, mapped.code_size_bytes);
+	Common::ShaderRegLedger::NoteRegistration(hash, LedgerStage(data.type));
 	auto       code_copy   = std::make_shared<std::vector<uint32_t>>(
 	    binary, binary + mapped.code_size_bytes / sizeof(uint32_t));
 	mapped.vertex_error =
