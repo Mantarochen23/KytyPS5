@@ -103,6 +103,7 @@ if [ "${KYTY_AUDIO:-host}" = host ] && [ -S "$xdg/pulse/native" ]; then
 else
     args+=(--setenv SDL_AUDIODRIVER dummy --setenv ALSOFT_DRIVERS null)
 fi
+args+=(--setenv KYTY_RUN_OUT /run/out)
 [ -n "${KYTY_FATAL_ABORT:-}" ] && args+=(--setenv KYTY_FATAL_ABORT "$KYTY_FATAL_ABORT")
 [ -n "${KYTY_SKIP_SHADERS:-}" ] && args+=(--setenv KYTY_SKIP_SHADERS "$KYTY_SKIP_SHADERS")
 [ -n "${RADV_DEBUG:-}" ] && args+=(--setenv RADV_DEBUG "$RADV_DEBUG")
