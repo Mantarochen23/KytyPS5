@@ -1,4 +1,5 @@
 #include "common/emulatorConfig.h"
+#include "common/ports.h"
 
 #include "common/assert.h"
 #include "common/debugCounters.h"
@@ -72,6 +73,7 @@ void Load(const ConfigOptions& cfg) {
 		g_config->loop_guard_limit = static_cast<uint32_t>(std::min<unsigned long long>(limit, MaxLoopGuardLimit));
 	}
 	g_config->loop_guard_limit = std::min<uint32_t>(g_config->loop_guard_limit, MaxLoopGuardLimit);
+	SetDisabledPorts(g_config->disabled_ports);
 	Common::DebugCounters::SetEnabled(cfg.perf_overlay_enabled);
 }
 

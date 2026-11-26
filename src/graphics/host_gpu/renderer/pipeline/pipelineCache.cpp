@@ -4,6 +4,7 @@
 #include "common/debugCounters.h"
 #include "common/emulatorConfig.h"
 #include "common/file.h"
+#include "common/ports.h"
 #include "common/logging/log.h"
 #include "common/parallelFor.h"
 #include "common/profiler.h"
@@ -229,7 +230,11 @@ std::filesystem::path ShaderStorePath() {
 	if (title_id.empty()) {
 		return {};
 	}
-	return std::filesystem::path("_PipelineCache") / (title_id + ".shaders");
+	// Ported fixes that change shader code keep their programs in a store of their own
+	// (common/ports.h), so a store never mixes programs built with different ports.
+	const auto ports = Config::ShaderPortMask();
+	return std::filesystem::path("_PipelineCache") /
+	       (title_id + (ports != 0 ? fmt::format(".ports{:x}", ports) : std::string {}) + ".shaders");
 }
 
 bool GraphicsPipelineKey::operator==(const GraphicsPipelineKey& other) const {

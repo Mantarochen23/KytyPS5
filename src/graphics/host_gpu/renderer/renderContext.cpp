@@ -2,6 +2,7 @@
 
 #include "common/assert.h"
 #include "common/logging/log.h"
+#include "common/ports.h"
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/presentation/videoOut.h"
 #include "libs/errno.h"
@@ -21,6 +22,7 @@ RenderContext::RenderContext(GraphicContext& graphics, const std::filesystem::pa
       m_image_heap(*this, m_page_manager), m_pipeline_cache(graphics, &m_image_heap, shader_store),
       m_occlusion_queries(graphics, m_command_scheduler) {
 	EXIT_NOT_IMPLEMENTED(!Common::Thread::IsMainThread());
+	Log::WriteToConsoleAndLog(Config::PortsSummary() + "\n");
 	if (graphics.ray_query_enabled) {
 		m_ray_tracing = std::make_unique<RayTracing>(*this);
 	}

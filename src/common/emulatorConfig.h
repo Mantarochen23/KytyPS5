@@ -139,6 +139,8 @@ struct ConfigOptions {
 	// --loop-guard: evaluated loop exits per invocation before every loop of a shader is left and
 	// reported. 0 = off.
 	uint32_t                 loop_guard_limit           = 0;
+	// --disable-port: names from common/ports.h whose ported behaviour is turned off.
+	std::vector<std::string> disabled_ports;
 };
 
 void Load(const ConfigOptions& cfg);
