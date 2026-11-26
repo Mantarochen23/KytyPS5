@@ -9659,6 +9659,34 @@ void TestMalformedMemoryKindsRejected() {
   }
 }
 
+// The four-dword V# is itself read from a scalar buffer whose own V# comes from the SRT.
+void TestSrtRootedBufferDescriptor() {
+  Fixture f;
+  const auto pointer = f.Address(f.UserData(0), f.UserData(1), 4);
+  const auto srt_read = f.Emit(ValueOpcode::LoadAddressU32,
+      {pointer, Value(0u), Value(0u), Value(true)},
+      f.AddMemory({.kind = ResourceKind::ScalarAddress, .offset = 4u}, 0x100u));
+  const auto table = f.Buffer({srt_read, Value(0u), Value(64u), Value(0u)}, 0x104u);
+  const auto key = f.UserData(4u);
+  std::array<Value, 4> words{};
+  for (uint32_t word = 0; word < 4u; ++word) {
+    words[word] = f.Emit(ValueOpcode::ReadConstBuffer,
+        {table, f.Emit(ValueOpcode::IMul32, {key, Value(16u)})},
+        f.AddMemory({.kind = ResourceKind::ScalarBuffer, .offset = word * 4u}, 0x180u));
+  }
+  const auto handle = f.Buffer(words, 0x190u);
+  const auto lane = f.Emit(ValueOpcode::LaneId);
+  f.Emit(ValueOpcode::StoreBufferU8,
+      {handle, lane, Value(0u), Value(0u), Value(uint8_t{7u}), Value(true)},
+      f.AddMemory({.kind = ResourceKind::Buffer, .data_bits = 8u, .idxen = true}, 0x1a0u));
+  f.PlanAndTrack();
+
+  const auto plan = ExtractResourcePlan(f.program);
+  Check(std::ranges::any_of(plan.descriptor_sources,
+            [](const auto &source) { return source.indirect_descriptor.has_value(); }),
+        "SRT-rooted pointer descriptor was not planned");
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -9752,6 +9780,7 @@ int main(int argc, char **argv) {
     Run("live shader data collection", TestLiveShaderDataCollection);
     Run("resource limit", TestResourceLimitIsTransactional);
     Run("malformed memory kinds", TestMalformedMemoryKindsRejected);
+    Run("SRT-rooted buffer descriptor", TestSrtRootedBufferDescriptor);
   } catch (const std::exception &exception) {
     std::cerr << "resource tracking test failed: " << exception.what() << '\n';
     return 1;
