@@ -43,7 +43,7 @@ skip_lines = 0; skip_t_first = None; skip_t_last = None
 ledger_lines = []; ledger_t = None
 
 frame_re = re.compile(rb'flip_arg\s*=\s*(\d+)')
-stall_re = re.compile(rb'^\[stall\] no frame for ([\d.]+) s \(frame (\d+)\): render thread in \'([^\']*)\' (.*?) for ([\d.]+) s; shader hash\s*=\s*(\S+) stage=([^;\s]+)')
+stall_re = re.compile(rb'^\[stall\] no frame for ([\d.]+) s \(frame (\d+)\): render thread in \'([^\']*)\'\s*(.*?)\s*for ([\d.]+) s; shader hash\s*=\s*(\S+) stage=([^;\s]+)')
 queue_re = re.compile(rb'^\[wait\] queue (\S+) \(([^)]+)\): (.*)$')
 suspend_re = re.compile(rb'suspended for shader (\S+) for ([\d.]+) s')
 memwait_re = re.compile(rb'(\w+) on memory (\S+) mask (\S+) compare (.*?), value at last poll (\S+);.*?polled (\d+) times in ([\d.]+) s')
@@ -239,7 +239,7 @@ timeline = dict(last_frame_t=last_frame_t, frames=frame_count, frames_per_10s=di
 findings['timeline'] = timeline
 
 stall_list = []
-for (secs, frame), g in sorted(stalls.items(), key=lambda kv: (-float(kv[0][0]), str(kv[0][1]))):
+for (secs, frame), g in sorted(stalls.items(), key=lambda kv: (-(float(kv[0][0]) if str(kv[0][0]).replace('.', '', 1).isdigit() else -1.0), str(kv[0][1]))):
     item = dict(seconds=g['seconds'], frame=g['frame'], t_first=g['t_first'], t_last=g['t_last'],
                 phases=g['phases'])
     if 'raw' in g: item['raw'] = g['raw']
