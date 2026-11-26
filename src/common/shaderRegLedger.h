@@ -2,6 +2,9 @@
 #define KYTY_COMMON_SHADER_REG_LEDGER_H_
 
 #include <cstdint>
+#include <memory>
+#include <string_view>
+#include <vector>
 
 namespace Common::ShaderRegLedger {
 
@@ -18,15 +21,31 @@ enum class Stage : uint8_t {
 };
 
 void Initialize();
+void Shutdown();
 void NoteCreateCall();
 void NoteRegistration(uint64_t hash, Stage stage);
+struct DumpRegistrationInfo {
+	std::string_view binary_stage;
+	uint32_t         registered_size_bytes = 0;
+	uint32_t         translated_size_bytes = 0;
+	uint32_t         scratch_size_dwords   = 0;
+	uint32_t         input_semantics       = 0;
+	uint32_t         direct_resources      = 0;
+	uint32_t         sharp_resources       = 0;
+	uint32_t         eud_size_dwords       = 0;
+	uint32_t         srt_size_dwords       = 0;
+};
+// The shared immutable copy is the same one retained by the shader map. The enqueue path never
+// waits for queue space or the writer lock; a contended/full queue drops the dump and counts it.
+void DumpRegistration(uint64_t hash, const DumpRegistrationInfo& info,
+                      std::shared_ptr<const std::vector<uint32_t>> code);
 void NoteUse(uint64_t hash, Stage stage, uint64_t variant_key);
 void PrintSummary();
 
 struct Lifecycle {
 	static constexpr const char* name               = "ShaderRegLedger";
 	static constexpr auto        initialize         = Initialize;
-	static constexpr auto        shutdown           = PrintSummary;
+	static constexpr auto        shutdown           = Shutdown;
 	static constexpr auto        emergency_shutdown = PrintSummary;
 };
 

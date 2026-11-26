@@ -79,6 +79,21 @@ static Common::ShaderRegLedger::Stage LedgerStage(Prospero::ShaderBinaryType typ
 	}
 }
 
+static const char* RegistrationStage(Prospero::ShaderBinaryType type) {
+	switch (type) {
+		case Prospero::ShaderBinaryType::kCs: return "cs";
+		case Prospero::ShaderBinaryType::kPs: return "ps";
+		case Prospero::ShaderBinaryType::kGs: return "gs";
+		case Prospero::ShaderBinaryType::kHs: return "hs";
+		case Prospero::ShaderBinaryType::kGsFront: return "gs-front";
+		case Prospero::ShaderBinaryType::kHsFront: return "hs-front";
+		case Prospero::ShaderBinaryType::kGsBack: return "gs-back";
+		case Prospero::ShaderBinaryType::kHsBack: return "hs-back";
+		case Prospero::ShaderBinaryType::kFs: return "fs";
+		default: return "unknown";
+	}
+}
+
 void ShaderInit() {
 	EXIT_IF(g_shader_map != nullptr);
 
@@ -115,6 +130,22 @@ void ShaderMapUserData(uint64_t addr, const ShaderMappedData& data) {
 	Common::ShaderRegLedger::NoteRegistration(hash, LedgerStage(data.type));
 	auto       code_copy   = std::make_shared<std::vector<uint32_t>>(
 	    binary, binary + mapped.code_size_bytes / sizeof(uint32_t));
+	uint32_t sharp_resources = 0;
+	if (data.user_data != nullptr) {
+		for (const auto count: data.user_data->sharp_resource_count) sharp_resources += count;
+	}
+	Common::ShaderRegLedger::DumpRegistration(
+	    hash,
+	    {.binary_stage          = RegistrationStage(data.type),
+	     .registered_size_bytes = data.code_size_bytes,
+	     .translated_size_bytes = mapped.code_size_bytes,
+	     .scratch_size_dwords   = data.scratch_size_dwords,
+	     .input_semantics       = data.num_input_semantics,
+	     .direct_resources      = data.user_data != nullptr ? data.user_data->direct_resource_count : 0,
+	     .sharp_resources       = sharp_resources,
+	     .eud_size_dwords       = data.user_data != nullptr ? data.user_data->eud_size_dw : 0,
+	     .srt_size_dwords       = data.user_data != nullptr ? data.user_data->srt_size_dw : 0},
+	    code_copy);
 	mapped.vertex_error =
 	    ShaderReadVertexMetadata(data, HW::UserSgprInfo::SGPRS_MAX, mapped.vertex);
 	std::scoped_lock lock(g_shader_map_mutex);

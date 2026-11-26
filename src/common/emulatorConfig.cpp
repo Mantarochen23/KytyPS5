@@ -514,4 +514,9 @@ uint32_t RenderStallReportSeconds() {
 	return g_config != nullptr ? g_config->render_stall_report_s : 5u;
 }
 
+const std::filesystem::path& GetRegisteredShaderDumpFolder() {
+	static const std::filesystem::path none;
+	return g_config != nullptr ? g_config->dump_registered_shaders_folder : none;
+}
+
 } // namespace Config

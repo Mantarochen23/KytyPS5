@@ -153,6 +153,9 @@ struct ConfigOptions {
 	// --render-stall-report-s: when no frame was recorded for this many seconds, print one line
 	// with what the render thread is doing, then again every that many seconds. 0 = off.
 	uint32_t                 render_stall_report_s      = 5;
+	// --dump-registered-shaders: copy each distinct registered shader and an index record here.
+	// Empty = off.
+	std::filesystem::path    dump_registered_shaders_folder;
 };
 
 void Load(const ConfigOptions& cfg);
@@ -259,6 +262,7 @@ uint32_t AsyncPumpBudgetMs();
 uint32_t AsyncWorkers();
 bool     AsyncSpeculativeModules();
 uint32_t RenderStallReportSeconds();
+const std::filesystem::path& GetRegisteredShaderDumpFolder();
 
 } // namespace Config
 
