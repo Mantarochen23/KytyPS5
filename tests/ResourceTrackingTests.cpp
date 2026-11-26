@@ -5,6 +5,7 @@
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceTracking.h"
 #include "graphics/shader/recompiler/ir/passes/ShaderInfoCollection.h"
+#include "graphics/host_gpu/renderer/pipeline/shaderStoreCapability.h"
 #include "SrtWalkerTestMemory.h"
 
 #include <array>
@@ -9659,6 +9660,19 @@ void TestMalformedMemoryKindsRejected() {
   }
 }
 
+void TestTranslatorCapabilityVersion() {
+  using Libs::Graphics::FailureCacheApplies;
+  using Libs::Graphics::kTranslatorCapabilityVersion;
+  Check(kTranslatorCapabilityVersion >= 2u,
+        "translator capability version was not bumped with the pointer-descriptor fix");
+  Check(FailureCacheApplies(kTranslatorCapabilityVersion),
+        "a failure recorded by the current translator was discarded");
+  Check(!FailureCacheApplies(kTranslatorCapabilityVersion - 1u),
+        "a stale negative-cache entry would survive a translator fix");
+  Check(!FailureCacheApplies(kTranslatorCapabilityVersion + 1u),
+        "a future translator generation was treated as current");
+}
+
 // The four-dword V# is itself read from a scalar buffer whose own V# comes from the SRT.
 void TestSrtRootedBufferDescriptor() {
   Fixture f;
@@ -9781,6 +9795,7 @@ int main(int argc, char **argv) {
     Run("resource limit", TestResourceLimitIsTransactional);
     Run("malformed memory kinds", TestMalformedMemoryKindsRejected);
     Run("SRT-rooted buffer descriptor", TestSrtRootedBufferDescriptor);
+    Run("translator capability version", TestTranslatorCapabilityVersion);
   } catch (const std::exception &exception) {
     std::cerr << "resource tracking test failed: " << exception.what() << '\n';
     return 1;
