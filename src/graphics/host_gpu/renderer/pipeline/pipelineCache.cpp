@@ -8,6 +8,7 @@
 #include "common/parallelFor.h"
 #include "common/profiler.h"
 #include "common/recoverable.h"
+#include "common/shaderRegLedger.h"
 #include "common/threads.h"
 #include "graphics/guest_gpu/gpu_format.h"
 #include "graphics/guest_gpu/hardwareContext.h"
@@ -54,6 +55,21 @@ constexpr auto DriverCacheSaveInterval = std::chrono::minutes {1};
 constexpr uint32_t SmallTargetSyncPixels = 1024;
 // A G-buffer pass writes at least two color targets, each at least this many pixels each way.
 constexpr uint32_t GbufferMinPixels = 256;
+
+// Host stage to the same coarse buckets used at registration.
+static Common::ShaderRegLedger::Stage LedgerStage(ShaderType type) {
+	using Stage = Common::ShaderRegLedger::Stage;
+	switch (type) {
+		case ShaderType::Compute: return Stage::Compute;
+		case ShaderType::Pixel: return Stage::Pixel;
+		case ShaderType::Vertex:
+		case ShaderType::Mesh: return Stage::Geometry;
+		case ShaderType::TessellationControl:
+		case ShaderType::TessellationEvaluation: return Stage::Hull;
+		case ShaderType::Local: return Stage::Front;
+		default: return Stage::Unknown;
+	}
+}
 
 uint8_t RemapSourceAlphaFactor(uint8_t factor) {
 	switch (static_cast<Prospero::BlendFactor>(factor)) {
@@ -174,6 +190,21 @@ void ValidateShaderSpirv(const char* stage, uint64_t shader_hash,
 }
 
 } // namespace
+
+// Allocation-free identity of the current lookup key: the hash itself is already the ledger's
+// per-hash dimension, so only the variant bits need to be folded in here.
+uint64_t PipelineCache::ProgramVariantKey() const {
+	uint64_t value = 1469598103934665603ull; // FNV-1a offset basis.
+	const auto mix = [&](uint64_t word) {
+		value ^= word;
+		value *= 1099511628211ull;
+	};
+	mix(static_cast<uint64_t>(m_lookup_key.stage));
+	mix(m_lookup_key.hash);
+	mix(m_lookup_key.user_data_count);
+	for (const auto word: m_lookup_key.static_state) mix(word);
+	return value;
+}
 
 ShaderRecompiler::Spirv::Profile SpirvProfile(const GraphicContext& graphics) {
 	// AMD GPUs (vendor 0x1002) run NMin/NMax as v_min/v_max, which give the guest's NaN and
@@ -474,6 +505,7 @@ const ShaderModule* PipelineCache::GetProgramImpl(const ShaderParams& params, In
 	m_lookup_key.user_data_count = params.user_data_count;
 	BuildStageStaticKey(input_info, m_lookup_key.static_state);
 	m_lookup_key_ready = true;
+	Common::ShaderRegLedger::NoteUse(params.hash, LedgerStage(options.stage), ProgramVariantKey());
 	auto entry = m_program_cache.find(m_lookup_key);
 	const auto bind = [&](const ShaderModule& module) {
 		input_info.stage = {.module = &module, .resources = &entry->second.resources};

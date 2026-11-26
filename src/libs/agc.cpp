@@ -4,6 +4,7 @@
 #include "common/emulatorConfig.h"
 #include "common/file.h"
 #include "common/logging/log.h"
+#include "common/shaderRegLedger.h"
 #include "common/stringUtils.h"
 #include "graphics/guest_gpu/command_processor/commandProcessor.h"
 #include "graphics/guest_gpu/gpu_defs.h"
@@ -602,6 +603,10 @@ int KYTY_SYSV_ABI AgcCreateShader(Shader** dst, void* header, const volatile voi
 	EXIT_NOT_IMPLEMENTED(dst == nullptr);
 	EXIT_NOT_IMPLEMENTED(header == nullptr);
 	EXIT_NOT_IMPLEMENTED(code == nullptr);
+
+	// ShaderMapUserData below records the hashed registration; count the raw API calls here so
+	// repeat creations are visible without double counting the per-(hash, stage) ledger.
+	Common::ShaderRegLedger::NoteCreateCall();
 
 	AgcTrace("\t header = 0x%016" PRIx64 "\n"
 	         "\t code   = 0x%016" PRIx64 "\n",

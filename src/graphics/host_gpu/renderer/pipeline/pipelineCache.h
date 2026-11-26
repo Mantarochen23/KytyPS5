@@ -330,6 +330,8 @@ private:
 	void NoteSkippedUse(uint64_t hash);
 	bool                                   m_lookup_key_ready = false;
 	bool                                   m_last_deferred    = false;
+	// Allocation-free identity of m_lookup_key for the bringup ledger's variant count.
+	[[nodiscard]] uint64_t                 ProgramVariantKey() const;
 	std::unordered_map<uint64_t, uint64_t> m_skipped_uses; // By shader hash.
 	ShaderModule& CompileModule(Program& program, const ProgramKey& key,
 	                            ShaderRecompiler::CompileOptions       options,
