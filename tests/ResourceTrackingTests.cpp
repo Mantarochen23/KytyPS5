@@ -9822,8 +9822,8 @@ int main(int argc, char **argv) {
     Run("live shader data collection", TestLiveShaderDataCollection);
     Run("resource limit", TestResourceLimitIsTransactional);
     Run("malformed memory kinds", TestMalformedMemoryKindsRejected);
-    Run("SRT-rooted buffer descriptor", TestSrtRootedBufferDescriptor);
-    Run("SRT-rooted buffer store", TestSrtRootedBufferStore);
+    Run("srt-descriptor", TestSrtRootedBufferDescriptor);
+    Run("srt-store", TestSrtRootedBufferStore);
     Run("translator capability version", TestTranslatorCapabilityVersion);
   } catch (const std::exception &exception) {
     std::cerr << "resource tracking test failed: " << exception.what() << '\n';
