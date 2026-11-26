@@ -6,8 +6,10 @@
 
 #include <array>
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <mutex>
+#include <thread>
 #include <vector>
 #include <vk_mem_alloc.h>
 
@@ -67,7 +69,7 @@ struct OpBreadcrumb {
 class GpuBreadcrumbTracker {
 public:
 	GpuBreadcrumbTracker() = default;
-	~GpuBreadcrumbTracker() = default;
+	~GpuBreadcrumbTracker();
 	KYTY_CLASS_NO_COPY(GpuBreadcrumbTracker);
 
 	void Init(GraphicContext& graphics);
@@ -113,8 +115,25 @@ private:
 	vk::Buffer                         m_marker_buffer     = nullptr;
 	VmaAllocation                      m_marker_allocation = nullptr;
 	volatile uint32_t*                 m_marker_mapped     = nullptr;
-	bool                               m_emit_debug_labels = false;
-	std::atomic_flag                   m_reported          = ATOMIC_FLAG_INIT;
+	bool                               m_emit_debug_labels        = false;
+	bool                               m_device_fault_ext_enabled = false;
+	VkDevice                           m_vk_device                = VK_NULL_HANDLE;
+	PFN_vkGetDeviceFaultInfoEXT        m_vk_get_device_fault_info = nullptr;
+	std::atomic_flag                   m_reported                 = ATOMIC_FLAG_INIT;
+	std::atomic<bool>                  m_fault_shutdown {false};
+	std::atomic<bool>                  m_fault_request {false};
+	std::atomic<bool>                  m_fault_done {false};
+#if KYTY_PLATFORM != KYTY_PLATFORM_WINDOWS
+	int m_wake_pipe[2] = {-1, -1};
+#else
+	std::mutex              m_fault_mutex;
+	std::condition_variable m_fault_cv;
+#endif
+	std::thread             m_fault_thread;
+	std::array<char, 8192>  m_report_buf {};
+
+	void FaultWorkerLoop();
+	void WakeFaultWorker();
 };
 
 void ReportDeviceLost(GraphicContext& graphics, const char* operation, vk::Result result,

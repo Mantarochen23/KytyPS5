@@ -8,6 +8,7 @@
 #include "graphics/shader/shader.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
@@ -15,8 +16,13 @@
 #include <fmt/format.h>
 #include <string>
 #include <string_view>
-#include <unordered_set>
-#include <vector>
+#include <thread>
+
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
 
 namespace Libs::Graphics {
 
@@ -28,7 +34,61 @@ constexpr vk::DeviceSize kOffsetSubmitFinished = 4;
 constexpr vk::DeviceSize kOffsetOpStarted      = 8;
 constexpr vk::DeviceSize kOffsetOpFinished     = 12;
 
-constexpr uint32_t kMaxFaultRecords = 4096;
+constexpr uint32_t kMaxFaultRecords = 64;
+
+void WriteRawStderr(const char* data, size_t len) {
+	while (len > 0) {
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+		const int written = ::_write(2, data, static_cast<unsigned int>(len));
+#else
+		const ssize_t written = ::write(STDERR_FILENO, data, len);
+#endif
+		if (written <= 0) {
+			break;
+		}
+		data += written;
+		len -= static_cast<size_t>(written);
+	}
+}
+
+// Streaming fixed-buffer formatter: zero heap allocations, flushes directly to stderr.
+class FixedStderrSink {
+public:
+	explicit FixedStderrSink(std::array<char, 8192>& buf): m_buf(buf) {}
+	~FixedStderrSink() { Flush(); }
+
+	void Flush() {
+		if (m_pos > 0) {
+			WriteRawStderr(m_buf.data(), m_pos);
+			m_pos = 0;
+		}
+	}
+
+	void Append(std::string_view sv) {
+		while (!sv.empty()) {
+			if (m_pos == m_buf.size()) {
+				Flush();
+			}
+			const size_t chunk = std::min(sv.size(), m_buf.size() - m_pos);
+			std::memcpy(m_buf.data() + m_pos, sv.data(), chunk);
+			m_pos += chunk;
+			sv.remove_prefix(chunk);
+		}
+	}
+
+	template <typename... Args>
+	void Printf(fmt::format_string<Args...> fmt_str, Args&&... args) {
+		std::array<char, 1024> tmp;
+		const auto res = fmt::format_to_n(tmp.data(), tmp.size(), fmt_str,
+		                                  std::forward<Args>(args)...);
+		const size_t len = std::min(res.size, tmp.size());
+		Append({tmp.data(), len});
+	}
+
+private:
+	std::array<char, 8192>& m_buf;
+	size_t                  m_pos = 0;
+};
 
 [[nodiscard]] const char* OpKindName(BreadcrumbOpKind kind) {
 	switch (kind) {
@@ -45,17 +105,17 @@ constexpr uint32_t kMaxFaultRecords = 4096;
 	}
 }
 
-[[nodiscard]] const char* FaultAddressTypeName(vk::DeviceFaultAddressTypeEXT type) {
+[[nodiscard]] const char* FaultAddressTypeName(VkDeviceFaultAddressTypeEXT type) {
 	switch (type) {
-		case vk::DeviceFaultAddressTypeEXT::eNone: return "None";
-		case vk::DeviceFaultAddressTypeEXT::eReadInvalid: return "ReadInvalid";
-		case vk::DeviceFaultAddressTypeEXT::eWriteInvalid: return "WriteInvalid";
-		case vk::DeviceFaultAddressTypeEXT::eExecuteInvalid: return "ExecuteInvalid";
-		case vk::DeviceFaultAddressTypeEXT::eInstructionPointerUnknown:
+		case VK_DEVICE_FAULT_ADDRESS_TYPE_NONE_EXT: return "None";
+		case VK_DEVICE_FAULT_ADDRESS_TYPE_READ_INVALID_EXT: return "ReadInvalid";
+		case VK_DEVICE_FAULT_ADDRESS_TYPE_WRITE_INVALID_EXT: return "WriteInvalid";
+		case VK_DEVICE_FAULT_ADDRESS_TYPE_EXECUTE_INVALID_EXT: return "ExecuteInvalid";
+		case VK_DEVICE_FAULT_ADDRESS_TYPE_INSTRUCTION_POINTER_UNKNOWN_EXT:
 			return "InstructionPointerUnknown";
-		case vk::DeviceFaultAddressTypeEXT::eInstructionPointerInvalid:
+		case VK_DEVICE_FAULT_ADDRESS_TYPE_INSTRUCTION_POINTER_INVALID_EXT:
 			return "InstructionPointerInvalid";
-		case vk::DeviceFaultAddressTypeEXT::eInstructionPointerFault:
+		case VK_DEVICE_FAULT_ADDRESS_TYPE_INSTRUCTION_POINTER_FAULT_EXT:
 			return "InstructionPointerFault";
 		default: return "Unknown";
 	}
@@ -77,53 +137,87 @@ constexpr uint32_t kMaxFaultRecords = 4096;
 	return env != nullptr && env[0] != '\0';
 }
 
-[[nodiscard]] std::string FormatOpStages(const OpBreadcrumb& op) {
-	std::string out;
+void FormatOpStages(FixedStderrSink& out, const OpBreadcrumb& op) {
 	for (uint8_t i = 0; i < op.stage_count && i < op.stages.size(); ++i) {
-		if (!out.empty()) {
-			out += ' ';
+		if (i != 0) {
+			out.Append(" ");
 		}
-		out += fmt::format("{}=0x{:016x}", ShaderRecompiler::StageName(op.stages[i].stage),
+		out.Printf("{}=0x{:016x}", ShaderRecompiler::StageName(op.stages[i].stage),
+		           op.stages[i].hash);
+	}
+}
+
+void FormatOpLine(FixedStderrSink& out, const OpBreadcrumb& op) {
+	out.Append(OpKindName(op.kind));
+	out.Append(" ");
+	switch (op.kind) {
+		case BreadcrumbOpKind::Dispatch:
+			out.Printf("{}x{}x{}", op.dim_x, op.dim_y, op.dim_z);
+			break;
+		case BreadcrumbOpKind::DispatchIndirect: out.Append("indirect"); break;
+		case BreadcrumbOpKind::DrawMesh:
+			out.Printf("groups={}x{}", op.dim_x, op.dim_y);
+			break;
+		case BreadcrumbOpKind::DrawMeshIndirect:
+			out.Printf("indirect_count={}", op.dim_x);
+			break;
+		case BreadcrumbOpKind::DrawIndirect:
+		case BreadcrumbOpKind::DrawIndexedIndirect:
+			out.Printf("count={} draws={} stride={}", op.dim_x, op.dim_y, op.dim_z);
+			break;
+		default: out.Printf("count={} instances={}", op.dim_x, op.dim_y); break;
+	}
+	out.Append(" ");
+	FormatOpStages(out, op);
+}
+
+[[nodiscard]] std::string FormatOpLineString(const OpBreadcrumb& op) {
+	std::string out = OpKindName(op.kind);
+	out += ' ';
+	switch (op.kind) {
+		case BreadcrumbOpKind::Dispatch:
+			out += fmt::format("{}x{}x{}", op.dim_x, op.dim_y, op.dim_z);
+			break;
+		case BreadcrumbOpKind::DispatchIndirect: out += "indirect"; break;
+		case BreadcrumbOpKind::DrawMesh:
+			out += fmt::format("groups={}x{}", op.dim_x, op.dim_y);
+			break;
+		case BreadcrumbOpKind::DrawMeshIndirect:
+			out += fmt::format("indirect_count={}", op.dim_x);
+			break;
+		case BreadcrumbOpKind::DrawIndirect:
+		case BreadcrumbOpKind::DrawIndexedIndirect:
+			out += fmt::format("count={} draws={} stride={}", op.dim_x, op.dim_y, op.dim_z);
+			break;
+		default: out += fmt::format("count={} instances={}", op.dim_x, op.dim_y); break;
+	}
+	for (uint8_t i = 0; i < op.stage_count && i < op.stages.size(); ++i) {
+		out += fmt::format(" {}=0x{:016x}", ShaderRecompiler::StageName(op.stages[i].stage),
 		                   op.stages[i].hash);
 	}
 	return out;
 }
 
-[[nodiscard]] std::string FormatOpLine(const OpBreadcrumb& op) {
-	std::string dims;
-	switch (op.kind) {
-		case BreadcrumbOpKind::Dispatch:
-			dims = fmt::format("{}x{}x{}", op.dim_x, op.dim_y, op.dim_z);
-			break;
-		case BreadcrumbOpKind::DispatchIndirect: dims = "indirect"; break;
-		case BreadcrumbOpKind::DrawMesh:
-			dims = fmt::format("groups={}x{}", op.dim_x, op.dim_y);
-			break;
-		case BreadcrumbOpKind::DrawMeshIndirect:
-			dims = fmt::format("indirect_count={}", op.dim_x);
-			break;
-		case BreadcrumbOpKind::DrawIndirect:
-		case BreadcrumbOpKind::DrawIndexedIndirect:
-			dims = fmt::format("count={} draws={} stride={}", op.dim_x, op.dim_y, op.dim_z);
-			break;
-		default: dims = fmt::format("count={} instances={}", op.dim_x, op.dim_y); break;
-	}
-	return fmt::format("{} {} {}", OpKindName(op.kind), dims, FormatOpStages(op));
-}
-
-void QueryDeviceFaultExt(const GraphicContext& graphics, std::string& report) {
-	if (!graphics.device_fault_ext_enabled || graphics.device == nullptr ||
-	    VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceFaultInfoEXT == nullptr) {
-		report += fmt::format("VK_EXT_device_fault: unavailable (enabled={})\n",
-		                      graphics.device_fault_ext_enabled ? "true" : "false");
+void QueryDeviceFaultExt(VkDevice device, bool enabled, PFN_vkGetDeviceFaultInfoEXT pfn) {
+	std::array<char, 8192> buf {};
+	FixedStderrSink        out(buf);
+	out.Append("=== GPU DEVICE FAULT INFO ===\n");
+	if (!enabled || device == VK_NULL_HANDLE || pfn == nullptr) {
+		out.Printf("VK_EXT_device_fault: unavailable (enabled={} pfn={})\n",
+		           enabled ? "true" : "false", pfn != nullptr ? "present" : "null");
+		out.Append("=== END GPU DEVICE FAULT INFO ===\n");
+		out.Flush();
 		return;
 	}
 
-	vk::DeviceFaultCountsEXT counts {};
-	const auto               count_result = graphics.device.getFaultInfoEXT(&counts, nullptr);
+	VkDeviceFaultCountsEXT counts {};
+	counts.sType       = VK_STRUCTURE_TYPE_DEVICE_FAULT_COUNTS_EXT;
+	counts.pNext       = nullptr;
+	const auto count_result = static_cast<vk::Result>(pfn(device, &counts, nullptr));
 	if (count_result != vk::Result::eSuccess && count_result != vk::Result::eIncomplete) {
-		report += fmt::format("VK_EXT_device_fault: count query failed ({})\n",
-		                      vk::to_string(count_result));
+		out.Printf("VK_EXT_device_fault: count query failed ({})\n", vk::to_string(count_result));
+		out.Append("=== END GPU DEVICE FAULT INFO ===\n");
+		out.Flush();
 		return;
 	}
 
@@ -131,54 +225,110 @@ void QueryDeviceFaultExt(const GraphicContext& graphics, std::string& report) {
 	const uint32_t address_count       = std::min(counts.addressInfoCount, kMaxFaultRecords);
 	const uint32_t vendor_count        = std::min(counts.vendorInfoCount, kMaxFaultRecords);
 
-	std::vector<vk::DeviceFaultAddressInfoEXT> addresses(address_count);
-	std::vector<vk::DeviceFaultVendorInfoEXT>  vendors(vendor_count);
+	std::array<VkDeviceFaultAddressInfoEXT, kMaxFaultRecords> addresses {};
+	std::array<VkDeviceFaultVendorInfoEXT, kMaxFaultRecords>  vendors {};
 
 	counts.addressInfoCount = address_count;
 	counts.vendorInfoCount  = vendor_count;
 	// Do not copy raw vendor binary dumps into the text log.
 	counts.vendorBinarySize = 0;
 
-	vk::DeviceFaultInfoEXT info {};
-	info.pAddressInfos     = addresses.empty() ? nullptr : addresses.data();
-	info.pVendorInfos      = vendors.empty() ? nullptr : vendors.data();
+	VkDeviceFaultInfoEXT info {};
+	info.sType             = VK_STRUCTURE_TYPE_DEVICE_FAULT_INFO_EXT;
+	info.pNext             = nullptr;
+	info.pAddressInfos     = address_count != 0 ? addresses.data() : nullptr;
+	info.pVendorInfos      = vendor_count != 0 ? vendors.data() : nullptr;
 	info.pVendorBinaryData = nullptr;
 
-	const auto info_result = graphics.device.getFaultInfoEXT(&counts, &info);
+	const auto info_result = static_cast<vk::Result>(pfn(device, &counts, &info));
 	if (info_result != vk::Result::eSuccess && info_result != vk::Result::eIncomplete) {
-		report += fmt::format("VK_EXT_device_fault: info query failed ({})\n",
-		                      vk::to_string(info_result));
+		out.Printf("VK_EXT_device_fault: info query failed ({})\n", vk::to_string(info_result));
+		out.Append("=== END GPU DEVICE FAULT INFO ===\n");
+		out.Flush();
 		return;
 	}
 
-	const auto desc = SafeDescription(info.description.data(), info.description.size());
-	report += fmt::format(
-	    "VK_EXT_device_fault: description=\"{}\" addresses={} vendor_infos={} "
-	    "vendor_binary_bytes={}\n",
-	    desc, counts.addressInfoCount, counts.vendorInfoCount, vendor_binary_bytes);
+	const auto desc = SafeDescription(info.description, sizeof(info.description));
+	out.Printf("VK_EXT_device_fault: description=\"{}\" addresses={} vendor_infos={} "
+	           "vendor_binary_bytes={}\n",
+	           desc, counts.addressInfoCount, counts.vendorInfoCount, vendor_binary_bytes);
 
-	const uint32_t reported_addresses =
-	    std::min(counts.addressInfoCount, static_cast<uint32_t>(addresses.size()));
+	const uint32_t reported_addresses = std::min(counts.addressInfoCount, address_count);
 	for (uint32_t i = 0; i < reported_addresses; ++i) {
 		const auto& addr = addresses[i];
-		report += fmt::format("  fault_addr[{}]: type={} ({}) gpu_va=0x{:016x} precision=0x{:x}\n",
-		                      i, FaultAddressTypeName(addr.addressType),
-		                      static_cast<int>(addr.addressType), addr.reportedAddress,
-		                      addr.addressPrecision);
+		out.Printf("  fault_addr[{}]: type={} ({}) gpu_va=0x{:016x} precision=0x{:x}\n", i,
+		           FaultAddressTypeName(addr.addressType), static_cast<int>(addr.addressType),
+		           addr.reportedAddress, addr.addressPrecision);
 	}
 
-	const uint32_t reported_vendors =
-	    std::min(counts.vendorInfoCount, static_cast<uint32_t>(vendors.size()));
+	const uint32_t reported_vendors = std::min(counts.vendorInfoCount, vendor_count);
 	for (uint32_t i = 0; i < reported_vendors; ++i) {
 		const auto& v     = vendors[i];
-		const auto  vdesc = SafeDescription(v.description.data(), v.description.size());
-		report += fmt::format(
-		    "  fault_vendor[{}]: code=0x{:016x} data=0x{:016x} desc=\"{}\"\n", i,
-		    v.vendorFaultCode, v.vendorFaultData, vdesc);
+		const auto  vdesc = SafeDescription(v.description, sizeof(v.description));
+		out.Printf("  fault_vendor[{}]: code=0x{:016x} data=0x{:016x} desc=\"{}\"\n", i,
+		           v.vendorFaultCode, v.vendorFaultData, vdesc);
 	}
+	out.Append("=== END GPU DEVICE FAULT INFO ===\n");
+	out.Flush();
 }
 
 } // namespace
+
+GpuBreadcrumbTracker::~GpuBreadcrumbTracker() {
+	m_fault_shutdown.store(true, std::memory_order_release);
+	WakeFaultWorker();
+	if (m_fault_thread.joinable()) {
+		m_fault_thread.join();
+	}
+#if KYTY_PLATFORM != KYTY_PLATFORM_WINDOWS
+	if (m_wake_pipe[0] >= 0) {
+		::close(m_wake_pipe[0]);
+		m_wake_pipe[0] = -1;
+	}
+	if (m_wake_pipe[1] >= 0) {
+		::close(m_wake_pipe[1]);
+		m_wake_pipe[1] = -1;
+	}
+#endif
+}
+
+void GpuBreadcrumbTracker::WakeFaultWorker() {
+#if KYTY_PLATFORM != KYTY_PLATFORM_WINDOWS
+	if (m_wake_pipe[1] >= 0) {
+		const uint8_t b = 1;
+		(void)::write(m_wake_pipe[1], &b, 1);
+	}
+#else
+	m_fault_cv.notify_one();
+#endif
+}
+
+void GpuBreadcrumbTracker::FaultWorkerLoop() {
+	for (;;) {
+#if KYTY_PLATFORM != KYTY_PLATFORM_WINDOWS
+		uint8_t b = 0;
+		if (m_wake_pipe[0] >= 0) {
+			(void)::read(m_wake_pipe[0], &b, 1);
+		}
+#else
+		{
+			std::unique_lock lk(m_fault_mutex);
+			m_fault_cv.wait(lk, [this] {
+				return m_fault_shutdown.load(std::memory_order_acquire) ||
+				       m_fault_request.load(std::memory_order_acquire);
+			});
+		}
+#endif
+		if (m_fault_shutdown.load(std::memory_order_acquire)) {
+			break;
+		}
+		if (m_fault_request.exchange(false, std::memory_order_acq_rel)) {
+			QueryDeviceFaultExt(m_vk_device, m_device_fault_ext_enabled,
+			                    m_vk_get_device_fault_info);
+			m_fault_done.store(true, std::memory_order_release);
+		}
+	}
+}
 
 void GpuBreadcrumbTracker::Init(GraphicContext& graphics) {
 	std::lock_guard lock(m_mutex);
@@ -186,6 +336,34 @@ void GpuBreadcrumbTracker::Init(GraphicContext& graphics) {
 	    graphics.debug_utils_ext_enabled &&
 	    VULKAN_HPP_DEFAULT_DISPATCHER.vkCmdInsertDebugUtilsLabelEXT != nullptr &&
 	    (Config::GraphicsDebugDumpEnabled() || RadvDebugEnabled());
+
+	m_vk_device                = static_cast<VkDevice>(graphics.device);
+	m_device_fault_ext_enabled = graphics.device_fault_ext_enabled;
+	if (m_device_fault_ext_enabled && m_vk_device != VK_NULL_HANDLE &&
+	    VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceProcAddr != nullptr) {
+		m_vk_get_device_fault_info = reinterpret_cast<PFN_vkGetDeviceFaultInfoEXT>(
+		    VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceProcAddr(m_vk_device,
+		                                                      "vkGetDeviceFaultInfoEXT"));
+	} else {
+		m_vk_get_device_fault_info = nullptr;
+	}
+
+	if (!m_fault_thread.joinable()) {
+		m_fault_shutdown.store(false, std::memory_order_release);
+		m_fault_request.store(false, std::memory_order_release);
+		m_fault_done.store(false, std::memory_order_release);
+#if KYTY_PLATFORM != KYTY_PLATFORM_WINDOWS
+		if (m_wake_pipe[0] < 0 && ::pipe(m_wake_pipe) != 0) {
+			m_wake_pipe[0] = -1;
+			m_wake_pipe[1] = -1;
+		}
+		if (m_wake_pipe[0] >= 0) {
+			m_fault_thread = std::thread(&GpuBreadcrumbTracker::FaultWorkerLoop, this);
+		}
+#else
+		m_fault_thread = std::thread(&GpuBreadcrumbTracker::FaultWorkerLoop, this);
+#endif
+	}
 
 	if (graphics.allocator == nullptr || m_marker_buffer != nullptr) {
 		return;
@@ -224,13 +402,31 @@ void GpuBreadcrumbTracker::Init(GraphicContext& graphics) {
 }
 
 void GpuBreadcrumbTracker::Shutdown(GraphicContext& graphics) {
+	m_fault_shutdown.store(true, std::memory_order_release);
+	WakeFaultWorker();
+	if (m_fault_thread.joinable()) {
+		m_fault_thread.join();
+	}
+#if KYTY_PLATFORM != KYTY_PLATFORM_WINDOWS
+	if (m_wake_pipe[0] >= 0) {
+		::close(m_wake_pipe[0]);
+		m_wake_pipe[0] = -1;
+	}
+	if (m_wake_pipe[1] >= 0) {
+		::close(m_wake_pipe[1]);
+		m_wake_pipe[1] = -1;
+	}
+#endif
 	std::lock_guard lock(m_mutex);
 	if (m_marker_buffer != nullptr && graphics.allocator != nullptr) {
 		vmaDestroyBuffer(graphics.allocator, m_marker_buffer, m_marker_allocation);
 	}
-	m_marker_buffer     = nullptr;
-	m_marker_allocation = nullptr;
-	m_marker_mapped     = nullptr;
+	m_marker_buffer            = nullptr;
+	m_marker_allocation        = nullptr;
+	m_marker_mapped            = nullptr;
+	m_vk_device                = VK_NULL_HANDLE;
+	m_device_fault_ext_enabled = false;
+	m_vk_get_device_fault_info = nullptr;
 }
 
 void GpuBreadcrumbTracker::BeginSubmit(GraphicContext& graphics, vk::CommandBuffer cmd,
@@ -305,7 +501,7 @@ uint32_t GpuBreadcrumbTracker::BeginOp(GraphicContext& graphics, vk::CommandBuff
 		}
 		if (emit_label) {
 			const auto label_text =
-			    fmt::format("submit={} op={} {}", submit_seq, op.marker_id, FormatOpLine(op));
+			    fmt::format("submit={} op={} {}", submit_seq, op.marker_id, FormatOpLineString(op));
 			vk::DebugUtilsLabelEXT label {};
 			label.pLabelName = label_text.c_str();
 			cmd.insertDebugUtilsLabelEXT(&label);
@@ -376,59 +572,47 @@ void GpuBreadcrumbTracker::ReportDeviceLost(GraphicContext& graphics, const char
 		return;
 	}
 
-	std::string report;
-	report.reserve(4096);
-	report += "=== GPU DEVICE LOST TRIAGE ===\n";
+	FixedStderrSink out(m_report_buf);
+	out.Append("=== GPU DEVICE LOST TRIAGE ===\n");
 
 	const auto& props = graphics.physical_device_properties;
-	report += fmt::format("operation={} result={} tick={} known_gpu_tick={}\n",
-	                      operation != nullptr ? operation : "?", vk::to_string(result), tick,
-	                      known_gpu_tick);
-	report += fmt::format("device=\"{}\" vendor=0x{:04x} device_id=0x{:04x} driver=0x{:08x}\n",
-	                      SafeDescription(props.deviceName.data(), props.deviceName.size()),
-	                      props.vendorID, props.deviceID, props.driverVersion);
+	out.Printf("operation={} result={} tick={} known_gpu_tick={}\n",
+	           operation != nullptr ? operation : "?", vk::to_string(result), tick,
+	           known_gpu_tick);
+	out.Printf("device=\"{}\" vendor=0x{:04x} device_id=0x{:04x} driver=0x{:08x}\n",
+	           SafeDescription(props.deviceName.data(), props.deviceName.size()), props.vendorID,
+	           props.deviceID, props.driverVersion);
 
-	QueryDeviceFaultExt(graphics, report);
+	// Signal-handler safe: never block on m_mutex if the interrupted thread holds it.
+	std::unique_lock lock(m_mutex, std::try_to_lock);
+	const bool       locked               = lock.owns_lock();
+	uint32_t         gpu_submit_started   = 0;
+	uint32_t         gpu_submit_finished  = 0;
+	uint32_t         gpu_op_started       = 0;
+	uint32_t         gpu_op_finished      = 0;
+	bool             has_gpu_markers      = false;
+	uint64_t         effective_known_tick = known_gpu_tick;
 
-	uint32_t gpu_submit_started  = 0;
-	uint32_t gpu_submit_finished = 0;
-	uint32_t gpu_op_started      = 0;
-	uint32_t gpu_op_finished     = 0;
-	bool     has_gpu_markers     = false;
-
-	std::vector<SubmitRecord> snapshot;
-	uint64_t                  effective_known_tick = known_gpu_tick;
-	{
-		std::lock_guard lock(m_mutex);
-		effective_known_tick = std::max(effective_known_tick, m_last_known_tick);
-		if (m_marker_mapped != nullptr) {
-			if (graphics.allocator != nullptr && m_marker_allocation != nullptr) {
-				(void)vmaInvalidateAllocation(graphics.allocator, m_marker_allocation, 0,
-				                              VK_WHOLE_SIZE);
-			}
-			gpu_submit_started  = m_marker_mapped[0];
-			gpu_submit_finished = m_marker_mapped[1];
-			gpu_op_started      = m_marker_mapped[2];
-			gpu_op_finished     = m_marker_mapped[3];
-			has_gpu_markers     = true;
+	if (m_marker_mapped != nullptr) {
+		if (graphics.allocator != nullptr && m_marker_allocation != nullptr) {
+			(void)vmaInvalidateAllocation(graphics.allocator, m_marker_allocation, 0,
+			                              VK_WHOLE_SIZE);
 		}
-		for (const auto& rec: m_submits) {
-			if (rec.state != SubmitState::Empty) {
-				snapshot.push_back(rec);
-			}
-		}
+		gpu_submit_started  = m_marker_mapped[0];
+		gpu_submit_finished = m_marker_mapped[1];
+		gpu_op_started      = m_marker_mapped[2];
+		gpu_op_finished     = m_marker_mapped[3];
+		has_gpu_markers     = true;
 	}
 
-	std::ranges::sort(snapshot, {}, &SubmitRecord::seq);
-
 	if (has_gpu_markers) {
-		report += fmt::format(
+		out.Printf(
 		    "gpu_markers: submit_started={} submit_finished={} op_started={} op_finished={} "
 		    "amd_buffer_marker={}\n",
 		    gpu_submit_started, gpu_submit_finished, gpu_op_started, gpu_op_finished,
 		    graphics.buffer_marker_amd_enabled ? "true" : "false");
 	} else {
-		report += "gpu_markers: unavailable (CPU submit ring only)\n";
+		out.Append("gpu_markers: unavailable (CPU submit ring only)\n");
 	}
 
 	const bool has_op_suspect =
@@ -436,13 +620,23 @@ void GpuBreadcrumbTracker::ReportDeviceLost(GraphicContext& graphics, const char
 	const bool has_submit_suspect =
 	    has_gpu_markers && gpu_submit_started > gpu_submit_finished;
 
-	std::vector<uint64_t>        suspect_hashes;
-	std::unordered_set<uint64_t> suspect_seen;
-	const auto                   add_suspect_hashes = [&](const OpBreadcrumb& op) {
+	std::array<uint64_t, 16> suspect_hashes {};
+	size_t                   suspect_hash_count = 0;
+	const auto               add_suspect_hashes = [&](const OpBreadcrumb& op) {
         for (uint8_t i = 0; i < op.stage_count && i < op.stages.size(); ++i) {
             const uint64_t h = op.stages[i].hash;
-            if (h != 0 && suspect_seen.insert(h).second) {
-                suspect_hashes.push_back(h);
+            if (h == 0) {
+                continue;
+            }
+            bool seen = false;
+            for (size_t j = 0; j < suspect_hash_count; ++j) {
+                if (suspect_hashes[j] == h) {
+                    seen = true;
+                    break;
+                }
+            }
+            if (!seen && suspect_hash_count < suspect_hashes.size()) {
+                suspect_hashes[suspect_hash_count++] = h;
             }
         }
     };
@@ -451,135 +645,157 @@ void GpuBreadcrumbTracker::ReportDeviceLost(GraphicContext& graphics, const char
 		return has_op_suspect && marker_id > gpu_op_finished && marker_id <= gpu_op_started;
 	};
 
-	const auto is_in_flight = [&](const SubmitRecord& rec) {
-		if (rec.state == SubmitState::Recording) {
-			return true;
-		}
-		if (has_gpu_markers && gpu_submit_finished != 0 && rec.seq > gpu_submit_finished) {
-			return true;
-		}
-		return rec.tick == 0 || rec.tick > effective_known_tick;
-	};
-
-	// Determine first submit index to print: keep up to 2 completed submits before the first
-	// in-flight submit so the reader has context without flooding the log.
-	size_t first_to_show = snapshot.size();
-	for (size_t i = 0; i < snapshot.size(); ++i) {
-		if (is_in_flight(snapshot[i])) {
-			first_to_show = i > 2 ? i - 2 : 0;
-			break;
-		}
-	}
-	if (first_to_show == snapshot.size() && !snapshot.empty()) {
-		first_to_show = snapshot.size() > 4 ? snapshot.size() - 4 : 0;
-	}
-
-	if (snapshot.empty()) {
-		report += "submits: none recorded\n";
+	if (!locked) {
+		out.Append("submits: skipped (tracker mutex held by interrupted thread)\n");
 	} else {
-		report += fmt::format("recent_submits (showing {} of {} retained):\n",
-		                      snapshot.size() - first_to_show, snapshot.size());
-	}
+		effective_known_tick = std::max(effective_known_tick, m_last_known_tick);
 
-	for (size_t idx = first_to_show; idx < snapshot.size(); ++idx) {
-		const auto& rec       = snapshot[idx];
-		const bool  in_flight = is_in_flight(rec);
-		const char* state_str = rec.state == SubmitState::Recording
-		                            ? "recording"
-		                            : (in_flight ? "in-flight" : "completed");
-		const bool  suspect_submit = has_submit_suspect && rec.seq == gpu_submit_started;
+		std::array<size_t, kMaxSubmits> order {};
+		size_t                          order_count = 0;
+		for (size_t i = 0; i < kMaxSubmits; ++i) {
+			if (m_submits[i].state != SubmitState::Empty) {
+				order[order_count++] = i;
+			}
+		}
+		std::sort(order.begin(), order.begin() + static_cast<std::ptrdiff_t>(order_count),
+		          [&](size_t a, size_t b) { return m_submits[a].seq < m_submits[b].seq; });
 
-		report += fmt::format("  submit seq={} tick={} frame={} state={} ops={} markers={}..{}{}\n",
-		                      rec.seq, rec.tick, rec.frame_num, state_str, rec.total_ops,
-		                      rec.first_op_id, rec.last_op_id,
-		                      suspect_submit ? " <<< SUSPECT SUBMIT" : "");
+		const auto is_in_flight = [&](const SubmitRecord& rec) {
+			if (rec.state == SubmitState::Recording) {
+				return true;
+			}
+			if (has_gpu_markers && gpu_submit_finished != 0 && rec.seq > gpu_submit_finished) {
+				return true;
+			}
+			return rec.tick == 0 || rec.tick > effective_known_tick;
+		};
 
-		if (rec.ops.empty()) {
-			continue;
+		// Keep up to 2 completed submits before the first in-flight submit for context.
+		size_t first_to_show = order_count;
+		for (size_t i = 0; i < order_count; ++i) {
+			if (is_in_flight(m_submits[order[i]])) {
+				first_to_show = i > 2 ? i - 2 : 0;
+				break;
+			}
+		}
+		if (first_to_show == order_count && order_count != 0) {
+			first_to_show = order_count > 4 ? order_count - 4 : 0;
 		}
 
-		// Reorder the per-submit ring into chronological order.
-		std::vector<OpBreadcrumb> ordered;
-		ordered.reserve(rec.ops.size());
-		if (rec.total_ops <= kMaxOpsPerSubmit) {
-			ordered.assign(rec.ops.begin(), rec.ops.end());
+		if (order_count == 0) {
+			out.Append("submits: none recorded\n");
 		} else {
-			const size_t oldest = rec.total_ops % kMaxOpsPerSubmit;
-			ordered.insert(ordered.end(), rec.ops.begin() + static_cast<std::ptrdiff_t>(oldest),
-			               rec.ops.end());
-			ordered.insert(ordered.end(), rec.ops.begin(),
-			               rec.ops.begin() + static_cast<std::ptrdiff_t>(oldest));
+			out.Printf("recent_submits (showing {} of {} retained):\n",
+			           order_count - first_to_show, order_count);
 		}
 
-		// For completed submits show only the last 4 ops; for in-flight submits show any suspect
-		// ops plus the last 16 ops.
-		const size_t tail_keep  = in_flight ? 16u : 4u;
-		const size_t tail_start = ordered.size() > tail_keep ? ordered.size() - tail_keep : 0u;
-		bool         elided     = false;
+		for (size_t idx = first_to_show; idx < order_count; ++idx) {
+			const auto& rec       = m_submits[order[idx]];
+			const bool  in_flight = is_in_flight(rec);
+			const char* state_str = rec.state == SubmitState::Recording
+			                            ? "recording"
+			                            : (in_flight ? "in-flight" : "completed");
+			const bool  suspect_submit = has_submit_suspect && rec.seq == gpu_submit_started;
 
-		for (size_t i = 0; i < ordered.size(); ++i) {
-			const auto& op      = ordered[i];
-			const bool  suspect = is_suspect_op(op.marker_id);
-			const bool  is_last = (i + 1 == ordered.size());
-			const bool  show    = suspect || i >= tail_start ||
-                               (has_op_suspect && op.marker_id == gpu_op_finished);
-			if (!show) {
-				if (!elided) {
-					report += fmt::format("    ... ({} earlier ops omitted)\n", tail_start);
-					elided = true;
-				}
+			out.Printf("  submit seq={} tick={} frame={} state={} ops={} markers={}..{}{}\n",
+			           rec.seq, rec.tick, rec.frame_num, state_str, rec.total_ops,
+			           rec.first_op_id, rec.last_op_id,
+			           suspect_submit ? " <<< SUSPECT SUBMIT" : "");
+
+			if (rec.ops.empty()) {
 				continue;
 			}
-			const char* tag = "";
-			if (suspect) {
-				tag = " <<< SUSPECT OP";
-				add_suspect_hashes(op);
-			} else if (has_op_suspect && op.marker_id == gpu_op_finished) {
-				tag = " (last completed)";
-			} else if (is_last && in_flight) {
-				tag = " (last in submit)";
-			}
-			report += fmt::format("    [op={}] {}{}\n", op.marker_id, FormatOpLine(op), tag);
-			if (suspect || (is_last && in_flight)) {
-				for (uint8_t bi = 0; bi < op.buffer_count && bi < op.buffers.size(); ++bi) {
-					const auto& b = op.buffers[bi];
-					report += fmt::format(
-					    "      buf[{}]: set={} binding={} elem={} guest_va=0x{:016x} "
-					    "vk_buf=0x{:016x} offset=0x{:x} range=0x{:x} buffer_size=0x{:x}\n",
-					    bi, b.set, b.binding, b.array_element, b.guest_va, b.vk_buffer, b.offset,
-					    b.range, b.buffer_size);
-				}
-				if (op.total_buffers > op.buffer_count) {
-					report += fmt::format("      ... ({} more bound buffers omitted)\n",
-					                      op.total_buffers - op.buffer_count);
-				}
-			}
-		}
 
-		// If no per-op GPU marker narrowed down the suspect, gather hashes from the suspect
-		// submit or the last in-flight submit's tail for the bisect hint.
-		if (!has_op_suspect && (suspect_submit || (in_flight && idx + 1 == snapshot.size()))) {
-			for (size_t i = tail_start; i < ordered.size(); ++i) {
-				add_suspect_hashes(ordered[i]);
+			const size_t op_count   = rec.ops.size();
+			const size_t oldest_idx = rec.total_ops <= kMaxOpsPerSubmit
+			                              ? 0u
+			                              : static_cast<size_t>(rec.total_ops % kMaxOpsPerSubmit);
+			// Print ALL ops for in-flight submits; keep last 4 for completed submits.
+			const size_t tail_keep  = in_flight ? op_count : 4u;
+			const size_t tail_start = op_count > tail_keep ? op_count - tail_keep : 0u;
+			bool         elided     = false;
+
+			for (size_t i = 0; i < op_count; ++i) {
+				const auto& op      = rec.ops[(oldest_idx + i) % op_count];
+				const bool  suspect = is_suspect_op(op.marker_id);
+				const bool  is_last = (i + 1 == op_count);
+				const bool  show    = suspect || i >= tail_start ||
+				                   (has_op_suspect && op.marker_id == gpu_op_finished);
+				if (!show) {
+					if (!elided) {
+						out.Printf("    ... ({} earlier ops omitted)\n", tail_start);
+						elided = true;
+					}
+					continue;
+				}
+				const char* tag = "";
+				if (suspect) {
+					tag = " <<< SUSPECT OP";
+					add_suspect_hashes(op);
+				} else if (has_op_suspect && op.marker_id == gpu_op_finished) {
+					tag = " (last completed)";
+				} else if (is_last && in_flight) {
+					tag = " (last in submit)";
+				}
+				out.Printf("    [op={}] ", op.marker_id);
+				FormatOpLine(out, op);
+				out.Printf("{}\n", tag);
+
+				const bool print_buffers =
+				    suspect || (is_last && in_flight) || (!has_op_suspect && in_flight);
+				if (print_buffers) {
+					for (uint8_t bi = 0; bi < op.buffer_count && bi < op.buffers.size(); ++bi) {
+						const auto& b = op.buffers[bi];
+						out.Printf(
+						    "      buf[{}]: set={} binding={} elem={} guest_va=0x{:016x} "
+						    "vk_buf=0x{:016x} offset=0x{:x} range=0x{:x} buffer_size=0x{:x}\n",
+						    bi, b.set, b.binding, b.array_element, b.guest_va, b.vk_buffer,
+						    b.offset, b.range, b.buffer_size);
+					}
+					if (op.total_buffers > op.buffer_count) {
+						out.Printf("      ... ({} more bound buffers omitted)\n",
+						           op.total_buffers - op.buffer_count);
+					}
+				}
+			}
+
+			if (!has_op_suspect && (suspect_submit || (in_flight && idx + 1 == order_count))) {
+				for (size_t i = tail_start; i < op_count; ++i) {
+					add_suspect_hashes(rec.ops[(oldest_idx + i) % op_count]);
+				}
 			}
 		}
 	}
 
-	if (!suspect_hashes.empty()) {
-		std::string csv;
-		const size_t limit = std::min<size_t>(suspect_hashes.size(), 16);
-		for (size_t i = 0; i < limit; ++i) {
+	if (suspect_hash_count != 0) {
+		out.Append("bisect_hint: --skip-shaders ");
+		for (size_t i = 0; i < suspect_hash_count; ++i) {
 			if (i != 0) {
-				csv += ',';
+				out.Append(",");
 			}
-			csv += fmt::format("0x{:016x}", suspect_hashes[i]);
+			out.Printf("0x{:016x}", suspect_hashes[i]);
 		}
-		report += fmt::format("bisect_hint: --skip-shaders {}\n", csv);
+		out.Append("\n");
 	}
-	report += "=== END GPU DEVICE LOST TRIAGE ===\n";
+	out.Append("=== END GPU DEVICE LOST TRIAGE ===\n");
+	out.Flush();
 
-	Log::WriteToConsoleAndLog(report);
-	std::fflush(nullptr);
+	// Run VK_EXT_device_fault on the dedicated host worker thread so driver calls never execute
+	// on a guest signal stack, and after all breadcrumbs have already been flushed to stderr.
+	if (m_fault_thread.joinable()) {
+		m_fault_done.store(false, std::memory_order_release);
+		m_fault_request.store(true, std::memory_order_release);
+		WakeFaultWorker();
+		for (int i = 0; i < 200 && !m_fault_done.load(std::memory_order_acquire); ++i) {
+			std::this_thread::sleep_for(std::chrono::milliseconds(10));
+		}
+		if (!m_fault_done.load(std::memory_order_acquire)) {
+			constexpr std::string_view kTimeoutMsg =
+			    "=== GPU DEVICE FAULT INFO ===\nVK_EXT_device_fault: worker timed out\n"
+			    "=== END GPU DEVICE FAULT INFO ===\n";
+			WriteRawStderr(kTimeoutMsg.data(), kTimeoutMsg.size());
+		}
+	}
 }
 
 void ReportDeviceLost(GraphicContext& graphics, const char* operation, vk::Result result,
