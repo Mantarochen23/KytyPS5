@@ -722,9 +722,14 @@ private:
 				chain.push_back(value.IsEmpty() ? "Empty" : TypeName(value.GetType()));
 				break;
 			}
-			chain.push_back(std::string(ValueOpcodeName(inst->GetOpcode())));
+			const auto op = inst->GetOpcode();
+			chain.push_back(std::string(ValueOpcodeName(op)));
 			if (inst->NumArgs() == 0u) break;
-			value = inst->Arg(0);
+			// For a select the condition is not part of the descriptor shape; follow its
+			// first data arm so nested selections appear in the chain.
+			const bool select = op == ValueOpcode::SelectU1 || op == ValueOpcode::SelectU32 ||
+			                    op == ValueOpcode::SelectF32;
+			value = select && inst->NumArgs() > 1u ? inst->Arg(1) : inst->Arg(0);
 			if (depth == 5u && value.Resolve().TryInstruction() != nullptr) truncated = true;
 		}
 		if (truncated) chain.emplace_back("...");

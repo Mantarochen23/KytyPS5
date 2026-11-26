@@ -8446,8 +8446,47 @@ void TestFiniteBufferAtomicSelect() {
   build(mismatched, true);
   CheckFatal([&] { mismatched.PlanAndTrack(); },
              "buffer descriptor is not a valid runtime value "
-             "(shape GetBufferResource->SelectU32->IEqual32",
+             "(shape GetBufferResource->SelectU32->GetUserData",
              "serial selects with different conditions were accepted as one finite descriptor");
+}
+
+void TestFiniteBufferAtomicNestedSelect() {
+  const auto build = [](Fixture& fixture, bool mismatched) {
+    const auto lane = fixture.Emit(ValueOpcode::GetBuiltin,
+        {Value(static_cast<uint32_t>(StageInputKind::LocalInvocationId)), Value(0u)});
+    const auto outer = fixture.Emit(ValueOpcode::IEqual32, {lane, Value(0u)});
+    const auto inner = fixture.Emit(ValueOpcode::IEqual32, {lane, Value(1u)});
+    std::array<Value, 4> words;
+    for (uint32_t word = 0; word < words.size(); ++word) {
+      const auto condition = mismatched && word == 2u
+          ? fixture.Emit(ValueOpcode::IEqual32, {lane, Value(2u)}) : inner;
+      const auto first = fixture.Emit(ValueOpcode::SelectU32,
+          {condition, fixture.UserData(word * 2u), fixture.UserData(word * 2u + 1u)});
+      const auto second = fixture.Emit(ValueOpcode::SelectU32,
+          {condition, fixture.UserData(word * 2u + 8u), fixture.UserData(word * 2u + 9u)});
+      words[word] = fixture.Emit(ValueOpcode::SelectU32, {outer, first, second});
+    }
+    const auto handle = fixture.Buffer(words, 0x9c0);
+    MemoryInfo memory;
+    memory.kind = ResourceKind::Buffer;
+    fixture.Emit(ValueOpcode::BufferAtomicIAdd32,
+        {handle, Value(0u), Value(0u), Value(0u), Value(1u), Value(true)},
+        fixture.AddMemory(memory, 0x9c0));
+  };
+  Fixture fixture;
+  build(fixture, false);
+  fixture.PlanAndTrack();
+  const auto root = fixture.program.memory_info[0].resource;
+  const auto& finite = fixture.program
+      .descriptor_sources[fixture.program.info.buffers[root].source].indirect_descriptor;
+  Check(finite && finite->sources.size() == 4,
+        "select of selects with aligned inner conditions was not planned as finite");
+  Fixture mismatched;
+  build(mismatched, true);
+  CheckFatal([&] { mismatched.PlanAndTrack(); },
+             "buffer descriptor is not a valid runtime value "
+             "(shape GetBufferResource->SelectU32->SelectU32",
+             "serial selects with different inner conditions were merged");
 }
 
 void TestFiniteImageBitScanSentinel() {
@@ -9690,6 +9729,7 @@ int main(int argc, char **argv) {
     Run("finite inline sampler", TestFiniteInlineSampler);
     Run("finite buffer atomic", TestFiniteBufferAtomic);
     Run("finite buffer atomic select", TestFiniteBufferAtomicSelect);
+    Run("finite buffer atomic nested select", TestFiniteBufferAtomicNestedSelect);
     Run("finite image bit scan sentinel", TestFiniteImageBitScanSentinel);
     Run("runtime-rooted loop", TestLoopCycleEnteredThroughRuntimeValue);
     Run("invariant loop phi", TestInvariantLoopPhi);
