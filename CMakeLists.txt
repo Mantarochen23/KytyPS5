@@ -367,6 +367,7 @@ add_gpu_blit_shader(gpu_video_out_overlay gpu_video_out_overlay.frag)
 add_gpu_blit_shader(gpu_imgui_hdr gpu_video_out_overlay.frag -DIMGUI_HDR=1)
 add_gpu_blit_shader(gpu_pssr_linear gpu_pssr_linear.comp)
 add_gpu_blit_shader(gpu_bvh_mirror gpu_bvh_mirror.comp)
+add_gpu_blit_shader(gpu_dispatch_guard gpu_dispatch_guard.comp)
 add_gpu_blit_shader(gpu_bvh_walk gpu_bvh_mirror.comp -DWALK=1)
 # At SPIR-V 1.6 glslang declares a task shader's workgroup size with LocalSizeId, which needs maintenance4.
 add_gpu_blit_shader(gpu_mesh_indirect gpu_mesh_indirect.task --target-env spirv1.5)
@@ -519,6 +520,13 @@ add_executable(buffer_probe_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/BufferProbeTests.cpp"
 )
 target_include_directories(buffer_probe_tests PRIVATE ${inc_headers})
+
+add_executable(shader_workers_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/ShaderWorkersTests.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/pipeline/shaderWorkers.cpp"
+)
+target_link_libraries(shader_workers_tests common)
+target_include_directories(shader_workers_tests PRIVATE ${inc_headers})
 
 add_executable(lru_cache_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/LruCacheTests.cpp"

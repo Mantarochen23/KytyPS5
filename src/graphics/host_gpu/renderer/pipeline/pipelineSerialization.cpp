@@ -30,7 +30,7 @@ using ShaderRecompiler::IR::IoAll;
 using ShaderRecompiler::IR::Reader;
 using ShaderRecompiler::IR::Writer;
 
-enum class Record : uint8_t { Module, GraphicsPipeline, TessellationLayout, FailedProgram };
+enum class Record : uint8_t { Module, GraphicsPipeline, TessellationLayout, FailedProgram, KeyIndex };
 
 // Precedes each record's zstd frame.
 struct Frame {
@@ -41,7 +41,7 @@ struct Frame {
 
 // Explicit store format version. Bump manually only when recompiler output, SPIR-V profile, or
 // store record layout changes so rebuilds across branches keep reusing compatible warm stores.
-constexpr uint64_t kShaderStoreFormatVersion = 4;
+constexpr uint64_t kShaderStoreFormatVersion = 6; // 5: CompiledShaderInfo::subgroup_size, 6: KeyIndex
 
 // What every record depends on besides its own fields.
 std::vector<uint8_t> StoreHeader(const GraphicContext& graphics) {
@@ -226,6 +226,14 @@ void PipelineCache::WarmUp(const std::filesystem::path& path) {
 		    header_matches ? "" : " (header mismatch)", loaded_records,
 		    dropped_records + dropped_pipeline_count, dropped_records, dropped_pipeline_count));
 	}
+	if (Config::ShaderKeyIndexEnabled() && !m_key_index.empty()) {
+		size_t indexed_keys = 0;
+		for (const auto& keys: m_key_index | std::views::values) {
+			indexed_keys += keys.size();
+		}
+		Log::WriteToConsoleAndLog(fmt::format(
+		    "Shader cache: indexed {} keys for {} hashes\n", indexed_keys, m_key_index.size()));
+	}
 	Log::WriteToConsoleAndLog(fmt::format(
 	    "Shader cache: loaded {} programs, {} modules, {} pipelines in {} ms\n",
 	    m_program_cache.size(), modules.size() - 1,
@@ -340,6 +348,19 @@ PipelineCache::LoadRecordStatus PipelineCache::LoadRecord(std::span<const uint8_
 			}
 			break;
 		}
+		case Record::KeyIndex: {
+			ProgramKey key;
+			IoKey(reader, key);
+			if (!complete() || key.stage == ShaderType::Unknown ||
+			    static_cast<uint32_t>(key.stage) >
+			        static_cast<uint32_t>(ShaderType::TessellationEvaluation)) {
+				return LoadRecordStatus::Failed;
+			}
+			if (Config::ShaderKeyIndexEnabled()) {
+				RecordIndexedKey(key, /*persist=*/false);
+			}
+			break;
+		}
 		default: return LoadRecordStatus::Failed;
 	}
 	if (!keep_on_error) {
@@ -372,6 +393,16 @@ void PipelineCache::StoreFailedProgram(const ProgramKey& key, std::string_view r
 	IoAll(record, Record::FailedProgram);
 	IoKey(record, key);
 	IoAll(record, kTranslatorCapabilityVersion, text);
+	m_store.Append(std::move(record.bytes));
+}
+
+void PipelineCache::StoreKeyIndex(const ProgramKey& key) {
+	if (!m_store) {
+		return;
+	}
+	Writer record;
+	IoAll(record, Record::KeyIndex);
+	IoKey(record, key);
 	m_store.Append(std::move(record.bytes));
 }
 

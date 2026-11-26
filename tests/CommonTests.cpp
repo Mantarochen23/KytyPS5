@@ -5,6 +5,7 @@
 #include "common/file.h"
 #include "common/hostException.h"
 #include "common/logging/log.h"
+#include "common/ports.h"
 #include "common/platform/sysDbg.h"
 #include "common/stringUtils.h"
 #include "common/threads.h"
@@ -468,9 +469,47 @@ TEST(Config, ShaderCacheKeepDefaultsOffAndTracksLoadedOption) {
 	Config::Shutdown();
 }
 
+TEST(Config, ShaderKeyIndexDefaultsOffAndTracksLoadedOption) {
+	Config::Initialize();
+	Config::ConfigOptions options;
+	EXPECT_FALSE(options.shader_key_index_enabled);
+	Config::Load(options);
+	EXPECT_FALSE(Config::ShaderKeyIndexEnabled());
+
+	options.shader_key_index_enabled = true;
+	Config::Load(options);
+	EXPECT_TRUE(Config::ShaderKeyIndexEnabled());
+	Config::Shutdown();
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
 	testing::InitGoogleTest(&argc, argv);
 	return RUN_ALL_TESTS();
+}
+
+TEST(Ports, DisablePortParsesNamesAndSelectsTheShaderStore) {
+	std::vector<std::string> names;
+	EXPECT_FALSE(Config::ParseDisabledPorts("no-such-port", names));
+	names.clear();
+	ASSERT_TRUE(Config::ParseDisabledPorts("wave64-lds-sync,,guest-lane-number", names));
+	EXPECT_EQ(names, (std::vector<std::string> {"wave64-lds-sync", "guest-lane-number"}));
+	Config::SetDisabledPorts({});
+	EXPECT_TRUE(Config::PortEnabled(Config::Port::Wave64LdsSync));
+	const auto all_on = Config::ShaderPortMask();
+	EXPECT_NE(all_on, 0u);
+	Config::SetDisabledPorts(names);
+	EXPECT_FALSE(Config::PortEnabled(Config::Port::Wave64LdsSync));
+	EXPECT_FALSE(Config::PortEnabled(Config::Port::GuestLaneNumber));
+	EXPECT_TRUE(Config::PortEnabled(Config::Port::Wave64OverLimit32));
+	EXPECT_NE(Config::ShaderPortMask(), all_on);
+	EXPECT_NE(Config::PortsSummary().find("disabled: wave64-lds-sync,guest-lane-number"),
+	          std::string::npos);
+	names.clear();
+	ASSERT_TRUE(Config::ParseDisabledPorts("all", names));
+	Config::SetDisabledPorts(names);
+	EXPECT_EQ(Config::ShaderPortMask(), 0u);
+	EXPECT_NE(Config::PortsSummary().find("enabled: none"), std::string::npos);
+	Config::SetDisabledPorts({});
 }

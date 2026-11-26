@@ -5,6 +5,7 @@
 #include "common/debugCounters.h"
 #include "common/emulatorConfig.h"
 #include "common/file.h"
+#include "common/ports.h"
 #include "common/logging/log.h"
 #include "common/parallelFor.h"
 #include "common/profiler.h"
@@ -207,6 +208,24 @@ uint64_t PipelineCache::ProgramVariantKey() const {
 	return value;
 }
 
+std::span<const PipelineCache::ProgramKey> PipelineCache::FindIndexedKeys(uint64_t hash) const {
+	const auto found = m_key_index.find(hash);
+	return found == m_key_index.end() ? std::span<const ProgramKey> {}
+	                                  : std::span<const ProgramKey> {found->second};
+}
+
+bool PipelineCache::RecordIndexedKey(const ProgramKey& key, bool persist) {
+	auto& keys = m_key_index[key.hash];
+	if (std::ranges::find(keys, key) != keys.end() || keys.size() >= MaxIndexedKeysPerHash) {
+		return false;
+	}
+	keys.push_back(key);
+	if (persist) {
+		StoreKeyIndex(key);
+	}
+	return true;
+}
+
 ShaderRecompiler::Spirv::Profile SpirvProfile(const GraphicContext& graphics) {
 	// AMD GPUs (vendor 0x1002) run NMin/NMax as v_min/v_max, which give the guest's NaN and
 	// signed-zero results; GLSL.std.450 alone does not order -0 below +0.
@@ -230,7 +249,13 @@ std::filesystem::path ShaderStorePath() {
 	if (title_id.empty()) {
 		return {};
 	}
-	return std::filesystem::path("_PipelineCache") / (title_id + ShaderStoreSuffix(Config::LoopGuardLimit()) + ".shaders");
+	// Ported fixes that change shader code keep their programs in a store of their own
+	// (common/ports.h), and a non-zero loop-guard limit selects its own file as well, so a
+	// store never mixes programs built with different ports or with and without the guard.
+	const auto ports = Config::ShaderPortMask();
+	return std::filesystem::path("_PipelineCache") /
+	       (title_id + (ports != 0 ? fmt::format(".ports{:x}", ports) : std::string {}) +
+	        ShaderStoreSuffix(Config::LoopGuardLimit()) + ".shaders");
 }
 
 bool GraphicsPipelineKey::operator==(const GraphicsPipelineKey& other) const {
@@ -320,6 +345,9 @@ PipelineCache::CompiledStage PipelineCache::CompileStage(
 	auto        result =
 	    ShaderRecompiler::CompileProgram(std::move(translated), options, specialization, push_data);
 	auto info = std::move(result.program).TakeCompiledInfo();
+	if (const auto* workgroup = ShaderWorkgroupInput(key.stage, options.input_info)) {
+		info.subgroup_size = std::min(info.wave_size, workgroup->host_subgroup_size);
+	}
 
 	// The same inputs give the same module id across runs.
 	ShaderRecompiler::IR::Writer inputs;
@@ -508,6 +536,9 @@ const ShaderModule* PipelineCache::GetProgramImpl(const ShaderParams& params, In
 	BuildStageStaticKey(input_info, m_lookup_key.static_state);
 	m_lookup_key_ready = true;
 	Common::ShaderRegLedger::NoteUse(params.hash, LedgerStage(options.stage), ProgramVariantKey());
+	if (Config::ShaderKeyIndexEnabled()) {
+		RecordIndexedKey(m_lookup_key, /*persist=*/true);
+	}
 	auto entry = m_program_cache.find(m_lookup_key);
 	const auto bind = [&](const ShaderModule& module) {
 		input_info.stage = {.module = &module, .resources = &entry->second.resources};
@@ -1196,6 +1227,18 @@ void PipelineCache::GetGraphicsPrograms(const CommandBuffer& command, DrawRender
 	}
 }
 
+void PipelineCache::LimitComputeSubgroup(ShaderComputeInputInfo& input_info) const {
+	// A wave64 group over the host's invocation limit cannot be created with 64-wide host
+	// invocations; it runs in the two-lanes-per-invocation mode with 32-lane subgroups.
+	const auto threads =
+	    input_info.threads_num[0] * input_info.threads_num[1] * input_info.threads_num[2];
+	if (Config::PortEnabled(Config::Port::Wave64OverLimit32) && input_info.wave_size == 64u &&
+	    threads > m_graphics.GetPhysicalDeviceProperties().limits.maxComputeWorkGroupInvocations &&
+	    m_graphics.compute_subgroup_size_control_enabled && m_graphics.min_subgroup_size <= 32u) {
+		input_info.host_subgroup_size = 32u;
+	}
+}
+
 const ShaderModule* PipelineCache::GetComputeProgram(const HW::ComputeShaderInfo& regs,
                                                      ShaderComputeInputInfo&      input_info,
                                                      bool*                        pending) {
@@ -1206,10 +1249,11 @@ const ShaderModule* PipelineCache::GetComputeProgram(const HW::ComputeShaderInfo
 	if (m_async != nullptr) {
 		m_async->reason = Async::StallReason::Compute;
 	}
+	const auto& limits            = m_graphics.GetPhysicalDeviceProperties().limits;
 	input_info.host_subgroup_size = m_graphics.SupportsComputeWave64() ? 64u : 32u;
 	const auto        params      = PrepareProgram(regs, input_info);
-	input_info.lds_storage = input_info.lds_size_dwords * 4u >
-	    m_graphics.GetPhysicalDeviceProperties().limits.maxComputeSharedMemorySize;
+	LimitComputeSubgroup(input_info);
+	input_info.lds_storage = input_info.lds_size_dwords * 4u > limits.maxComputeSharedMemorySize;
 	ShaderRecompiler::IR::PushData::Window push_data;
 	const auto mode = (m_async != nullptr && pending != nullptr) ? AsyncMode::On : AsyncMode::Off;
 	const auto* module = GetProgram(params, input_info, push_data, mode);
@@ -1239,6 +1283,7 @@ bool PipelineCache::PrefetchComputeProgram(const HW::CsStageRegisters& cs_regs,
 	if (!TryPrepareComputeProgram(regs, input_info, params, code_owner)) {
 		return false;
 	}
+	LimitComputeSubgroup(input_info);
 	input_info.lds_storage = input_info.lds_size_dwords * 4u >
 	    m_graphics.GetPhysicalDeviceProperties().limits.maxComputeSharedMemorySize;
 	m_lookup_key.stage           = ShaderType::Compute;

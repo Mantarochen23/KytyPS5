@@ -564,15 +564,7 @@ constexpr uint64_t AMM_PAGE_SIZE                 = 0x4000;
 constexpr int      AMM_MAP_FIXED                 = 0x10;
 constexpr int      AMM_USAGE_DIRECT              = 0;
 constexpr int      AMM_USAGE_AUTO                = 1;
-constexpr int      PROT_CPU_READ                 = 0x01;
-constexpr int      PROT_CPU_WRITE                = 0x02;
 constexpr int      PROT_CPU_EXEC                 = 0x04;
-constexpr int      PROT_GPU_READ                 = 0x10;
-constexpr int      PROT_GPU_WRITE                = 0x20;
-constexpr int      PROT_AMPR_READ                = 0x40;
-constexpr int      PROT_AMPR_WRITE               = 0x80;
-constexpr int      PROT_ACP_READ                 = 0x100;
-constexpr int      PROT_ACP_WRITE                = 0x200;
 constexpr uint64_t APR_MAX_READ_LENGTH           = 0x0000000100000000ull;
 constexpr uint64_t APR_MAX_FILE_OFFSET           = 0x0000010000000000ull;
 constexpr uint64_t APR_MAX_APP_ADDRESS           = 0x0000f00000000000ull;
@@ -585,6 +577,7 @@ enum class AmmCommandKind : uint32_t {
 	MapDirect,
 	MapAsPrt,
 	RemapIntoPrt,
+	AllocatePaForPrt,
 	Unmap,
 };
 
@@ -1164,63 +1157,42 @@ static int KYTY_SYSV_ABI AmmCommandBufferDestructor(void* command_buffer) {
 	return OK;
 }
 
-static int NormalizeAmmProtection(int prot) {
-	constexpr int cpu_gpu_bits =
-	    PROT_CPU_READ | PROT_CPU_WRITE | PROT_CPU_EXEC | PROT_GPU_READ | PROT_GPU_WRITE;
-
-	int normalized = prot & cpu_gpu_bits;
-
-	if ((prot & PROT_AMPR_READ) != 0) {
-		normalized |= PROT_CPU_READ;
-	}
-	if ((prot & PROT_AMPR_WRITE) != 0) {
-		normalized |= PROT_CPU_READ | PROT_CPU_WRITE;
-	}
-	if ((prot & PROT_ACP_READ) != 0) {
-		normalized |= PROT_CPU_READ;
-	}
-	if ((prot & PROT_ACP_WRITE) != 0) {
-		normalized |= PROT_CPU_READ | PROT_CPU_WRITE;
-	}
-
-	return normalized;
-}
-
 static int ExecuteAmmMapCommand(const CommandBufferState::AmmMapCommand& command) {
-	if (!ValidateAmmMapArgs(command.va, command.size)) {
-		return LibKernel::KERNEL_ERROR_EINVAL;
-	}
-
-	if (command.kind == AmmCommandKind::MapAuto) {
-		return LibKernel::Memory::MapAutomaticMemory(command.va, command.size, command.type,
-		                                             NormalizeAmmProtection(command.prot));
+	const bool allocate_prt = command.kind == AmmCommandKind::AllocatePaForPrt;
+	if (command.kind == AmmCommandKind::MapAuto || allocate_prt) {
+		return LibKernel::Memory::MapAutomaticMemory(
+		    command.va, command.size, command.type, command.prot, allocate_prt);
 	}
 	if (command.kind == AmmCommandKind::MapAsPrt) {
 		return LibKernel::Memory::MapPrtMemory(command.va, command.size);
 	}
 	if (command.kind == AmmCommandKind::RemapIntoPrt) {
 		return LibKernel::Memory::RemapIntoPrtMemory(command.va, command.old_va, command.size,
-		                                             NormalizeAmmProtection(command.prot));
+		                                             command.prot);
 	}
 
 	void* addr = reinterpret_cast<void*>(command.va);
 	return LibKernel::Memory::KernelMapDirectMemory2(
-	    &addr, command.size, command.type, NormalizeAmmProtection(command.prot), AMM_MAP_FIXED,
+	    &addr, command.size, command.type, command.prot, AMM_MAP_FIXED,
 	    static_cast<int64_t>(command.dmem_offset), AMM_PAGE_SIZE);
 }
 
 // Returns the zeroed record in the guest buffer, or null when it was not appended.
 static uint32_t* AppendCommandRecord(uint64_t                        command_buffer,
                                      CommandBufferState::CommandData command,
-                                     uint64_t record_size, const char* op) {
+                                     uint64_t record_size, const char* op,
+                                     int* error = nullptr) {
 	std::scoped_lock      lock(g_command_buffer_mutex);
 	CommandBufferIterator it;
 	if (!GetOrCreateCommandBufferStateLocked(command_buffer, &it)) {
+		if (error != nullptr) *error = LibKernel::KERNEL_ERROR_EFAULT;
 		return nullptr;
 	}
 
 	auto& state = it->second;
-	if (CheckCommandBufferRecordSpaceLocked(command_buffer, state, record_size, op) != OK) {
+	if (const int result = CheckCommandBufferRecordSpaceLocked(command_buffer, state, record_size, op);
+	    result != OK) {
+		if (error != nullptr) *error = result;
 		return nullptr;
 	}
 
@@ -2124,20 +2096,41 @@ static int KYTY_SYSV_ABI CommandBufferWaitOnAddress(void*              command_b
 	           : LibKernel::KERNEL_ERROR_EBUSY;
 }
 
+// Writes the counter record's header (with its extra DWORD count) and high value DWORD.
+static int AppendCounterRecord(void* command_buffer, CommandBufferState::CommandData command,
+                               uint64_t size, uint32_t header, uint32_t high_value,
+                               const char* op) {
+	int   error  = OK;
+	auto* record = AppendCommandRecord(reinterpret_cast<uint64_t>(command_buffer),
+	                                   std::move(command), size, op, &error);
+	if (record == nullptr) {
+		return error;
+	}
+	const auto extra_words = static_cast<uint32_t>(size / sizeof(uint32_t) - 1u);
+	record[0]              = header | (extra_words << 8u);
+	if (size >= 2u * sizeof(uint32_t)) {
+		record[1] = high_value;
+	}
+	return OK;
+}
+
 static int KYTY_SYSV_ABI CommandBufferWaitOnCounter(void* command_buffer, uint8_t index,
                                                     uint8_t access, uint64_t value, uint8_t compare,
                                                     uint8_t mask_op, uint64_t mask, uint8_t flush) {
 	PRINT_NAME();
 
-	if (command_buffer == nullptr || access > 7 || compare > 6 || mask_op > 1 || flush > 1) {
+	const uint64_t size = MeasureCommandSizeWaitOnCounter(index, access, value, compare, mask_op, mask, flush);
+	const bool     invalid = size == KernelErrorU64(LibKernel::KERNEL_ERROR_EINVAL);
+	if (command_buffer == nullptr || invalid) {
 		return LibKernel::KERNEL_ERROR_EINVAL;
 	}
 	EXIT_NOT_IMPLEMENTED(access != 1 || mask_op != 0 || flush != 0 || value > UINT32_MAX);
-	return AppendCommandRecord(reinterpret_cast<uint64_t>(command_buffer),
+	const auto operand = static_cast<uint32_t>(value);
+	const auto header  = (uint32_t {index} << 24u) | ((operand & 0xffu) << 16u) |
+	                     (uint32_t {compare} << 13u) | 2u;
+	return AppendCounterRecord(command_buffer,
 	                           CommandBufferState::WaitCommand {index, value, compare, true},
-	                           WaitCounterRecordSize(access, value, mask_op, mask), "WaitOnCounter")
-	           ? OK
-	           : LibKernel::KERNEL_ERROR_EBUSY;
+	                           size, header, operand >> 8u, "WaitOnCounter");
 }
 
 static int AppendWriteAddressCommand(void* command_buffer, volatile uint64_t* address,
@@ -2176,30 +2169,28 @@ static int KYTY_SYSV_ABI CommandBufferWriteCounter(void* command_buffer, uint8_t
                                                    uint8_t operation, uint32_t mode) {
 	PRINT_NAME();
 
-	if (command_buffer == nullptr || index >= 128 || access > 7 || operation > 4 || mode > 1) {
+	const uint64_t size = MeasureCommandSizeWriteCounter(index, access, value, operation);
+	const bool     invalid = size == KernelErrorU64(LibKernel::KERNEL_ERROR_EINVAL);
+	if (command_buffer == nullptr || invalid || mode > 1) {
 		return LibKernel::KERNEL_ERROR_EINVAL;
 	}
+	uint32_t type;
+	if (!AprShared::ReadGuest(reinterpret_cast<uint64_t>(command_buffer) + COMMAND_BUFFER_TYPE_OFFSET,
+	                          &type)) {
+		return LibKernel::KERNEL_ERROR_EFAULT;
+	}
+	if ((type & APR_TYPE_MAP_ACTIVE) != 0) return LibKernel::KERNEL_ERROR_EPERM;
 	EXIT_NOT_IMPLEMENTED(access != 1 || operation != 0 || mode != 0);
-	return AppendCommandRecord(reinterpret_cast<uint64_t>(command_buffer),
-	                           CommandBufferState::WriteCounterCommand {
-	                               index, static_cast<uint32_t>(value)},
-	                           WriteCounterRecordSize(access, value, operation), "WriteCounter")
-	           ? OK
-	           : LibKernel::KERNEL_ERROR_EBUSY;
+	const auto operand = static_cast<uint32_t>(value);
+	const auto header  = (uint32_t {index} << 24u) | ((operand & 0xfffu) << 12u) | 6u;
+	return AppendCounterRecord(command_buffer,
+	                           CommandBufferState::WriteCounterCommand {index, operand},
+	                           size, header, operand >> 12u, "WriteCounter");
 }
 
 static int KYTY_SYSV_ABI CommandBufferWriteCounterOnCompletion(void* command_buffer, uint8_t index,
                                                                uint32_t value) {
-	PRINT_NAME();
-
-	if (command_buffer == nullptr || index >= 128) {
-		return LibKernel::KERNEL_ERROR_EINVAL;
-	}
-	return AppendCommandRecord(reinterpret_cast<uint64_t>(command_buffer),
-	                           CommandBufferState::WriteCounterCommand {index, value},
-	                           WriteCounterRecordSize(1, value, 0), "WriteCounterOnCompletion")
-	           ? OK
-	           : LibKernel::KERNEL_ERROR_EBUSY;
+	return CommandBufferWriteCounter(command_buffer, index, 1, value, 0, 0);
 }
 
 static int KYTY_SYSV_ABI CommandBufferWriteAddressFromTimeCounter(void*              command_buffer,
@@ -2529,27 +2520,33 @@ static int KYTY_SYSV_ABI AmmCommandBufferMapAsPrt(void* command_buffer, uint64_t
 }
 
 static int KYTY_SYSV_ABI AmmCommandBufferAllocatePaForPrt(void* command_buffer, uint64_t va,
-                                                          uint64_t size, int32_t type,
-                                                          int32_t prot) {
+                                                          uint64_t size, int32_t type, int32_t prot) {
 	PRINT_NAME();
 
-	if (command_buffer == nullptr || !ValidateAmmMapArgs(va, size)) {
+	if (command_buffer == nullptr || !LibKernel::Memory::IsAmmMemoryRange(va, size) ||
+	    type < 11 || type > 20 || (prot & ~0x3f3) != 0) {
 		return LibKernel::KERNEL_ERROR_EINVAL;
 	}
-
-	// Physical backing for a PRT range: allocate real memory at the VA so the program can write to it.
-	CommandBufferState::AmmMapCommand command {};
-	command.kind = AmmCommandKind::MapAuto;
-	command.va   = va;
-	command.size = size;
-	command.type = type;
-	command.prot = (prot | PROT_GPU_READ | PROT_GPU_WRITE) &
-	               ~(PROT_AMPR_READ | PROT_AMPR_WRITE | PROT_ACP_READ | PROT_ACP_WRITE);
-
-	return AppendCommandRecord(reinterpret_cast<uint64_t>(command_buffer), command,
-	                           AMM_ALLOCATE_PA_FOR_PRT_RECORD_SIZE, "AmmAllocatePaForPrt")
-	           ? OK
-	           : LibKernel::KERNEL_ERROR_EBUSY;
+	// CPU, AMPR and ACP writes also grant the corresponding read access.
+	prot |= (prot >> 1) & 0x141;
+	const uint32_t words[] = {
+	    0x326u | static_cast<uint32_t>(type) << 27 | static_cast<uint32_t>(prot) << 12,
+	    static_cast<uint32_t>(va >> 14),
+	    0x40000000u | static_cast<uint32_t>((size >> 12) & 0x1ffffffc) |
+	        static_cast<uint32_t>((va >> 46) & 3),
+	    0x3fbu};
+	static_assert(sizeof(words) == AMM_ALLOCATE_PA_FOR_PRT_RECORD_SIZE);
+	CommandBufferState::AmmMapCommand command {.kind = AmmCommandKind::AllocatePaForPrt,
+	                                           .va = va, .size = size, .type = type, .prot = prot};
+	int   error  = OK;
+	auto* record = AppendCommandRecord(reinterpret_cast<uint64_t>(command_buffer), command,
+	                                   AMM_ALLOCATE_PA_FOR_PRT_RECORD_SIZE, "AmmAllocatePaForPrt",
+	                                   &error);
+	if (record == nullptr) {
+		return error;
+	}
+	std::memcpy(record, words, sizeof(words));
+	return OK;
 }
 
 static int KYTY_SYSV_ABI AmmCommandBufferRemapIntoPrt(void* command_buffer, uint64_t va,
@@ -2557,8 +2554,9 @@ static int KYTY_SYSV_ABI AmmCommandBufferRemapIntoPrt(void* command_buffer, uint
                                                       int32_t prot_mask) {
 	PRINT_NAME();
 
+	uint32_t words[4];
 	if (command_buffer == nullptr || (prot & PROT_CPU_EXEC) != 0 ||
-	    LibKernel::Memory::KernelWriteRemapIntoPrtCommand(nullptr, va, old_va, size, prot,
+	    LibKernel::Memory::KernelWriteRemapIntoPrtCommand(words, va, old_va, size, prot,
 	                                                      prot_mask, nullptr) != OK) {
 		return LibKernel::KERNEL_ERROR_EINVAL;
 	}
@@ -2570,21 +2568,24 @@ static int KYTY_SYSV_ABI AmmCommandBufferRemapIntoPrt(void* command_buffer, uint
 	command.size   = size;
 	command.prot   = prot;
 
+	int   error  = OK;
 	auto* record = AppendCommandRecord(reinterpret_cast<uint64_t>(command_buffer), command,
-	                                   AMM_REMAP_RECORD_SIZE, "AmmRemapIntoPrt");
+	                                   AMM_REMAP_RECORD_SIZE, "AmmRemapIntoPrt", &error);
 	if (record == nullptr) {
-		return LibKernel::KERNEL_ERROR_EBUSY;
+		return error;
 	}
-	return LibKernel::Memory::KernelWriteRemapIntoPrtCommand(record, va, old_va, size, prot,
-	                                                         prot_mask, nullptr);
+	static_assert(sizeof(words) == AMM_REMAP_RECORD_SIZE);
+	std::memcpy(record, words, sizeof(words));
+	return OK;
 }
 
 static int KYTY_SYSV_ABI AmmCommandBufferUnmapToPrt(void* command_buffer, uint64_t va,
                                                     uint64_t size) {
 	PRINT_NAME();
 
+	uint32_t words[3];
 	if (command_buffer == nullptr ||
-	    LibKernel::Memory::KernelWriteUnmapToPrtCommand(nullptr, va, size, nullptr) != OK) {
+	    LibKernel::Memory::KernelWriteUnmapToPrtCommand(words, va, size, nullptr) != OK) {
 		return LibKernel::KERNEL_ERROR_EINVAL;
 	}
 
@@ -2594,12 +2595,15 @@ static int KYTY_SYSV_ABI AmmCommandBufferUnmapToPrt(void* command_buffer, uint64
 	command.va   = va;
 	command.size = size;
 
+	int   error  = OK;
 	auto* record = AppendCommandRecord(reinterpret_cast<uint64_t>(command_buffer), command,
-	                                   AMM_MAP_AS_PRT_RECORD_SIZE, "AmmUnmapToPrt");
+	                                   AMM_MAP_AS_PRT_RECORD_SIZE, "AmmUnmapToPrt", &error);
 	if (record == nullptr) {
-		return LibKernel::KERNEL_ERROR_EBUSY;
+		return error;
 	}
-	return LibKernel::Memory::KernelWriteUnmapToPrtCommand(record, va, size, nullptr);
+	static_assert(sizeof(words) == AMM_MAP_AS_PRT_RECORD_SIZE);
+	std::memcpy(record, words, sizeof(words));
+	return OK;
 }
 
 static int KYTY_SYSV_ABI AmmCommandBufferUnmap(void* command_buffer, uint64_t va, uint64_t size) {

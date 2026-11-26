@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <fmt/format.h>
 #include <map>
@@ -466,6 +467,8 @@ Decoder::Program DecodeFusedProgram(std::span<const uint32_t> front, std::span<c
 
 constexpr uint64_t kIrPassLogThresholdMs = 5;
 
+std::atomic<PassTimingHook> g_pass_timing_hook {nullptr};
+
 struct IrPassTimer {
 	const char*                           stage;
 	uint64_t                              shader_hash;
@@ -473,6 +476,11 @@ struct IrPassTimer {
 	std::chrono::steady_clock::time_point begin;
 
 	~IrPassTimer() {
+		if (const auto hook = g_pass_timing_hook.load(std::memory_order_relaxed)) {
+			hook(pass_name, static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+			                                          std::chrono::steady_clock::now() - begin)
+			                                          .count()));
+		}
 		const auto elapsed_ms = static_cast<uint64_t>(
 		    std::chrono::duration_cast<std::chrono::milliseconds>(
 		        std::chrono::steady_clock::now() - begin)
@@ -493,6 +501,10 @@ auto TimeIrPass(const char* stage, uint64_t shader_hash, const char* pass_name, 
 }
 
 } // namespace
+
+void SetPassTimingHook(PassTimingHook hook) {
+	g_pass_timing_hook.store(hook, std::memory_order_relaxed);
+}
 
 const char* StageName(ShaderType stage) {
 	switch (stage) {

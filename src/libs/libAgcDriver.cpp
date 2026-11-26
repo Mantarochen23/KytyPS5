@@ -56,6 +56,7 @@ LIB_DEFINE(InitAgcDriver_1) {
 	LIB_FUNC("hL7C0IRpWZI", AgcCbQueueEndOfPipeActionGetSize);
 	LIB_FUNC("T6xuVw0KUJo", AgcDebugRaiseException);
 	LIB_FUNC("JrtiDtKeS38", AgcAcbResetQueue);
+	LIB_FUNC("da1Sm8-QDoU", AgcAcbAtomicMemGetSize);
 	LIB_FUNC("cFazmnXpJOE", AgcAcbEventWrite);
 	LIB_FUNC("Y-5vneiBtzk", AgcAcbEventWriteGetSize);
 	LIB_FUNC("KT-hTp-Ch14", AgcAcbAcquireMem);
@@ -71,7 +72,6 @@ LIB_DEFINE(InitAgcDriver_1) {
 	LIB_FUNC("G0jrLdvEqDw", AgcDcbMemSemaphore);
 	LIB_FUNC("szG7hz2yEhA", AgcAcbPrimeUtcl2);
 	LIB_FUNC("jt3pl7EN17o", AgcDcbPrimeUtcl2);
-	LIB_FUNC("da1Sm8-QDoU", AgcAcbAtomicMemGetSize);
 	LIB_FUNC("hcIxS8pmXF4", AgcAcbAtomicGdsGetSize);
 	LIB_FUNC("eCjKaqeeQ5s", AgcAcbPrimeUtcl2GetSize);
 	LIB_FUNC("oz6zQq1JwCE", AgcDcbAtomicMemGetSize);

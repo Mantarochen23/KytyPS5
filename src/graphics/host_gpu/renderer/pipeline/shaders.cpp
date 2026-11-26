@@ -489,8 +489,9 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 	comp_shader_stage_info.module    = module.module;
 	comp_shader_stage_info.pName     = "main";
 	const auto subgroup_caps         = MakeSubgroupSizeCaps(graphics);
-	const bool emulated_wave64_on_32 =
-	    module.info.wave_size == 64u && !graphics.SupportsComputeWave64();
+	// The module runs a wave64 program in 32-lane halves when the device has no 64-wide compute
+	// subgroups or the group is over its invocation limit (subgroup_size 32).
+	const bool emulated_wave64_on_32 = module.info.wave_size == 64u && module.info.subgroup_size == 32u;
 	const auto decision = ResolveStageSubgroupSize(
 	    static_cast<uint32_t>(vk::ShaderStageFlagBits::eCompute), module.info.wave_size,
 	    emulated_wave64_on_32, UsesSubgroupOps(module.info.info), subgroup_caps);
