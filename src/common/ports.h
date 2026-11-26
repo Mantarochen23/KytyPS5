@@ -2,13 +2,14 @@
 #define KYTY_COMMON_PORTS_H_
 
 #include <cstdint>
+#include <iterator>
 #include <string>
 #include <string_view>
 #include <vector>
 
 // Fixes ported from other trees that change behaviour. Each one is on by default and can be turned
 // off at run time with --disable-port <name[,name...]> (or "all"), so one build can test them one by
-// one. The source of each is in docs/upstream/THIRD-PARTY.md.
+// one. Each commit names its source in a "Source:" line.
 namespace Config {
 
 enum class Port : uint32_t {
