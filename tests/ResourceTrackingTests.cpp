@@ -9688,6 +9688,27 @@ void TestSrtRootedBufferStore() {
         "SRT-rooted store descriptor was not planned");
 }
 
+// Independent per-DWORD offsets can wrap to different table rows, so a bounded scalar scan
+// cannot prove which descriptor the store reaches. This shape must stay rejected.
+void TestSrtRootedStoreRejected() {
+  Fixture f;
+  const auto table = f.Buffer({f.UserData(0), f.UserData(1), f.UserData(2), f.UserData(3)});
+  const auto key = f.UserData(4u);
+  std::array<Value, 4> words{};
+  for (uint32_t word = 0; word < 4u; ++word) {
+    words[word] = f.Emit(ValueOpcode::ReadConstBuffer,
+        {table, f.Emit(ValueOpcode::IAdd32,
+                    {f.Emit(ValueOpcode::IMul32, {key, Value(16u)}), Value(word * 4u)})},
+        f.AddMemory({.kind = ResourceKind::ScalarBuffer}, 0x180u));
+  }
+  const auto handle = f.Buffer(words, 0x190u);
+  f.Emit(ValueOpcode::StoreBufferU32,
+      {handle, Value(0u), Value(0u), Value(0u), Value(7u), Value(true)},
+      f.AddMemory({.kind = ResourceKind::Buffer, .idxen = true}, 0x1a0u));
+  CheckFatal([&] { f.PlanAndTrack(); }, "not a valid runtime value",
+             "split per-DWORD pointer offsets were treated as one bounded descriptor table");
+}
+
 void TestTranslatorCapabilityVersion() {
   using Libs::Graphics::FailureCacheApplies;
   using Libs::Graphics::kTranslatorCapabilityVersion;
@@ -9824,6 +9845,7 @@ int main(int argc, char **argv) {
     Run("malformed memory kinds", TestMalformedMemoryKindsRejected);
     Run("srt-descriptor", TestSrtRootedBufferDescriptor);
     Run("srt-store", TestSrtRootedBufferStore);
+    Run("srt-reject", TestSrtRootedStoreRejected);
     Run("translator capability version", TestTranslatorCapabilityVersion);
   } catch (const std::exception &exception) {
     std::cerr << "resource tracking test failed: " << exception.what() << '\n';
