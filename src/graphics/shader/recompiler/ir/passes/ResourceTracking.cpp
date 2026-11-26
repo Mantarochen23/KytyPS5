@@ -3951,6 +3951,26 @@ private:
 			indirect.table_scalar = true;
 			return finish();
 		}
+		// An indexed raw store selects among the rows of a bounded V# table like the wider
+		// stores. Its waterfall key needs a proven maximum under the lane guard (for example
+		// a masked material field), so the byte offset of every row cannot wrap.
+		// Port gpu-selected-writes.
+		if (indexed && table_source.dword_count == 4u && !plan.split_offsets &&
+		    plan.selection_anchor != nullptr && Config::PortEnabled(Config::Port::GpuSelectedWrites)) {
+			const auto* lane = key.Resolve().TryInstruction();
+			if (lane != nullptr && lane->GetOpcode() == ValueOpcode::ReadFirstLane &&
+			    std::ranges::all_of(handle.Uses(), [&](const Use& use) {
+				    return Implies(use.user->Arg(use.user->NumArgs() - 1u), lane->Arg(1));
+			    })) {
+				const auto maximum = SelectorMaximum(lane->Arg(0), {}, 0u, lane->Arg(1));
+				if (maximum <= UINT32_MAX / 4u &&
+				    uint64_t {maximum} * table_stride + table_offset <= UINT32_MAX) {
+					indirect.table_maximum = maximum;
+					indirect.table_scalar = true;
+					return finish();
+				}
+			}
+		}
 		if (table_stride != 16u) return false;
 		if (table_source.dword_count == 2u) {
 			if (!MatchPackedScalarKey(key, indirect)) {
