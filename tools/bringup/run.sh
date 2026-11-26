@@ -44,7 +44,7 @@ run=$runs/$(date -u +%Y%m%d-%H%M%S)-$label
 mkdir -p "$run" "$state"
 run=$(cd "$run" && pwd); state=$(cd "$state" && pwd)
 
-opts=(--game "$game" --printf-direction File --printf-output-file /run/out/guest-printf.log)
+opts=(--game "$game" --printf-direction Console)
 [ "${KYTY_KEEP_GOING:-1}" = 1 ] && opts+=(--keep-going)
 opts+=("$@")
 
@@ -84,6 +84,11 @@ if [ "${KYTY_PAD:-none}" = host ]; then
         v=$(cat "/sys/class/input/$(basename "$n")/device/id/vendor" 2>/dev/null || true)
         case "$vendors" in *" ${v,,} "*) args+=(--dev-bind "$n" "$n") ;; esac
     done
+    for h in /dev/hidraw*; do
+        [ -c "$h" ] || continue
+        id=$(sed -n 's/^HID_ID=[0-9A-Fa-f]*:0000\([0-9A-Fa-f]\{4\}\):.*/\1/p' "/sys/class/hidraw/$(basename "$h")/device/uevent" 2>/dev/null || true)
+        case "$vendors" in *" ${id,,} "*) args+=(--dev-bind "$h" "$h") ;; esac
+    done
     [ -d /run/udev ] && args+=(--ro-bind /run/udev /run/udev)
 fi
 
@@ -97,17 +102,17 @@ fi
 } > "$run/run.txt"
 
 # Refuse to start if the sandbox can see more than the loopback interface.
-net=$(bwrap "${args[@]}" /usr/bin/ls /sys/class/net 2>/dev/null | tr '\n' ' ' || true)
+net=$(bwrap "${args[@]}" /usr/bin/cat /proc/net/dev 2>"$run/sandbox-probe.err" | sed -n "3,\$p" | cut -d: -f1 | tr -d " " | tr "\n" " " || true)
 [ "$net" = "lo " ] || { echo "run.sh: sandbox network is not isolated (sees: $net)" >&2; exit 4; }
 
 echo "run folder: $run"
 set +e
 if [ "$seconds" -gt 0 ]; then
-    timeout --signal=TERM --kill-after=10 "$seconds" bwrap "${args[@]}" /opt/kyty/kyty_emulator "${opts[@]}" > "$run/kyty.log" 2>&1
+    timeout --signal=TERM --kill-after=10 "$seconds" bwrap "${args[@]}" /opt/kyty/kyty_emulator "${opts[@]}" 2>&1 | grep -av "^Controller axis" > "$run/kyty.log"
 else
-    bwrap "${args[@]}" /opt/kyty/kyty_emulator "${opts[@]}" > "$run/kyty.log" 2>&1
+    bwrap "${args[@]}" /opt/kyty/kyty_emulator "${opts[@]}" 2>&1 | grep -av "^Controller axis" > "$run/kyty.log"
 fi
-code=$?
+code=${PIPESTATUS[0]}
 set -e
 { echo "end_utc=$(date -u +%FT%TZ)"; echo "exit_code=$code   # 124 = stopped by the time limit, 65 = emulator fatal (_Exit(321))"; } >> "$run/run.txt"
 if [ -d "$state/_ShaderFailures" ]; then
