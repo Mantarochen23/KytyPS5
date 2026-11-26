@@ -3430,6 +3430,7 @@ LIB_DEFINE(InitLibKernel_1) {
 	LIB_FUNC("959qrazPIrg", LibKernel::KernelGetProcParam);
 	LIB_FUNC("GGeRJk1XdWc", LibKernel::KernelGetProsperoCompiledSdkVersion);
 	LIB_FUNC("tU5e3f9gSiU", LibKernel::KernelIsTrinityMode);
+	LIB_FUNC("yu17wG8L5FI", LibKernel::KernelIsTrinityMode); // sceKernelHasTrinityMode
 	LIB_FUNC("NH6xARDOVv8", LibKernel::KernelGetOperationMode);
 	LIB_FUNC("fTx66l5iWIA", FileSystem::KernelFsync);
 	LIB_FUNC("30Rh4ixbKy4", FileSystem::KernelFsync); // sceKernelFdatasync

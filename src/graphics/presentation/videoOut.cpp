@@ -1865,6 +1865,21 @@ KYTY_SYSV_ABI int VideoOutSetWindowModeMargins(int handle, int top, int bottom) 
 	return OK;
 }
 
+KYTY_SYSV_ABI int VideoOutSetGlobalBlendSpace(int handle, uint32_t space, uint32_t option) {
+	PRINT_NAME();
+
+	[[maybe_unused]] auto* ctx = DriverState().Get(handle);
+	if (ctx == nullptr) {
+		return VIDEO_OUT_ERROR_INVALID_HANDLE;
+	}
+
+	LOGF("\t space  = %u\n"
+	     "\t option = %u\n",
+	     space, option);
+
+	return OK;
+}
+
 KYTY_SYSV_ABI int VideoOutLatencyControlWaitBeforeInput(int handle) {
 	PRINT_NAME();
 

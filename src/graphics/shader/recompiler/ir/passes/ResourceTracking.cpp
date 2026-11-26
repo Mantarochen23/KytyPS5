@@ -1,3 +1,4 @@
+#include <stdexcept>
 #include "graphics/shader/recompiler/ir/passes/ResourceTracking.h"
 
 #include "common/assert.h"
@@ -643,8 +644,7 @@ private:
 		const auto message =
 		    fmt::format("shader resource tracking: hash=0x{:016x} stage={} pc=0x{:08x} {}",
 		                m_program.shader_hash, StageName(m_program.stage), pc, reason);
-		EXIT("%s", message.c_str());
-		std::abort();
+		throw std::runtime_error(message);
 	}
 
 	Value NativeDescriptorSource(Value value, uint32_t reg, uint32_t use_pc) const {
@@ -3688,6 +3688,13 @@ private:
 		}
 		if (table_source.dword_count != 4u || table_offset != 0u || table_immediate != 0u || indexed)
 			return false;
+		// A bounded table V# supplies every reachable descriptor without reading the GPU key,
+		// as for loads. Used when the key is not a bounded loop-selected material value.
+		const auto scalar_table = [&] {
+			if (plan.split_offsets) return false;
+			indirect.table_scalar = true;
+			return finish();
+		};
 		const auto* lane_read = key.Resolve().TryInstruction();
 		if (lane_read == nullptr || lane_read->GetOpcode() != ValueOpcode::ReadFirstLane)
 			return false;
@@ -3695,14 +3702,16 @@ private:
 		for (const auto& use: handle.Uses()) {
 			const auto* value = UniformizedMaterialValue(
 			    key, *use.user, use.user->Arg(use.user->NumArgs() - 1u));
-			if (value == nullptr || (selected != nullptr && selected != value)) return false;
+			if (value == nullptr || (selected != nullptr && selected != value))
+				return scalar_table();
 			selected = value;
 		}
 		DescriptorSource::IndirectDescriptor::SelectorRead selector;
 		const auto* read = IndexedMaterialRead(selected->Arg(1).Resolve().TryInstruction(),
 		                                       selected->Arg(0), selector);
 		if (read == nullptr || !MakeRuntimeTableSource(*read, material_source) ||
-		    !BoundedSelectedIndex(read->Arg(1), read->Arg(4), indirect)) return false;
+		    !BoundedSelectedIndex(read->Arg(1), read->Arg(4), indirect))
+			return scalar_table();
 		selector.source = InternSource(material_source);
 		indirect.selector = std::move(selector);
 		return finish();
@@ -4175,8 +4184,17 @@ private:
 			                [](Value word) { return word.Resolve().GetType() == Type::U32; })) {
 				return false;
 			}
+			if (expected == ValueOpcode::GetSamplerResource && m_sampler_fallback.has_value()) {
+				// Unknown sampler descriptor pattern: reuse the last successfully resolved
+				// sampler descriptor rather than aborting the whole compile.
+				source = InternSource(*m_sampler_fallback);
+				return true;
+			}
 			Fail(pc, fmt::format("{} dword {} is not a valid runtime value",
 			                     ValueOpcodeName(expected), bad_dword));
+		}
+		if (expected == ValueOpcode::GetSamplerResource) {
+			m_sampler_fallback = descriptor;
 		}
 		source = InternSource(descriptor);
 		return true;
@@ -4533,6 +4551,7 @@ private:
 	std::vector<MemoryPatch>                   m_memory_patches;
 	std::vector<IndirectDescriptorPlan>             m_indirect_descriptors;
 	std::map<const Inst*, Value>              m_descriptor_values;
+	std::optional<DescriptorSource>           m_sampler_fallback;
 	mutable std::unordered_map<const Inst*, bool>   m_loop_proofs; // By loop-bound comparison.
 	bool                                       m_shader_writes = false;
 };

@@ -111,7 +111,7 @@ NativeStorageBuffer(RenderContext& context, const PreparedBindings::BufferSource
                     const ShaderRecompiler::IR::BufferResource& resource, uint32_t& buffer_offset) {
 	buffer_offset = 0;
 
-	const auto& [address, size, id] = source;
+	auto [address, size, id] = source;
 	if (address == 0 || size == 0) {
 		// Null descriptors read zero and drop writes, with or without shader bounds checks.
 		return {nullptr, 0, vk::WholeSize};
@@ -119,7 +119,8 @@ NativeStorageBuffer(RenderContext& context, const PreparedBindings::BufferSource
 	const auto& graphics  = context.GetGraphics();
 	const auto  alignment = graphics.StorageMinAlignment();
 	if (size > graphics.GetPhysicalDeviceProperties().limits.maxStorageBufferRange) {
-		EXIT("storage buffer range is unsupported\n");
+		printf("!!! oversized storage buffer clamped: size=0x%zx\n", (size_t)size);
+		size = graphics.GetPhysicalDeviceProperties().limits.maxStorageBufferRange - 256;
 	}
 	auto [buffer, offset] = context.GetBufferCache().ObtainBuffer(
 	    address, size, resource.written,

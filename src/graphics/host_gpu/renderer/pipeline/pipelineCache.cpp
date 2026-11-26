@@ -213,8 +213,10 @@ bool PipelineCache::Program::RefreshCallSource(const ShaderRecompiler::IR::SrtRu
 template <bool HasCalls>
 ShaderModule* PipelineCache::Program::FindModule(const ShaderRecompiler::IR::SrtRuntime& runtime,
                                                  ShaderRecompiler::IR::PushData::Window push_data) {
-	EXIT_IF(!ShaderRecompiler::IR::MaterializeResources(resource_plan, runtime, resources,
-	                                                    specialization));
+	if (!ShaderRecompiler::IR::MaterializeResources(resource_plan, runtime, resources,
+	                                                specialization)) {
+		return nullptr;
+	}
 	for (auto& candidate: modules) {
 		const auto& layout = candidate.info.bindings;
 		if (layout.push_data_start_dword !=
@@ -361,6 +363,8 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 	}
 	auto* current = entry == m_program_cache.end() ? &source : entry->second.call_source.get();
 	ShaderRecompiler::TranslateResult translated;
+	bool tracking_failed = false;
+	try {
 	if (current != nullptr) {
 		if (!current->calls.empty()) {
 			if (entry == m_program_cache.end()) ShaderRecompiler::RefreshShaderSource(*current, runtime);
@@ -372,6 +376,19 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 	} else {
 		translated = ShaderRecompiler::TranslateProgram(params.code, options);
 	}
+	} catch (const std::exception& e) {
+		PipelineCacheLog("!!! SHADER DISPATCH SKIP (resource tracking failed) shader=0x{:016x}: {}",
+		                 params.hash, e.what());
+		tracking_failed = true;
+	}
+	if (tracking_failed) {
+		if (entry == m_program_cache.end()) {
+			m_program_cache.emplace(m_lookup_key, Program {.skip_dispatch = true});
+		} else {
+			entry->second.skip_dispatch = true;
+		}
+		return nullptr;
+	}
 	if (entry == m_program_cache.end()) {
 		auto retained = !source.calls.empty()
 		                    ? std::make_unique<ShaderRecompiler::ShaderSource>(std::move(source))
@@ -381,8 +398,14 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 		    .resource_plan = ShaderRecompiler::IR::ExtractResourcePlan(translated.program),
 		}).first;
 		auto& program = entry->second;
-		EXIT_IF(!ShaderRecompiler::IR::MaterializeResources(
-		    program.resource_plan, runtime, program.resources, program.specialization));
+		if (!ShaderRecompiler::IR::MaterializeResources(program.resource_plan, runtime,
+		                                                program.resources, program.specialization)) {
+			PipelineCacheLog("!!! SHADER DISPATCH SKIP (resource materialization failed) "
+			                 "shader=0x{:016x}; rendering is incomplete",
+			                 params.hash);
+			program.skip_dispatch = true;
+			return nullptr;
+		}
 	} else if (source_changed) {
 		entry->second.resource_plan = ShaderRecompiler::IR::ExtractResourcePlan(translated.program);
 		if (const auto* module = entry->second.FindModule<true>(runtime, push_data)) {

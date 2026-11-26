@@ -1570,6 +1570,13 @@ static int64_t KYTY_SYSV_ABI MeasureAmmCommandSizeMapWithGpuMaskId(uint64_t, uin
 	return AMM_MAP_RECORD_SIZE;
 }
 
+static int64_t KYTY_SYSV_ABI MeasureAmmCommandSizeAllocatePaForPrt(uint64_t, uint64_t, int32_t,
+                                                                   int32_t) {
+	PRINT_NAME();
+
+	return AMM_MAP_RECORD_SIZE;
+}
+
 static int64_t KYTY_SYSV_ABI MeasureAmmCommandSizeMapDirect(uint64_t, uint64_t, uint64_t, int32_t,
                                                             int32_t) {
 	PRINT_NAME();
@@ -2223,6 +2230,30 @@ static int KYTY_SYSV_ABI AmmCommandBufferMapAsPrt(void* command_buffer, uint64_t
 	           : LibKernel::KERNEL_ERROR_EBUSY;
 }
 
+static int KYTY_SYSV_ABI AmmCommandBufferAllocatePaForPrt(void* command_buffer, uint64_t va,
+                                                          uint64_t size, int32_t type,
+                                                          int32_t prot) {
+	PRINT_NAME();
+
+	if (command_buffer == nullptr || !ValidateAmmMapArgs(va, size)) {
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+
+	// Physical backing for a PRT range: allocate real memory at the VA so the game can write to it.
+	CommandBufferState::AmmMapCommand command {};
+	command.kind = AmmCommandKind::MapAuto;
+	command.va   = va;
+	command.size = size;
+	command.type = type;
+	command.prot = (prot | PROT_GPU_READ | PROT_GPU_WRITE) &
+	               ~(PROT_AMPR_READ | PROT_AMPR_WRITE | PROT_ACP_READ | PROT_ACP_WRITE);
+
+	return AppendCommandRecord(reinterpret_cast<uint64_t>(command_buffer), command,
+	                           AMM_MAP_RECORD_SIZE)
+	           ? OK
+	           : LibKernel::KERNEL_ERROR_EBUSY;
+}
+
 static int KYTY_SYSV_ABI AmmCommandBufferRemapIntoPrt(void* command_buffer, uint64_t va,
                                                       uint64_t old_va, uint64_t size, int32_t prot,
                                                       int32_t prot_mask) {
@@ -2473,6 +2504,8 @@ LIB_DEFINE(InitAmpr_1) {
 	LIB_FUNC("ojBkmG7+CgE", Ampr::AmmCommandBufferMapWithGpuMaskId);
 	LIB_FUNC("8TBE+9XCZbI", Ampr::AmmCommandBufferMapDirect);
 	LIB_FUNC("kOfZlhbVAkc", Ampr::AmmCommandBufferMapDirectWithGpuMaskId);
+	LIB_FUNC("d3lKWPM6odc", Ampr::AmmCommandBufferAllocatePaForPrt);
+	LIB_FUNC("2yYv9QWB3hU", Ampr::MeasureAmmCommandSizeAllocatePaForPrt);
 	LIB_FUNC("ZJCgt+aPHAU", Ampr::AmmCommandBufferMapAsPrt);
 	LIB_FUNC("0Xo9g4goDXU", Ampr::AmmCommandBufferRemapIntoPrt);
 	LIB_FUNC("3A2X6OCHtnA", Ampr::AmmCommandBufferUnmapToPrt);
