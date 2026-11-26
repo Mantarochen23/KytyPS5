@@ -205,6 +205,20 @@ public:
 		bool                    failed                = false;
 	};
 
+	static constexpr size_t MaxIndexedKeysPerHash = 4;
+
+	struct ProgramKey {
+		ShaderType            stage           = ShaderType::Unknown;
+		uint64_t              hash            = 0;
+		uint32_t              user_data_count = 0;
+		std::vector<uint32_t> static_state;
+
+		bool operator==(const ProgramKey&) const = default;
+	};
+
+	// Returns the indexed ProgramKeys previously recorded for `hash` (empty if none or disabled).
+	[[nodiscard]] std::span<const ProgramKey> FindIndexedKeys(uint64_t hash) const;
+
 	// Reads the shaders and registers bound in `command` into the state's shader stages.
 	void GetGraphicsPrograms(const CommandBuffer& command, DrawRenderState& state);
 	// Null skips the dispatch unless `pending` is non-null and set to true (building on a worker).
@@ -259,15 +273,6 @@ private:
 		                            ShaderRecompiler::IR::PushData::Window              push_data);
 	};
 
-	struct ProgramKey {
-		ShaderType            stage           = ShaderType::Unknown;
-		uint64_t              hash            = 0;
-		uint32_t              user_data_count = 0;
-		std::vector<uint32_t> static_state;
-
-		bool operator==(const ProgramKey&) const = default;
-	};
-
 	// Variants of one source share a bucket; ProgramKey equality compares the state.
 	struct ProgramKeyHash {
 		std::size_t operator()(const ProgramKey& key) const { return key.hash; }
@@ -292,6 +297,8 @@ private:
 	std::unordered_map<GraphicsPipelineKey, Pipeline, GraphicsPipelineKeyHash> m_graphics_pipelines;
 	std::unordered_map<uint64_t, Pipeline>                                     m_compute_pipelines;
 	std::unordered_map<uint64_t, ShaderTessellationInputInfo>                  m_tess_layouts;
+	// Shader hash -> distinct ProgramKeys observed for next-boot lookup (--shader-key-index).
+	std::unordered_map<uint64_t, std::vector<ProgramKey>>                      m_key_index;
 	// Records everything first created if a shader store is open, and writes the driver cache.
 	ShaderStoreWriter m_store;
 
@@ -380,6 +387,8 @@ private:
 	void StoreModule(const ProgramKey& key, const Program& program, const ShaderModule& module,
 	                 const std::vector<uint32_t>& spirv);
 	void StoreFailedProgram(const ProgramKey& key, std::string_view reason);
+	bool RecordIndexedKey(const ProgramKey& key, bool persist);
+	void StoreKeyIndex(const ProgramKey& key);
 	void StorePipeline(const GraphicsPipelineKey& key);
 	void StoreLayout(uint64_t key, const ShaderTessellationInputInfo& layout);
 	// Every module by id, with id 0 naming an absent stage.

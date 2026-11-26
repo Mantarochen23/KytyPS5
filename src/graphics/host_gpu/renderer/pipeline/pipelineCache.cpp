@@ -207,6 +207,24 @@ uint64_t PipelineCache::ProgramVariantKey() const {
 	return value;
 }
 
+std::span<const PipelineCache::ProgramKey> PipelineCache::FindIndexedKeys(uint64_t hash) const {
+	const auto found = m_key_index.find(hash);
+	return found == m_key_index.end() ? std::span<const ProgramKey> {}
+	                                  : std::span<const ProgramKey> {found->second};
+}
+
+bool PipelineCache::RecordIndexedKey(const ProgramKey& key, bool persist) {
+	auto& keys = m_key_index[key.hash];
+	if (std::ranges::find(keys, key) != keys.end() || keys.size() >= MaxIndexedKeysPerHash) {
+		return false;
+	}
+	keys.push_back(key);
+	if (persist) {
+		StoreKeyIndex(key);
+	}
+	return true;
+}
+
 ShaderRecompiler::Spirv::Profile SpirvProfile(const GraphicContext& graphics) {
 	// AMD GPUs (vendor 0x1002) run NMin/NMax as v_min/v_max, which give the guest's NaN and
 	// signed-zero results; GLSL.std.450 alone does not order -0 below +0.
@@ -515,6 +533,9 @@ const ShaderModule* PipelineCache::GetProgramImpl(const ShaderParams& params, In
 	BuildStageStaticKey(input_info, m_lookup_key.static_state);
 	m_lookup_key_ready = true;
 	Common::ShaderRegLedger::NoteUse(params.hash, LedgerStage(options.stage), ProgramVariantKey());
+	if (Config::ShaderKeyIndexEnabled()) {
+		RecordIndexedKey(m_lookup_key, /*persist=*/true);
+	}
 	auto entry = m_program_cache.find(m_lookup_key);
 	const auto bind = [&](const ShaderModule& module) {
 		input_info.stage = {.module = &module, .resources = &entry->second.resources};
