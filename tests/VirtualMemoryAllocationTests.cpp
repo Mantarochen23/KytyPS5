@@ -1,3 +1,4 @@
+#include "common/ports.h"
 #include "common/emulatorConfig.h"
 #include "common/file.h"
 #include "common/logging/log.h"
@@ -1094,7 +1095,11 @@ void TestFlexibleMemoryCapacityIsBootFixed() {
 	Check(test, configured == TestFlexibleMemorySize,
 	      "boot flexible pool did not use the param.json value");
 	Check(test, configured == baseline, "boot flexible pool did not start at configured capacity");
-	Check(test, backing == GuestMemoryBudget - ReservedCacheSize - TestTableOverhead,
+	// The large-memory-budget port (on by default) adds the 1216 MiB of the larger budget.
+	const uint64_t budget = GuestMemoryBudget + (Config::PortEnabled(Config::Port::LargeMemoryBudget)
+	                                                 ? 1216ull * 1024ull * 1024ull
+	                                                 : 0ull);
+	Check(test, backing == budget - ReservedCacheSize - TestTableOverhead,
 	      "boot backing is not the 12.5 GiB budget less the reserved cache and table overhead");
 	Check(test, backing == Libs::LibKernel::Memory::KernelGetDirectMemorySize() + configured,
 	      "direct and flexible regions do not partition the boot backing");
