@@ -153,6 +153,15 @@ struct ConfigOptions {
 	// --render-stall-report-s: when no frame was recorded for this many seconds, print one line
 	// with what the render thread is doing, then again every that many seconds. 0 = off.
 	uint32_t                 render_stall_report_s      = 5;
+	// --guest-fault-park: a guest thread that takes a fault nobody resolves is reported and parked
+	// instead of ending the process.
+	bool                     guest_fault_park           = false;
+	// --guest-fault-report-only: on that fault, also dump guest code around the pc and the return
+	// addresses into the run's log folder.
+	bool                     guest_fault_report_only    = false;
+	// --guest-clock-hold-on-stall <ms>: the guest clock stands still while no frame was recorded for
+	// more than this long and the render side is busy with shaders. 0 = off.
+	uint32_t                 guest_clock_hold_ms        = 0;
 };
 
 void Load(const ConfigOptions& cfg);
@@ -259,6 +268,9 @@ uint32_t AsyncPumpBudgetMs();
 uint32_t AsyncWorkers();
 bool     AsyncSpeculativeModules();
 uint32_t RenderStallReportSeconds();
+bool     GuestFaultParkEnabled();
+bool     GuestFaultReportOnlyEnabled();
+uint32_t GuestClockHoldMs();
 
 } // namespace Config
 

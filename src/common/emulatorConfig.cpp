@@ -514,4 +514,16 @@ uint32_t RenderStallReportSeconds() {
 	return g_config != nullptr ? g_config->render_stall_report_s : 5u;
 }
 
+bool GuestFaultParkEnabled() {
+	return g_config != nullptr && g_config->guest_fault_park;
+}
+
+bool GuestFaultReportOnlyEnabled() {
+	return g_config != nullptr && g_config->guest_fault_report_only;
+}
+
+uint32_t GuestClockHoldMs() {
+	return g_config != nullptr ? g_config->guest_clock_hold_ms : 0u;
+}
+
 } // namespace Config

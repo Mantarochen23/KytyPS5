@@ -152,7 +152,17 @@ static void PrintUsage() {
 	         "                                       is stored at once. Default: 1.\n"
 	         "  --render-stall-report-s <n>          When no frame was recorded for n seconds, print one line\n"
 	         "                                       with what the render thread is doing, then every n\n"
-	         "                                       seconds. 0 = off. Default: 5.\n");
+	         "                                       seconds. 0 = off. Default: 5.\n"
+	         "  --guest-fault-park                   Debug: a guest thread that takes a fault nobody resolves\n"
+	         "                                       prints the fault report once per pc and parks forever\n"
+	         "                                       instead of ending the process.\n"
+	         "  --guest-fault-report-only            Debug: on that fault also write fault-code-<n>.txt (hex of\n"
+	         "                                       0x400 guest code bytes around the pc and each return\n"
+	         "                                       address) into $KYTY_RUN_OUT, or the current folder.\n"
+	         "  --guest-clock-hold-on-stall <ms>     Debug: the guest clock (time stamp counter, process time,\n"
+	         "                                       clock_gettime, gettimeofday) stands still while no frame\n"
+	         "                                       was recorded for more than <ms> and the render side is\n"
+	         "                                       busy with shaders. 0 = off. Default: 0.\n");
 }
 
 static bool NextArg(int argc, char* argv[], int& index, std::string& out) {
@@ -286,6 +296,8 @@ static constexpr Flag FLAGS[] = {
 #endif
     {"--bda-table-validate", &ConfigOptions::bda_table_validate_enabled},
     {"--shader-key-index", &ConfigOptions::shader_key_index_enabled},
+    {"--guest-fault-park", &ConfigOptions::guest_fault_park},
+    {"--guest-fault-report-only", &ConfigOptions::guest_fault_report_only},
 };
 
 static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_help) {
@@ -579,6 +591,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 		} else if (arg == "--render-stall-report-s") {
 			if (!ParseUint32(value, options.config.render_stall_report_s)) {
 				::printf("invalid render stall report value: %s\n", value.c_str());
+				return false;
+			}
+		} else if (arg == "--guest-clock-hold-on-stall") {
+			if (!ParseUint32(value, options.config.guest_clock_hold_ms)) {
+				::printf("invalid guest clock hold value: %s\n", value.c_str());
 				return false;
 			}
 		} else {
