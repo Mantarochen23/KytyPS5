@@ -9709,25 +9709,27 @@ void TestSrtDynamicSlotDescriptor() {
         "dynamic-SRT-rooted pointer descriptor did not finish translation");
 }
 
-// Independent per-DWORD offsets can wrap to different table rows, so a bounded scalar scan
-// cannot prove which descriptor the store reaches. This shape must stay rejected.
+// A control-dependent V# word with no invariant value cannot be decoded by the host; a
+// GPU-selected store through it must stay rejected.
 void TestSrtRootedStoreRejected() {
+  namespace CFG = Libs::Graphics::ShaderRecompiler::CFG;
   Fixture f;
-  const auto table = f.Buffer({f.UserData(0), f.UserData(1), f.UserData(2), f.UserData(3)});
-  const auto key = f.UserData(4u);
-  std::array<Value, 4> words{};
-  for (uint32_t word = 0; word < 4u; ++word) {
-    words[word] = f.Emit(ValueOpcode::ReadConstBuffer,
-        {table, f.Emit(ValueOpcode::IAdd32,
-                    {f.Emit(ValueOpcode::IMul32, {key, Value(16u)}), Value(word * 4u)})},
-        f.AddMemory({.kind = ResourceKind::ScalarBuffer}, 0x180u));
-  }
-  const auto handle = f.Buffer(words, 0x190u);
+  auto *left = f.block;
+  auto *right = f.AddBlock();
+  auto *merge = f.AddBlock();
+  left->AddBranch(merge);
+  right->AddBranch(merge);
+  merge->terminator.kind = CFG::TerminatorKind::Return;
+  auto &phi = merge->AppendNewInst(ValueOpcode::Phi, {}, uint64_t(Type::U32));
+  phi.AddPhiOperand(left, Value(0x100u));
+  phi.AddPhiOperand(right, Value(0x200u));
+  f.block = merge;
+  const auto handle = f.Buffer({Value(&phi), Value(0u), Value(64u), Value(0u)}, 0x190u);
   f.Emit(ValueOpcode::StoreBufferU32,
       {handle, Value(0u), Value(0u), Value(0u), Value(7u), Value(true)},
       f.AddMemory({.kind = ResourceKind::Buffer, .idxen = true}, 0x1a0u));
   CheckFatal([&] { f.PlanAndTrack(); }, "not a valid runtime value",
-             "split per-DWORD pointer offsets were treated as one bounded descriptor table");
+             "control-dependent store V# was accepted without a decoded descriptor");
 }
 
 void TestTranslatorCapabilityVersion() {
