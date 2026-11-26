@@ -57,7 +57,9 @@ GuestGpu::GuestGpu(RenderContext& renderer): m_renderer(renderer) {
 		m_work_available.Signal();
 	});
 	m_thread = std::jthread(ThreadRun, this);
-	g_stall_reporter = std::make_unique<RenderStallReporter>(Config::RenderStallReportSeconds());
+	g_stall_reporter = std::make_unique<RenderStallReporter>(
+	    Config::RenderStallReportSeconds(), Config::GuestClockHoldMs(),
+	    Config::GuestFaultParkEnabled());
 }
 
 GuestGpu::~GuestGpu() {
