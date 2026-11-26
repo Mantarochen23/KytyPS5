@@ -43,7 +43,13 @@ Not yet known: whether pictures are correct once the burst is survived; what com
 | T5 | Shader translation off the command thread and/or a disk cache of translated SPIR-V + reflection keyed by shader hash and static key, written incrementally so every run gets further; also profile the IR passes named above for superlinear behaviour | finding 1, the current wall | large |
 | T6 | Time the untimed IR passes per shader in the log (one line per pass over 5 ms) | makes finding 1 visible without perf | small |
 
-Taken so far: none recorded here. Write your name and branch next to a task when you start.
+Taken so far:
+- `T1`: `v0lumehi` (`neon/t1-descriptor-table`)
+- `T2`: `v0lumehi` (`neon/t2-radv-test-harness`)
+- `T3`: `v0lumehi` (`neon/t3-decode-audit`)
+- `T4`: `v0lumehi` (`neon/t4-device-lost-triage`)
+- `T5`: `v0lumehi` (`neon/t5-shader-cache-async`)
+- `T6`: `v0lumehi` (`neon/t6-ir-pass-timing`)
 
 ## How to reproduce a finding
 
