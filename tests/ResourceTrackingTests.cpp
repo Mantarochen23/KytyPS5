@@ -15,6 +15,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <type_traits>
 #include <vector>
@@ -9621,9 +9622,12 @@ void TestMalformedMemoryKindsRejected() {
 
 } // namespace
 
-int main() {
+int main(int argc, char **argv) {
   try {
-    const auto Run = [](const char *name, auto test) {
+    // Optional substring filter, for running a group when an unrelated test aborts.
+    const std::string_view filter = argc > 1 ? std::string_view(argv[1]) : std::string_view{};
+    const auto Run = [&](const char *name, auto test) {
+      if (!filter.empty() && std::string_view(name).find(filter) == std::string_view::npos) return;
       try {
         test();
       } catch (const std::exception &exception) {
