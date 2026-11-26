@@ -601,7 +601,8 @@ bool RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 	dispatch_op.dim_y       = thread_group_y;
 	dispatch_op.dim_z       = thread_group_z;
 	dispatch_op.stage_count = 1;
-	dispatch_op.stages[0]   = {program.stage, program.shader_hash, input_info.stage.module->id};
+	dispatch_op.stages[0]   = {program.stage, program.shader_hash, input_info.stage.module->id,
+	                           program.info.uses_dma};
 	CaptureComputeBufferBreadcrumbs(m_context, cs_regs, bindings, dispatch_op);
 	auto&          graphics  = m_context.GetGraphics();
 	const uint32_t marker_id = graphics.breadcrumbs.BeginOp(graphics, vk_buffer, dispatch_op);
@@ -695,7 +696,8 @@ bool RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 	OpBreadcrumb dispatch_op {};
 	dispatch_op.kind        = BreadcrumbOpKind::DispatchIndirect;
 	dispatch_op.stage_count = 1;
-	dispatch_op.stages[0]   = {program.stage, program.shader_hash, input_info.stage.module->id};
+	dispatch_op.stages[0]   = {program.stage, program.shader_hash, input_info.stage.module->id,
+	                           program.info.uses_dma};
 	CaptureComputeBufferBreadcrumbs(m_context, cs_regs, bindings, dispatch_op);
 	auto&          graphics  = m_context.GetGraphics();
 	const uint32_t marker_id = graphics.breadcrumbs.BeginOp(graphics, vk_buffer, dispatch_op);

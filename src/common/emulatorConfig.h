@@ -130,6 +130,7 @@ struct ConfigOptions {
 	Keymap keymap;
 	// Ordinary boots need a non-null argv[0]; --guest-exec supplies the caller's arguments.
 	std::vector<std::string> guest_arguments {""};
+	bool                     bda_table_validate_enabled = false;
 };
 
 void Load(const ConfigOptions& cfg);
@@ -225,6 +226,7 @@ bool RedZoneProtectionEnabled();
 
 const Keymap& GetKeymap();
 const std::vector<std::string>& GetGuestArguments();
+bool BdaTableValidateEnabled();
 
 } // namespace Config
 

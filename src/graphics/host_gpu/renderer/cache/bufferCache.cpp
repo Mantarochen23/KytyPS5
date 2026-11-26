@@ -3,6 +3,7 @@
 #include "common/alignment.h"
 #include "common/assert.h"
 #include "common/debugCounters.h"
+#include "common/emulatorConfig.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
 #include "graphics/guest_gpu/graphicsRun.h"
@@ -17,6 +18,7 @@
 #include <algorithm>
 #include <cinttypes>
 #include <cstring>
+#include <fmt/format.h>
 #include <memory>
 #include <utility>
 #include <vector>
@@ -51,6 +53,171 @@ std::pair<Buffer*, uint64_t> UploadMemory(GraphicContext& graphics, CommandSched
 }
 
 } // namespace
+
+std::optional<std::string> BufferCache::BdaTableValidator::ValidateWrite(
+    BufferId id, uint64_t cpu_address, uint64_t buffer_size, vk::DeviceAddress device_address,
+    bool is_deleted, uint64_t table_offset, std::span<const vk::DeviceAddress> entries) {
+	if (!id || id == NULL_BUFFER_ID) {
+		return fmt::format("write with invalid buffer id={}", id.index);
+	}
+	if (is_deleted) {
+		return fmt::format("write for already deleted buffer id={} guest=0x{:016x}", id.index,
+		                   cpu_address);
+	}
+	if (device_address == 0) {
+		return fmt::format("write with null device address id={} guest=0x{:016x}", id.index,
+		                   cpu_address);
+	}
+	if (!GuestRange {cpu_address, buffer_size}.Valid()) {
+		return fmt::format("write for invalid guest range id={} guest=0x{:016x} size=0x{:x}",
+		                   id.index, cpu_address, buffer_size);
+	}
+	if ((cpu_address & (CACHING_PAGESIZE - 1)) != 0) {
+		return fmt::format("write with unaligned guest start id={} guest=0x{:016x}", id.index,
+		                   cpu_address);
+	}
+	if (buffer_size == 0 || (buffer_size & (CACHING_PAGESIZE - 1)) != 0) {
+		return fmt::format("write with partial-page buffer size id={} guest=0x{:016x} size=0x{:x}",
+		                   id.index, cpu_address, buffer_size);
+	}
+	const uint64_t expected_pages = buffer_size >> CACHING_PAGEBITS;
+	if (entries.size() != expected_pages) {
+		return fmt::format("write entry count mismatch id={} entries={} expected={}", id.index,
+		                   entries.size(), expected_pages);
+	}
+	const uint64_t first_page = PageIndex(cpu_address);
+	const uint64_t expected_offset = first_page * sizeof(vk::DeviceAddress);
+	if (table_offset != expected_offset) {
+		return fmt::format("write table offset mismatch id={} offset=0x{:x} expected=0x{:x}",
+		                   id.index, table_offset, expected_offset);
+	}
+	if (first_page > CACHING_NUMPAGES || expected_pages > CACHING_NUMPAGES - first_page ||
+	    table_offset > BDA_PAGETABLE_SIZE ||
+	    expected_pages * sizeof(vk::DeviceAddress) > BDA_PAGETABLE_SIZE - table_offset) {
+		return fmt::format("write out of page-table bounds id={} first_page={} pages={}", id.index,
+		                   first_page, expected_pages);
+	}
+	if (device_address > UINT64_MAX - buffer_size) {
+		return fmt::format("write device address wraps 64-bit id={} bda=0x{:016x} size=0x{:x}",
+		                   id.index, static_cast<uint64_t>(device_address), buffer_size);
+	}
+	for (uint64_t i = 0; i < expected_pages; ++i) {
+		const uint64_t guest_page = cpu_address + (i << CACHING_PAGEBITS);
+		const uint64_t page_index = first_page + i;
+		if (PageIndex(guest_page) != page_index) {
+			return fmt::format(
+			    "write crosses guest window boundary id={} guest=0x{:016x} page={} expected={}",
+			    id.index, guest_page, PageIndex(guest_page), page_index);
+		}
+		const vk::DeviceAddress expected_bda = device_address + (i << CACHING_PAGEBITS);
+		const vk::DeviceAddress actual_bda   = entries[i];
+		if (actual_bda != expected_bda) {
+			return fmt::format(
+			    "write entry mismatch id={} page={} actual=0x{:016x} expected=0x{:016x}", id.index,
+			    page_index, static_cast<uint64_t>(actual_bda),
+			    static_cast<uint64_t>(expected_bda));
+		}
+		if (actual_bda < device_address ||
+		    (actual_bda - device_address) + CACHING_PAGESIZE > buffer_size) {
+			return fmt::format("write entry exceeds buffer bounds id={} page={} bda=0x{:016x}",
+			                   id.index, page_index, static_cast<uint64_t>(actual_bda));
+		}
+		if (const auto it = m_entries.find(page_index); it != m_entries.end()) {
+			return fmt::format(
+			    "write overwrites live entry without prior clear page={} old_id={} old_bda=0x{:016x}"
+			    " new_id={} new_bda=0x{:016x}",
+			    page_index, it->second.buffer_id.index,
+			    static_cast<uint64_t>(it->second.device_address), id.index,
+			    static_cast<uint64_t>(actual_bda));
+		}
+	}
+	for (uint64_t i = 0; i < expected_pages; ++i) {
+		const uint64_t page_index = first_page + i;
+		m_entries.emplace(page_index, BdaTableShadowEntry {
+		                                  .device_address = entries[i],
+		                                  .buffer_id      = id,
+		                                  .guest_address  = cpu_address + (i << CACHING_PAGEBITS),
+		                              });
+	}
+	m_buffer_pages[id.index] += expected_pages;
+	return std::nullopt;
+}
+
+std::optional<std::string> BufferCache::BdaTableValidator::ValidateClear(
+    BufferId id, uint64_t cpu_address, uint64_t buffer_size, vk::DeviceAddress device_address,
+    uint64_t table_offset, uint64_t size_pages) {
+	if (!id || id == NULL_BUFFER_ID) {
+		return fmt::format("clear with invalid buffer id={}", id.index);
+	}
+	if (!GuestRange {cpu_address, buffer_size}.Valid()) {
+		return fmt::format("clear for invalid guest range id={} guest=0x{:016x} size=0x{:x}",
+		                   id.index, cpu_address, buffer_size);
+	}
+	if ((cpu_address & (CACHING_PAGESIZE - 1)) != 0 ||
+	    buffer_size == 0 || (buffer_size & (CACHING_PAGESIZE - 1)) != 0) {
+		return fmt::format("clear with unaligned buffer id={} guest=0x{:016x} size=0x{:x}",
+		                   id.index, cpu_address, buffer_size);
+	}
+	const uint64_t expected_pages = buffer_size >> CACHING_PAGEBITS;
+	if (size_pages != expected_pages) {
+		return fmt::format("clear page count mismatch id={} pages={} expected={}", id.index,
+		                   size_pages, expected_pages);
+	}
+	const uint64_t first_page      = PageIndex(cpu_address);
+	const uint64_t expected_offset = first_page * sizeof(vk::DeviceAddress);
+	if (table_offset != expected_offset) {
+		return fmt::format("clear table offset mismatch id={} offset=0x{:x} expected=0x{:x}",
+		                   id.index, table_offset, expected_offset);
+	}
+	if (first_page > CACHING_NUMPAGES || size_pages > CACHING_NUMPAGES - first_page) {
+		return fmt::format("clear out of page-table bounds id={} first_page={} pages={}", id.index,
+		                   first_page, size_pages);
+	}
+	for (uint64_t i = 0; i < size_pages; ++i) {
+		const uint64_t page_index = first_page + i;
+		const auto     it         = m_entries.find(page_index);
+		if (it == m_entries.end()) {
+			return fmt::format("clear on absent shadow entry id={} page={} guest=0x{:016x}",
+			                   id.index, page_index, cpu_address + (i << CACHING_PAGEBITS));
+		}
+		const vk::DeviceAddress expected_bda = device_address + (i << CACHING_PAGEBITS);
+		if (it->second.buffer_id != id || it->second.device_address != expected_bda ||
+		    it->second.guest_address != cpu_address + (i << CACHING_PAGEBITS)) {
+			return fmt::format(
+			    "clear owner/address mismatch page={} expected_id={} actual_id={}"
+			    " expected_bda=0x{:016x} actual_bda=0x{:016x}",
+			    page_index, id.index, it->second.buffer_id.index,
+			    static_cast<uint64_t>(expected_bda),
+			    static_cast<uint64_t>(it->second.device_address));
+		}
+	}
+	for (uint64_t i = 0; i < size_pages; ++i) {
+		m_entries.erase(first_page + i);
+	}
+	if (const auto it = m_buffer_pages.find(id.index); it != m_buffer_pages.end()) {
+		if (it->second <= size_pages) {
+			m_buffer_pages.erase(it);
+		} else {
+			it->second -= size_pages;
+		}
+	}
+	return std::nullopt;
+}
+
+std::optional<std::string> BufferCache::BdaTableValidator::ValidateErase(BufferId id,
+                                                                         bool is_deleted) const {
+	if (!id || id == NULL_BUFFER_ID) {
+		return fmt::format("erase with invalid buffer id={}", id.index);
+	}
+	if (!is_deleted) {
+		return fmt::format("erasing buffer id={} without is_deleted set", id.index);
+	}
+	if (const auto it = m_buffer_pages.find(id.index); it != m_buffer_pages.end()) {
+		return fmt::format("erasing buffer id={} while {} page-table entries remain live", id.index,
+		                   it->second);
+	}
+	return std::nullopt;
+}
 
 void BufferCache::WriteDataBuffer(Buffer& buffer, uint64_t address, const void* source,
                                   uint64_t size) {
@@ -117,13 +284,47 @@ void BufferCache::ChangeRegister(BufferId id) {
 	const auto size_pages = pages.last_exclusive - pages.first;
 	const auto table_offset = PageIndex(buffer.CpuAddress()) * sizeof(vk::DeviceAddress);
 	if constexpr (insert) {
-		m_buffers.emplace(buffer.CpuAddress(), id);
+		const auto [inserted_it, inserted] = m_buffers.emplace(buffer.CpuAddress(), id);
 		m_total_used_memory += buffer.Size();
 		buffer.lru_id = m_lru_cache.Insert(id, m_gc_tick);
 		std::vector<vk::DeviceAddress> addresses;
 		addresses.reserve(size_pages);
 		for (uint64_t i = 0; i < size_pages; ++i) {
 			addresses.push_back(buffer.BufferDeviceAddress() + (i << CACHING_PAGEBITS));
+		}
+		if (m_validate_bda_table) {
+			if (!inserted || !m_slot_buffers.is_allocated(id) || buffer.Handle() == nullptr) {
+				EXIT("[bda-table-validate] register live-buffer invariant failed id=%u"
+				     " inserted=%d guest=0x%016" PRIx64 "\n",
+				     id.index, static_cast<int>(inserted), buffer.CpuAddress());
+			}
+			if (inserted_it != m_buffers.begin()) {
+				const auto& prev = m_slot_buffers[std::prev(inserted_it)->second];
+				if (prev.CpuAddress() + prev.Size() > buffer.CpuAddress()) {
+					EXIT("[bda-table-validate] register overlaps previous buffer prev=0x%016" PRIx64
+					     "+0x%" PRIx64 " cur=0x%016" PRIx64 "\n",
+					     prev.CpuAddress(), prev.Size(), buffer.CpuAddress());
+				}
+			}
+			if (const auto next_it = std::next(inserted_it); next_it != m_buffers.end()) {
+				if (buffer.CpuAddress() + buffer.Size() > next_it->first) {
+					EXIT("[bda-table-validate] register overlaps next buffer cur=0x%016" PRIx64
+					     "+0x%" PRIx64 " next=0x%016" PRIx64 "\n",
+					     buffer.CpuAddress(), buffer.Size(), next_it->first);
+				}
+			}
+			for (size_t page = pages.first; page < pages.last_exclusive; ++page) {
+				const auto* owner = m_page_table.Find(page);
+				if (owner == nullptr || *owner != id) {
+					EXIT("[bda-table-validate] register page-table owner mismatch id=%u page=%zu\n",
+					     id.index, page);
+				}
+			}
+			if (const auto err = m_bda_table_validator.ValidateWrite(
+			        id, buffer.CpuAddress(), buffer.Size(), buffer.TryBufferDeviceAddress(),
+			        buffer.is_deleted, table_offset, addresses)) {
+				EXIT("[bda-table-validate] %s\n", err->c_str());
+			}
 		}
 		WriteDataBuffer(m_bda_pagetable_buffer, table_offset,
 		                addresses.data(), addresses.size() * sizeof(vk::DeviceAddress));
@@ -132,6 +333,13 @@ void BufferCache::ChangeRegister(BufferId id) {
 		m_buffers.erase(m_buffers.find(buffer.CpuAddress()));
 		m_total_used_memory -= buffer.Size();
 		m_lru_cache.Free(buffer.lru_id);
+		if (m_validate_bda_table) {
+			if (const auto err = m_bda_table_validator.ValidateClear(
+			        id, buffer.CpuAddress(), buffer.Size(), buffer.TryBufferDeviceAddress(),
+			        table_offset, size_pages)) {
+				EXIT("[bda-table-validate] %s\n", err->c_str());
+			}
+		}
 		m_bda_pagetable_buffer.Fill(table_offset,
 		                            size_pages * sizeof(vk::DeviceAddress), 0);
 		buffer.is_deleted = true;
@@ -142,12 +350,24 @@ void BufferCache::TouchBuffer(const Buffer& buffer) {
 	m_lru_cache.Touch(buffer.lru_id, m_gc_tick);
 }
 
+void BufferCache::EraseBufferSlot(BufferId id) {
+	if (m_validate_bda_table) {
+		if (!m_slot_buffers.is_allocated(id)) {
+			EXIT("[bda-table-validate] erasing unallocated buffer slot id=%u\n", id.index);
+		}
+		if (const auto err = m_bda_table_validator.ValidateErase(id, m_slot_buffers[id].is_deleted)) {
+			EXIT("[bda-table-validate] %s\n", err->c_str());
+		}
+	}
+	m_slot_buffers.erase(id);
+}
+
 void BufferCache::DeleteBuffer(BufferId id) {
 	Unregister(id);
 	if (m_scheduler.Active()) {
-		m_scheduler.DeferOperation([this, id] { m_slot_buffers.erase(id); });
+		m_scheduler.DeferOperation([this, id] { EraseBufferSlot(id); });
 	} else {
-		m_slot_buffers.erase(id);
+		EraseBufferSlot(id);
 	}
 }
 
@@ -236,7 +456,11 @@ BufferCache::BufferCache(GraphicContext& graphics, CommandScheduler& scheduler,
       m_stream_buffer(graphics, scheduler, MemoryUsage::Stream, 64 * MiB),
       m_download_buffer(graphics, scheduler, MemoryUsage::Download, 64 * MiB),
       m_device_buffer(graphics, scheduler, MemoryUsage::DeviceLocal, 128 * MiB),
-      m_texture_cache(texture_cache) {
+      m_texture_cache(texture_cache),
+      m_validate_bda_table(Config::BdaTableValidateEnabled()) {
+	if (m_validate_bda_table) {
+		LOGF("[bda-table-validate] enabled\n");
+	}
 	std::memset(m_gds_buffer.Mapped().data(), 0, static_cast<size_t>(m_gds_buffer.Size()));
 	m_gds_buffer.Flush(0, m_gds_buffer.Size());
 	SetVulkanObjectNameF(m_graphics.device, m_bda_pagetable_buffer.Handle(),
@@ -710,7 +934,7 @@ void BufferCache::RunGarbageCollector() {
 		m_memory_tracker.UnmarkRegionAsGpuModified(buffer.CpuAddress(), buffer.Size());
 		m_memory_tracker.MarkRegionAsCpuModified(buffer.CpuAddress(), buffer.Size());
 		Unregister(id);
-		m_slot_buffers.erase(id);
+		EraseBufferSlot(id);
 	}
 }
 

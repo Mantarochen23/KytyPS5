@@ -45,6 +45,11 @@ void Load(const ConfigOptions& cfg) {
 	    env_fault != nullptr && env_fault[0] != '\0' && std::strcmp(env_fault, "0") != 0) {
 		g_config->gpu_fault_query_enabled = true;
 	}
+	if (const char* env_bda_validate = std::getenv("KYTY_BDA_TABLE_VALIDATE");
+	    env_bda_validate != nullptr && env_bda_validate[0] != '\0' &&
+	    std::strcmp(env_bda_validate, "0") != 0) {
+		g_config->bda_table_validate_enabled = true;
+	}
 	Common::DebugCounters::SetEnabled(cfg.perf_overlay_enabled);
 }
 
@@ -437,6 +442,10 @@ const Keymap& GetKeymap() {
 
 const std::vector<std::string>& GetGuestArguments() {
 	return g_config->guest_arguments;
+}
+
+bool BdaTableValidateEnabled() {
+	return g_config != nullptr && g_config->bda_table_validate_enabled;
 }
 
 } // namespace Config

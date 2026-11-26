@@ -34,6 +34,7 @@ struct ShaderStageBreadcrumb {
 	ShaderType stage     = {};
 	uint64_t   hash      = 0;
 	uint64_t   module_id = 0;
+	bool       uses_dma  = false;
 };
 
 struct OpBufferBreadcrumb {
@@ -82,11 +83,21 @@ public:
 	void Init(GraphicContext& graphics);
 	void Shutdown(GraphicContext& graphics);
 
+	struct ShaderHashSnapshot {
+		uint32_t                           last_op_id   = 0;
+		uint32_t                           submit_count = 0;
+		bool                               truncated    = false;
+		bool                               dma_filtered = false;
+		std::vector<ShaderStageBreadcrumb> shaders;
+	};
+
 	void     BeginSubmit(GraphicContext& graphics, vk::CommandBuffer cmd, uint64_t frame_num);
 	uint32_t BeginOp(GraphicContext& graphics, vk::CommandBuffer cmd, OpBreadcrumb op);
 	void     EndOp(GraphicContext& graphics, vk::CommandBuffer cmd, uint32_t marker_id);
 	void     EndSubmitRecording(GraphicContext& graphics, vk::CommandBuffer cmd);
 	void     MarkSubmitted(uint64_t tick, uint64_t known_gpu_tick);
+	[[nodiscard]] ShaderHashSnapshot CollectShaderHashesSince(uint32_t after_op_id,
+	                                                          size_t   max_shaders = 64);
 
 	void ReportDeviceLost(GraphicContext& graphics, const char* operation, vk::Result result,
 	                      uint64_t tick = 0, uint64_t known_gpu_tick = 0);

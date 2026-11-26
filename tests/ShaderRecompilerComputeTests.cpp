@@ -219,6 +219,18 @@ struct BufferCacheTestAccess {
   static bool IsBufferAllocated(const BufferCache &cache, BufferId id) {
     return cache.m_slot_buffers.is_allocated(id);
   }
+
+  static bool BdaTableValidationEnabled(const BufferCache &cache) {
+    return cache.m_validate_bda_table;
+  }
+
+  static size_t BdaTableValidatedPages(const BufferCache &cache) {
+    return cache.m_bda_table_validator.ActivePageCount();
+  }
+
+  static size_t BdaTableValidatedBuffers(const BufferCache &cache) {
+    return cache.m_bda_table_validator.TrackedBufferCount();
+  }
 };
 
 // Counts the vkCmdPipelineBarrier and vkCmdCopyBuffer calls recorded while it lives, and the
@@ -7689,6 +7701,66 @@ public:
               "staged BDA updates were stale, overwritten before their read, or incompletely flushed");
     }
     DestroyBuffer(&readback);
+    std::printf("[gpu]     %-32s ok\n", name);
+  }
+
+  void CheckBdaTableValidation() {
+    constexpr const char *name = "BdaTableValidation";
+    constexpr uint64_t page = BufferCache::CACHING_PAGESIZE;
+    constexpr uint64_t lower_base = 0x0000000208000000ull;
+    constexpr uint64_t ext_base = LibKernel::Memory::kExtendedMemoryBase + 0x100000ull;
+    EnsureRuntimeContext();
+
+    Config::ConfigOptions enabled_cfg{};
+    enabled_cfg.printf_direction = Config::LogDirection::Silent;
+    enabled_cfg.bda_table_validate_enabled = true;
+    Config::Load(enabled_cfg);
+    struct ConfigReset {
+      ~ConfigReset() {
+        Config::ConfigOptions defaults{};
+        defaults.printf_direction = Config::LogDirection::Silent;
+        Config::Load(defaults);
+      }
+    } reset_guard;
+
+    RenderContext context(m_runtime_context);
+    auto &scheduler = context.GetCommandScheduler();
+    HW::Context registers{};
+    HW::UserConfig user_config{};
+    HW::Shader shaders{};
+    scheduler.Begin(registers, user_config, shaders);
+    auto &cache = context.GetBufferCache();
+    Require(name, "validator enabled", BufferCacheTestAccess::BdaTableValidationEnabled(cache),
+            "BufferCache did not enable BDA table validation from config");
+
+    // Create two adjacent buffers, merge them via JoinOverlap, create an extended-window buffer,
+    // and evict all buffers via GC while the shadow validator checks every write, clear, and erase.
+    const auto first = cache.FindBuffer(lower_base, 2 * page);
+    const auto second = cache.FindBuffer(lower_base + 3 * page, 2 * page);
+    Require(name, "initial shadow count",
+            BufferCacheTestAccess::BdaTableValidatedPages(cache) == 4u &&
+                BufferCacheTestAccess::BdaTableValidatedBuffers(cache) == 2u,
+            "initial BDA shadow page/buffer counts did not match");
+    const auto merged = cache.FindBuffer(lower_base + page, 3 * page);
+    Require(name, "merged shadow count",
+            merged != first && merged != second &&
+                BufferCacheTestAccess::BdaTableValidatedPages(cache) == 5u &&
+                BufferCacheTestAccess::BdaTableValidatedBuffers(cache) == 1u,
+            "JoinOverlap did not keep BDA shadow counts consistent");
+    (void)cache.FindBuffer(ext_base, 2 * page);
+    Require(name, "extended window shadow count",
+            BufferCacheTestAccess::BdaTableValidatedPages(cache) == 7u &&
+                BufferCacheTestAccess::BdaTableValidatedBuffers(cache) == 2u,
+            "extended-window registration did not update BDA shadow counts");
+
+    BufferCacheTestAccess::SetGarbageCollectionThresholds(
+        cache, 0, std::numeric_limits<uint64_t>::max());
+    cache.RunGarbageCollector();
+    scheduler.Finish();
+    Require(name, "post-eviction shadow count",
+            BufferCacheTestAccess::BdaTableValidatedPages(cache) == 0u &&
+                BufferCacheTestAccess::BdaTableValidatedBuffers(cache) == 0u,
+            "GC eviction left live entries in the BDA shadow validator");
     std::printf("[gpu]     %-32s ok\n", name);
   }
 
@@ -25538,7 +25610,7 @@ private:
     m_bda_pagetable_buffer =
         CreateDeviceBuffer(shader_name, BufferCache::BDA_PAGETABLE_SIZE, usage);
     m_fault_buffer = CreateDeviceBuffer(
-        shader_name, BufferCache::CACHING_NUMPAGES / 8, usage | vk::BufferUsageFlagBits::eTransferSrc);
+        shader_name, BufferCache::FAULT_BUFFER_SIZE, usage | vk::BufferUsageFlagBits::eTransferSrc);
   }
 
   Buffer CreateHostBuffer(const char *shader_name, vk::DeviceSize size,
@@ -59439,6 +59511,7 @@ int main(int argc, char **argv) {
   if (argc == 2 && std::strcmp(argv[1], "--bda-page-table-only") == 0) {
     VulkanHarness vulkan;
     vulkan.CheckBdaPageTableUploads();
+    vulkan.CheckBdaTableValidation();
     vulkan.CheckBdaSyncUploads();
     vulkan.CheckFaultBufferScan();
     vulkan.CheckFaultRecordsOverflow();

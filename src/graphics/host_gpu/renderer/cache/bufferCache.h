@@ -14,7 +14,10 @@
 #include <array>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <span>
+#include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -34,6 +37,20 @@ public:
 	static constexpr uint64_t CACHING_NUMPAGES  = (LOWER_ADDRESS_SIZE + LibKernel::Memory::kExtendedMemorySize) >> CACHING_PAGEBITS;
 	static constexpr uint64_t BDA_PAGETABLE_SIZE =
 	    CACHING_NUMPAGES * sizeof(vk::DeviceAddress);
+	static constexpr uint64_t FAULT_BITMAP_SIZE = CACHING_NUMPAGES / 8;
+	static constexpr uint32_t FAULT_BITMAP_DWORDS =
+	    static_cast<uint32_t>(FAULT_BITMAP_SIZE / sizeof(uint32_t));
+	// Reserved tail of the fault buffer: [counter, reserved, slot0_lo, slot0_hi, ...].
+	static constexpr uint32_t BDA_MISS_SLOT_COUNT    = 64;
+	static constexpr uint32_t BDA_MISS_COUNTER_DWORD = FAULT_BITMAP_DWORDS;
+	static constexpr uint32_t BDA_MISS_SLOTS_DWORD   = BDA_MISS_COUNTER_DWORD + 2;
+	static constexpr uint32_t BDA_MISS_AREA_DWORDS   = 2 + BDA_MISS_SLOT_COUNT * 2;
+	static constexpr uint64_t BDA_MISS_AREA_SIZE =
+	    uint64_t {BDA_MISS_AREA_DWORDS} * sizeof(uint32_t);
+	static constexpr uint64_t FAULT_BUFFER_SIZE = FAULT_BITMAP_SIZE + BDA_MISS_AREA_SIZE;
+	static_assert(CACHING_NUMPAGES % 128 == 0);
+	static_assert(FAULT_BITMAP_SIZE % sizeof(uint64_t) == 0);
+	static_assert((BDA_MISS_SLOTS_DWORD & 1u) == 0u);
 
 	static constexpr uint64_t PageIndex(uint64_t address) {
 		return (address < LOWER_ADDRESS_SIZE
@@ -46,6 +63,30 @@ public:
 		           ? offset
 		           : offset - LOWER_ADDRESS_SIZE + LibKernel::Memory::kExtendedMemoryBase;
 	}
+
+	struct BdaTableShadowEntry {
+		vk::DeviceAddress device_address = 0;
+		BufferId          buffer_id {};
+		uint64_t          guest_address = 0;
+	};
+
+	class BdaTableValidator {
+	public:
+		[[nodiscard]] std::optional<std::string> ValidateWrite(
+		    BufferId id, uint64_t cpu_address, uint64_t buffer_size,
+		    vk::DeviceAddress device_address, bool is_deleted, uint64_t table_offset,
+		    std::span<const vk::DeviceAddress> entries);
+		[[nodiscard]] std::optional<std::string> ValidateClear(
+		    BufferId id, uint64_t cpu_address, uint64_t buffer_size,
+		    vk::DeviceAddress device_address, uint64_t table_offset, uint64_t size_pages);
+		[[nodiscard]] std::optional<std::string> ValidateErase(BufferId id, bool is_deleted) const;
+		[[nodiscard]] size_t ActivePageCount() const noexcept { return m_entries.size(); }
+		[[nodiscard]] size_t TrackedBufferCount() const noexcept { return m_buffer_pages.size(); }
+
+	private:
+		std::unordered_map<uint64_t, BdaTableShadowEntry> m_entries;
+		std::unordered_map<uint32_t, uint64_t>            m_buffer_pages;
+	};
 
 	BufferCache(GraphicContext& graphics, CommandScheduler& scheduler, PageManager& page_manager,
 	            TextureCache& texture_cache);
@@ -139,6 +180,7 @@ private:
 	template <bool insert>
 	void ChangeRegister(BufferId id);
 	void DeleteBuffer(BufferId id);
+	void EraseBufferSlot(BufferId id);
 	[[nodiscard]] bool SynchronizeBuffer(Buffer& buffer, uint64_t vaddr, uint64_t size,
 	                                     bool is_written, bool is_texel_buffer);
 	void UploadCopies(std::span<const BufferUpload> uploads, std::span<vk::BufferCopy> copies,
@@ -175,6 +217,8 @@ private:
 	uint64_t m_trigger_gc_memory  = 1ull * 1024 * 1024 * 1024;
 	uint64_t m_critical_gc_memory = 2ull * 1024 * 1024 * 1024;
 	uint64_t m_gc_tick            = 0;
+	bool     m_validate_bda_table = false;
+	BdaTableValidator m_bda_table_validator;
 };
 
 } // namespace Libs::Graphics

@@ -5,6 +5,8 @@
 #include "common/threads.h"
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/guest_gpu/pm4.h"
+#include "graphics/host_gpu/graphicContext.h"
+#include "graphics/host_gpu/renderer/cache/bufferCache.h"
 #include "graphics/host_gpu/renderer/image/imageView.h"
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
 #include "graphics/host_gpu/renderer/pipeline/blendMapping.h"
@@ -12992,6 +12994,272 @@ void TestNewShaderRecompilerFlatUserPointerUsesDma() {
   CheckSpirvBinaryValidates(result.spirv);
 }
 
+void TestGetBdaPointerMissTelemetryShape() {
+  const uint32_t shader[] = {
+      EncodeVop2(0x25, 0, 0, 2), // v_add_nc_u32 v0, s0, v2
+      EncodeVop1(0x01, 1, 1),    // v_mov_b32 v1, s1
+      EncodeFlat0(0x0c, 0, 0),
+      EncodeFlat1(3, 0x7d, 0, 0), // flat_load_dword v3, v[0:1]
+      EncodeExp0(0x00, 0x1),
+      EncodeExp1(3, 0, 0, 0),
+      EncodeSopp(0x01),
+  };
+  const uint32_t user_data[] = {0x34567000u, 0x00000012u};
+
+  auto options = MakeCompileOptions(ShaderType::Pixel);
+  options.user_data = user_data;
+  auto result = RecompileForTest(shader, options);
+  Check(result.program.info.uses_dma,
+        "get_bda_pointer telemetry fixture did not enable DMA");
+  CheckSpirvBinaryValidates(result.spirv);
+
+  const auto named = ShaderRecompiler::Spirv::EmitProgram(
+      result.program, options.input_info, {}, {}, true);
+  CheckSpirvBinaryValidates(named);
+
+  uint32_t bda_fn_id = 0;
+  uint32_t fault_buf_id = 0;
+  std::unordered_map<uint32_t, uint32_t> const_u32;
+  for (size_t at = 5; at < named.size();) {
+    const uint32_t word = named[at];
+    const uint32_t count = word >> spv::WordCountShift;
+    const auto op = static_cast<spv::Op>(word & spv::OpCodeMask);
+    if (op == spv::OpName && count >= 3u) {
+      const std::string name(reinterpret_cast<const char *>(&named[at + 2]));
+      if (name == "get_bda_pointer") bda_fn_id = named[at + 1];
+      if (name == "fault_buffer") fault_buf_id = named[at + 1];
+    } else if (op == spv::OpConstant && count == 4u) {
+      const_u32[named[at + 2]] = named[at + 3];
+    }
+    at += count;
+  }
+  Check(bda_fn_id != 0 && fault_buf_id != 0,
+        "named SPIR-V module omitted get_bda_pointer or fault_buffer");
+
+  bool in_bda_fn = false;
+  std::unordered_set<uint32_t> fault_ptrs;
+  std::unordered_set<uint32_t> counter_ptrs;
+  uint32_t atomic_iadd_result = 0;
+  uint32_t atomic_iadd_count = 0;
+  uint32_t atomic_or_count = 0;
+  uint32_t slot_guard_count = 0;
+  uint32_t slot_base_add_count = 0;
+  uint32_t fault_store_count = 0;
+
+  for (size_t at = 5; at < named.size();) {
+    const uint32_t word = named[at];
+    const uint32_t count = word >> spv::WordCountShift;
+    const auto op = static_cast<spv::Op>(word & spv::OpCodeMask);
+    if (op == spv::OpFunction && count >= 5u && named[at + 2] == bda_fn_id) {
+      in_bda_fn = true;
+    } else if (in_bda_fn && op == spv::OpFunctionEnd) {
+      in_bda_fn = false;
+      break;
+    } else if (in_bda_fn) {
+      if (op == spv::OpAccessChain && count >= 6u && named[at + 3] == fault_buf_id) {
+        const uint32_t ptr_id = named[at + 2];
+        fault_ptrs.insert(ptr_id);
+        const auto idx_it = const_u32.find(named[at + 5]);
+        if (idx_it != const_u32.end() &&
+            idx_it->second == BufferCache::BDA_MISS_COUNTER_DWORD) {
+          counter_ptrs.insert(ptr_id);
+        }
+      } else if (op == spv::OpAtomicIAdd && count >= 7u &&
+                 counter_ptrs.contains(named[at + 3])) {
+        atomic_iadd_result = named[at + 2];
+        ++atomic_iadd_count;
+      } else if (op == spv::OpULessThan && count >= 5u &&
+                 named[at + 3] == atomic_iadd_result) {
+        const auto rhs_it = const_u32.find(named[at + 4]);
+        if (rhs_it != const_u32.end() &&
+            rhs_it->second == BufferCache::BDA_MISS_SLOT_COUNT) {
+          ++slot_guard_count;
+        }
+      } else if (op == spv::OpIAdd && count >= 5u) {
+        const auto lhs_it = const_u32.find(named[at + 3]);
+        const auto rhs_it = const_u32.find(named[at + 4]);
+        if ((lhs_it != const_u32.end() &&
+             lhs_it->second == BufferCache::BDA_MISS_SLOTS_DWORD) ||
+            (rhs_it != const_u32.end() &&
+             rhs_it->second == BufferCache::BDA_MISS_SLOTS_DWORD)) {
+          ++slot_base_add_count;
+        }
+      } else if (op == spv::OpStore && count >= 3u &&
+                 fault_ptrs.contains(named[at + 1])) {
+        ++fault_store_count;
+      } else if (op == spv::OpAtomicOr && count >= 7u &&
+                 fault_ptrs.contains(named[at + 3])) {
+        ++atomic_or_count;
+      }
+    }
+    at += count;
+  }
+
+  Check(atomic_iadd_count == 1u && slot_guard_count == 1u &&
+            slot_base_add_count == 1u && fault_store_count == 2u &&
+            atomic_or_count == 1u,
+        "get_bda_pointer did not emit the expected BDA miss telemetry shape");
+}
+
+void TestBdaMissBreadcrumbAndReporting() {
+  GraphicContext graphics {};
+  graphics.breadcrumbs.BeginSubmit(graphics, nullptr, 1);
+  OpBreadcrumb non_dma {};
+  non_dma.kind = BreadcrumbOpKind::Dispatch;
+  non_dma.stage_count = 1;
+  non_dma.stages[0] = {ShaderType::Compute, 0x1111ull, 1, false};
+  (void)graphics.breadcrumbs.BeginOp(graphics, nullptr, non_dma);
+
+  OpBreadcrumb dma {};
+  dma.kind = BreadcrumbOpKind::Dispatch;
+  dma.stage_count = 1;
+  dma.stages[0] = {ShaderType::Compute, 0x2222ull, 2, true};
+  (void)graphics.breadcrumbs.BeginOp(graphics, nullptr, dma);
+  (void)graphics.breadcrumbs.BeginOp(graphics, nullptr, dma);
+  graphics.breadcrumbs.EndSubmitRecording(graphics, nullptr);
+  graphics.breadcrumbs.MarkSubmitted(1, 0);
+
+  const auto snap1 = graphics.breadcrumbs.CollectShaderHashesSince(0);
+  Check(snap1.dma_filtered && !snap1.truncated && snap1.submit_count == 1u &&
+            snap1.shaders.size() == 1u &&
+            snap1.shaders[0].stage == ShaderType::Compute &&
+            snap1.shaders[0].hash == 0x2222ull,
+        "CollectShaderHashesSince failed to filter and deduplicate DMA shaders");
+
+  const auto empty_snap =
+      graphics.breadcrumbs.CollectShaderHashesSince(snap1.last_op_id);
+  Check(empty_snap.shaders.empty() && empty_snap.submit_count == 0u &&
+            !empty_snap.truncated,
+        "CollectShaderHashesSince reported stale ops after advancing cursor");
+
+  graphics.breadcrumbs.BeginSubmit(graphics, nullptr, 2);
+  OpBreadcrumb draw {};
+  draw.kind = BreadcrumbOpKind::Draw;
+  draw.stage_count = 2;
+  draw.stages[0] = {ShaderType::Vertex, 0x3333ull, 3, false};
+  draw.stages[1] = {ShaderType::Pixel, 0x4444ull, 4, false};
+  (void)graphics.breadcrumbs.BeginOp(graphics, nullptr, draw);
+  graphics.breadcrumbs.EndSubmitRecording(graphics, nullptr);
+  graphics.breadcrumbs.MarkSubmitted(2, 1);
+
+  const auto snap2 =
+      graphics.breadcrumbs.CollectShaderHashesSince(snap1.last_op_id);
+  Check(!snap2.dma_filtered && !snap2.truncated && snap2.submit_count == 1u &&
+            snap2.shaders.size() == 2u &&
+            snap2.shaders[0].hash == 0x3333ull &&
+            snap2.shaders[1].hash == 0x4444ull,
+        "CollectShaderHashesSince did not fall back when no DMA stage was present");
+
+  std::vector<uint32_t> miss_words(BufferCache::BDA_MISS_AREA_DWORDS, 0u);
+  std::unordered_set<uint64_t> seen_pages;
+  Check(FaultManager::FormatNewBdaMisses(miss_words, snap1, seen_pages).empty(),
+        "zero BDA miss counter produced log lines");
+
+  const auto write_slot = [&](uint32_t slot, uint64_t address) {
+    miss_words[2u + slot * 2u] = static_cast<uint32_t>(address);
+    miss_words[2u + slot * 2u + 1u] = static_cast<uint32_t>(address >> 32u);
+  };
+  miss_words[0] = 99u; // Exceeds BDA_MISS_SLOT_COUNT to verify slot clamping.
+  write_slot(0, 0x0000078fa0000000ull);
+  write_slot(1, 0x0000078fa0001234ull); // Same 16 KiB page as slot 0.
+  write_slot(2, 0x0000078fa0004000ull); // Distinct 16 KiB page.
+  for (uint32_t slot = 3; slot < BufferCache::BDA_MISS_SLOT_COUNT; ++slot) {
+    write_slot(slot, 0x0000078fa0000000ull);
+  }
+  const auto lines = FaultManager::FormatNewBdaMisses(miss_words, snap1, seen_pages);
+  Check(lines.size() == 2u &&
+            lines[0] ==
+                "[bda-miss] address=0x0000078fa0000000 count=99 dma_shaders=[CS=0x0000000000002222]" &&
+            lines[1] ==
+                "[bda-miss] address=0x0000078fa0004000 count=99 dma_shaders=[CS=0x0000000000002222]",
+        "FormatNewBdaMisses did not deduplicate pages or format [bda-miss] lines as expected");
+
+  Check(FaultManager::FormatNewBdaMisses(miss_words, snap1, seen_pages).empty(),
+        "FormatNewBdaMisses re-logged already seen BDA miss pages");
+
+  auto truncated_snap = snap1;
+  truncated_snap.truncated = true;
+  miss_words[0] = 1u;
+  write_slot(0, 0x0000078fa0008000ull);
+  const auto truncated_lines =
+      FaultManager::FormatNewBdaMisses(miss_words, truncated_snap, seen_pages);
+  Check(truncated_lines.size() == 1u &&
+            truncated_lines[0].find("truncated=1") != std::string::npos,
+        "FormatNewBdaMisses dropped the truncated indicator");
+}
+
+void TestBdaTableValidator() {
+  constexpr uint64_t page = BufferCache::CACHING_PAGESIZE;
+  BufferCache::BdaTableValidator validator;
+
+  // Valid lower-window 2-page buffer write, clear, and erase.
+  const BufferId id1{1};
+  const uint64_t guest1 = 0x200000ull;
+  const vk::DeviceAddress bda1 = 0x100000000ull;
+  const std::array<vk::DeviceAddress, 2> entries1{bda1, bda1 + page};
+  const uint64_t offset1 = BufferCache::PageIndex(guest1) * sizeof(vk::DeviceAddress);
+  Check(!validator.ValidateWrite(id1, guest1, 2 * page, bda1, false, offset1, entries1).has_value(),
+        "BdaTableValidator rejected a valid lower-window write");
+  Check(validator.ActivePageCount() == 2u && validator.TrackedBufferCount() == 1u,
+        "BdaTableValidator did not track written pages");
+
+  // Erasing while entries remain live must fail.
+  Check(validator.ValidateErase(id1, true).has_value(),
+        "BdaTableValidator allowed erasing a buffer with live page-table entries");
+
+  // Overwriting a live page without clearing first must fail.
+  const BufferId id2{2};
+  const std::array<vk::DeviceAddress, 1> overlap_entries{0x200000000ull};
+  Check(validator.ValidateWrite(id2, guest1 + page, page, 0x200000000ull, false,
+                                offset1 + sizeof(vk::DeviceAddress), overlap_entries).has_value(),
+        "BdaTableValidator allowed overwriting a live page without prior clear");
+
+  // Unaligned guest start, partial last page, wrong BDA, and wrong table offset must fail.
+  const std::array<vk::DeviceAddress, 1> bad_entry{0x300000000ull};
+  Check(validator.ValidateWrite(id2, 0x300004ull, page, 0x300000000ull, false,
+                                BufferCache::PageIndex(0x300004ull) * sizeof(vk::DeviceAddress),
+                                bad_entry).has_value(),
+        "BdaTableValidator accepted an unaligned guest start");
+  Check(validator.ValidateWrite(id2, 0x300000ull, page + 64u, 0x300000000ull, false,
+                                BufferCache::PageIndex(0x300000ull) * sizeof(vk::DeviceAddress),
+                                bad_entry).has_value(),
+        "BdaTableValidator accepted a partial last page");
+  const std::array<vk::DeviceAddress, 1> wrong_bda{0x300004000ull};
+  Check(validator.ValidateWrite(id2, 0x300000ull, page, 0x300000000ull, false,
+                                BufferCache::PageIndex(0x300000ull) * sizeof(vk::DeviceAddress),
+                                wrong_bda).has_value(),
+        "BdaTableValidator accepted a mismatched device address entry");
+  Check(validator.ValidateWrite(id2, 0x300000ull, page, 0x300000000ull, false,
+                                BufferCache::PageIndex(0x300000ull) * sizeof(vk::DeviceAddress) + 8u,
+                                bad_entry).has_value(),
+        "BdaTableValidator accepted a mismatched table offset");
+
+  // Clearing with wrong owner must fail; clearing with right owner succeeds and permits erase.
+  Check(validator.ValidateClear(id2, guest1, 2 * page, bda1, offset1, 2).has_value(),
+        "BdaTableValidator allowed clearing with the wrong buffer id");
+  Check(!validator.ValidateClear(id1, guest1, 2 * page, bda1, offset1, 2).has_value(),
+        "BdaTableValidator rejected a valid clear");
+  Check(validator.ActivePageCount() == 0u && validator.TrackedBufferCount() == 0u,
+        "BdaTableValidator did not remove cleared entries");
+  Check(validator.ValidateErase(id1, false).has_value(),
+        "BdaTableValidator allowed erasing a buffer without is_deleted");
+  Check(!validator.ValidateErase(id1, true).has_value(),
+        "BdaTableValidator rejected erasing a cleared, deleted buffer");
+
+  // Extended memory window write and clear must succeed.
+  const uint64_t ext_guest = LibKernel::Memory::kExtendedMemoryBase + 4 * page;
+  const uint64_t ext_offset = BufferCache::PageIndex(ext_guest) * sizeof(vk::DeviceAddress);
+  const vk::DeviceAddress ext_bda = 0x400000000ull;
+  const std::array<vk::DeviceAddress, 2> ext_entries{ext_bda, ext_bda + page};
+  Check(!validator.ValidateWrite(id2, ext_guest, 2 * page, ext_bda, false, ext_offset,
+                                 ext_entries).has_value(),
+        "BdaTableValidator rejected a valid extended-window write");
+  Check(!validator.ValidateClear(id2, ext_guest, 2 * page, ext_bda, ext_offset, 2).has_value(),
+        "BdaTableValidator rejected a valid extended-window clear");
+  Check(!validator.ValidateErase(id2, true).has_value(),
+        "BdaTableValidator rejected erasing a cleared extended-window buffer");
+}
+
 void TestNewShaderRecompilerFlatAddressDomainsUseDma() {
   const uint32_t segmented_shader[] = {
       EncodeVop2(0x25, 0, 0, 2),
@@ -13549,10 +13817,16 @@ void TestNewShaderRecompilerSpirvSizeBaselines() {
 } // namespace
 } // namespace Libs::Graphics
 
-int main() {
+int main(int argc, char** argv) {
   using namespace Libs::Graphics;
 
   EnsureConfigInitialized();
+  if (argc == 2 && std::strcmp(argv[1], "--bda-miss-only") == 0) {
+    TestGetBdaPointerMissTelemetryShape();
+    TestBdaMissBreadcrumbAndReporting();
+    TestBdaTableValidator();
+    return 0;
+  }
   TestVop3FloatConversionDecode();
   TestRayTracingInstructions();
   TestShaderBufferResourceSize();
@@ -13764,6 +14038,9 @@ int main() {
   TestCapturedBufferLoadD16XyzwDecode();
   TestCapturedBufferStoreD16XyzwDecode();
   TestNewShaderRecompilerUnsupportedMemoryDecode();
+  TestGetBdaPointerMissTelemetryShape();
+  TestBdaMissBreadcrumbAndReporting();
+  TestBdaTableValidator();
 
   TestNewShaderRecompilerVop3LaneReadDestinationEncoding();
 

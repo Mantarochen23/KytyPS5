@@ -85,6 +85,8 @@ static void PrintUsage() {
 	         "                                       reads KYTY_SKIP_SHADERS.\n");
 	::printf("  --gpu-fault-query                    Debug: query VK_EXT_device_fault after flushing\n"
 	         "                                       device-lost breadcrumbs (also KYTY_GPU_FAULT_QUERY=1).\n");
+	::printf("  --bda-table-validate                 Debug: validate every BDA page-table write and clear\n"
+	         "                                       against live buffers (also KYTY_BDA_TABLE_VALIDATE=1).\n");
 	::printf("  --shader-cache                       Keep compiled shaders and pipelines between boots.\n");
 	::printf("  --shader-cache-keep                  Keep usable records from a mismatched shader cache,\n"
 	         "                                       dropping only records that fail to load.\n");
@@ -256,6 +258,7 @@ static constexpr Flag FLAGS[] = {
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
     {"--redzone", &ConfigOptions::red_zone_protection_enabled},
 #endif
+    {"--bda-table-validate", &ConfigOptions::bda_table_validate_enabled},
 };
 
 static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_help) {
