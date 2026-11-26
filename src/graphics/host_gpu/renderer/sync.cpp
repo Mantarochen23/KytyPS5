@@ -40,7 +40,7 @@ bool ScaleReferenceClock(uint64_t host_ticks, uint64_t host_frequency, uint64_t&
 
 uint64_t ReadReferenceClock() {
 	const auto host_frequency = LibKernel::KernelGetTscFrequency();
-	const auto host_ticks     = LibKernel::KernelReadTsc();
+	const auto host_ticks     = LibKernel::KernelReadTscForEmulator();
 	uint64_t   value          = 0;
 	if (!ScaleReferenceClock(host_ticks, host_frequency, value)) {
 		EXIT("cannot scale host clock, ticks=0x%016" PRIx64 " frequency=%" PRIu64 "\n", host_ticks,

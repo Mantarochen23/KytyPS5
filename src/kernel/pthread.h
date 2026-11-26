@@ -203,6 +203,9 @@ uint64_t KYTY_SYSV_ABI KernelGetTscFrequency();
 // Guest TSC = host TSC * multiplier >> 32.
 uint64_t               KernelGuestTscMultiplier();
 uint64_t KYTY_SYSV_ABI KernelReadTsc();
+// The same counter without the time --guest-clock-hold-on-stall holds back from the guest, for the
+// emulator's own timing.
+uint64_t               KernelReadTscForEmulator();
 uint64_t KYTY_SYSV_ABI KernelGetProcessTime();
 uint64_t KYTY_SYSV_ABI KernelGetProcessTimeCounter();
 uint64_t KYTY_SYSV_ABI KernelGetProcessTimeCounterFrequency();

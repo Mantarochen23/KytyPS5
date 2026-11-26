@@ -331,7 +331,7 @@ static intptr_t MakeVideoOutEventData(intptr_t current_data, void* trigger_data)
 		counter++;
 	}
 
-	const uint64_t time    = LibKernel::KernelReadTsc() & 0xfffu;
+	const uint64_t time    = LibKernel::KernelReadTscForEmulator() & 0xfffu;
 	const uint64_t payload = static_cast<uint64_t>(reinterpret_cast<intptr_t>(trigger_data));
 
 	return static_cast<intptr_t>(time | (counter << 12u) |
