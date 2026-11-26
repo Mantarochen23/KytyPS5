@@ -79,6 +79,7 @@ private:
 	// Waits for the image write-backs over the range's pages; returns whether any overlapped.
 	bool WaitWriteBacks(uint64_t vaddr, uint64_t size);
 
+	std::unique_ptr<GuestGpu> m_gpu = nullptr;
 	GraphicContext&           m_graphics;
 	Common::Mutex             m_mutex;
 	RenderExecutor            m_render_executor;
@@ -95,7 +96,6 @@ private:
 	OcclusionQueries          m_occlusion_queries;
 	mutable std::shared_mutex m_mapped_ranges_mutex;
 	RangeSet                  m_mapped_ranges;
-	std::unique_ptr<GuestGpu> m_gpu;
 	VideoOut::VideoOutDriver* m_video_out = nullptr;
 	bool                      m_fault_process_pending = false;
 
