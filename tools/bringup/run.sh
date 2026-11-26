@@ -151,9 +151,17 @@ if [ "${KYTY_UMR:-0}" = 1 ] && command -v umr >/dev/null && sudo -n true 2>/dev/
           [ "$seen" = 1 ] && [ "$now" = "$prev" ] && break
           prev=$now
       done
-      sudo -n umr -O bits -wa gfx_0.0.0 > "$run/umr-waves.txt" 2>&1
-      sudo -n umr -RS gfx_0.0.0 > "$run/umr-ring.txt" 2>&1
-      sudo -n umr -r '*.*.mmGRBM_STATUS' > "$run/umr-status.txt" 2>&1
+      # Waves are halted for the listing (reliable pc and registers per wave). Sampled a few times:
+      # a translation stall shows no waves, a hung dispatch shows the same waves every time.
+      for n in 1 2 3 4; do
+          pgrep -x kyty_emulator >/dev/null || break
+          sudo -n timeout 20 umr -O bits,halt_waves -wa gfx_0.0.0 > "$run/umr-waves-$n.txt" 2>&1
+          grep -q 'No active waves' "$run/umr-waves-$n.txt" || {
+              sudo -n timeout 20 umr -RS gfx_0.0.0 > "$run/umr-ring.txt" 2>&1
+              sudo -n timeout 20 umr -r '*.*.mmGRBM_STATUS' > "$run/umr-status.txt" 2>&1
+              break; }
+          sleep 2
+      done
     ) &
 fi
 if [ -n "${KYTY_PROFILE_AT:-}" ]; then
