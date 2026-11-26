@@ -582,6 +582,10 @@ int SelfTest() {
 		have_rejected |= outcome.starts_with("rejected:");
 		have_runtime |= outcome.starts_with("needs-runtime:");
 	}
+	if (std::ifstream summary(output / "summary.md"); summary) {
+		std::string line;
+		while (std::getline(summary, line)) std::printf("%s\n", line.c_str());
+	}
 	std::error_code ignored;
 	std::filesystem::remove_all(root, ignored);
 	if (status != 0 || !read || results.size() != 3 || !have_emitted || !have_rejected ||
