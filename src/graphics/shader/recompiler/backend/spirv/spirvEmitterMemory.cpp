@@ -1,5 +1,6 @@
 #include "graphics/shader/recompiler/backend/spirv/spirvEmitterInstructions.h"
 
+#include "common/ports.h"
 #include "graphics/host_gpu/renderer/cache/bufferCache.h"
 #include "graphics/shader/recompiler/frontend/decode/ShaderDecoder.h"
 
@@ -9,6 +10,25 @@
 
 namespace Libs::Graphics::ShaderRecompiler::Spirv::Emitter {
 namespace {
+
+// A guest wave64 compute program run as two 32-lane halves passes values between lanes through
+// LDS with no barrier (lockstep on the guest). Between host invocations that is a data race under
+// the Vulkan memory model. A subgroup barrier with workgroup-memory acquire/release before every
+// LDS access orders it. Halves keep control flow subgroup-uniform (branches are votes), so every
+// invocation reaches it. A BVH stack keeps each lane to its own LDS slots and stays barrier-free.
+// Port wave64-lds-sync.
+void EmitLdsLaneSync(EmitterState& state, const IR::MemoryInfo& mem) {
+	if (state.program.stage != ShaderType::Compute || mem.kind != IR::ResourceKind::Lds ||
+	    state.lane_count != 2 || state.lds_storage_class != spv::StorageClassWorkgroup ||
+	    state.program.info.bvh_stack || !Config::PortEnabled(Config::Port::Wave64LdsSync)) {
+		return;
+	}
+	state.builder.AddFunction(
+	    spv::OpControlBarrier, ConstantU32(state, spv::ScopeSubgroup),
+	    ConstantU32(state, spv::ScopeWorkgroup),
+	    ConstantU32(state, spv::MemorySemanticsAcquireReleaseMask |
+	                           spv::MemorySemanticsWorkgroupMemoryMask));
+}
 
 uint32_t AndCondition(EmitterState& state, uint32_t lhs, uint32_t rhs) {
 	return Binary(state, spv::OpLogicalAnd, TypeBool(state), lhs, rhs);
@@ -1772,6 +1792,7 @@ void EmitLoadMemory(ValueEmitContext& ctx, const IR::Inst& inst) {
 	const auto  op  = inst.GetOpcode();
 	const auto& mem = ctx.Memory(inst);
 	if (op == IR::ValueOpcode::LoadAddressU32 && mem.planning_only) return;
+	EmitLdsLaneSync(ctx.state, mem);
 	const auto buffer_components = IR::BufferComponentCount(op);
 	const auto shared_components = IR::SharedComponentCount(op);
 	const auto address_info      = IR::AddressOpcodeInfoOf(op);
@@ -1805,6 +1826,7 @@ void EmitStoreMemory(ValueEmitContext& ctx, const IR::Inst& inst) {
 	const auto  buffer_components = IR::BufferComponentCount(op);
 	const auto  shared_components = IR::SharedComponentCount(op);
 	const auto  type              = inst.Arg(inst.NumArgs() - 2).GetType();
+	EmitLdsLaneSync(ctx.state, mem);
 	if (mem.kind == IR::ResourceKind::FlatLocal)
 		StoreLocalFlat(ctx, inst);
 	else if (buffer_components > 1u)
