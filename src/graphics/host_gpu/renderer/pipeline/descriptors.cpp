@@ -107,11 +107,12 @@ static bool IsMultisampledTexture(Prospero::ImageType type) {
 }
 
 static vk::DescriptorBufferInfo
-NativeStorageBuffer(RenderContext& context, const PreparedBindings::BufferSource& source,
+NativeStorageBuffer(RenderContext& context, PreparedBindings::BufferSource& source,
                     const ShaderRecompiler::IR::BufferResource& resource, uint32_t& buffer_offset) {
-	buffer_offset = 0;
+	buffer_offset       = 0;
+	source.backing_size = 0;
 
-	auto [address, size, id] = source;
+	auto [address, size, backing_size, id] = source;
 	if (address == 0 || size == 0) {
 		// Null descriptors read zero and drop writes, with or without shader bounds checks.
 		return {nullptr, 0, vk::WholeSize};
@@ -131,7 +132,8 @@ NativeStorageBuffer(RenderContext& context, const PreparedBindings::BufferSource
 	if (adjustment >= 256 || size > max_range - adjustment) {
 		EXIT("storage buffer offset adjustment is unsupported\n");
 	}
-	buffer_offset = static_cast<uint32_t>(adjustment);
+	buffer_offset       = static_cast<uint32_t>(adjustment);
+	source.backing_size = buffer->Size();
 	const vk::DescriptorBufferInfo result {buffer->Handle(), aligned_offset, size + adjustment};
 	if (resource.written) {
 		context.GetTextureCache().InvalidateMemoryFromGPU(address, size);
@@ -821,7 +823,7 @@ void RenderExecutor::FindBuffers(std::span<PreparedBindings* const> stages) {
 				// in pieces, so they end at their last committed range.
 				size = Libs::LibKernel::Memory::ClampRangeSize(address, size, true);
 			}
-			source = {address, size, cache.FindBuffer(address, size)};
+			source = {address, size, 0, cache.FindBuffer(address, size)};
 		}
 	}
 }

@@ -540,6 +540,20 @@ void GpuBreadcrumbTracker::ReportDeviceLost(GraphicContext& graphics, const char
 				tag = " (last in submit)";
 			}
 			report += fmt::format("    [op={}] {}{}\n", op.marker_id, FormatOpLine(op), tag);
+			if (suspect || (is_last && in_flight)) {
+				for (uint8_t bi = 0; bi < op.buffer_count && bi < op.buffers.size(); ++bi) {
+					const auto& b = op.buffers[bi];
+					report += fmt::format(
+					    "      buf[{}]: set={} binding={} elem={} guest_va=0x{:016x} "
+					    "vk_buf=0x{:016x} offset=0x{:x} range=0x{:x} buffer_size=0x{:x}\n",
+					    bi, b.set, b.binding, b.array_element, b.guest_va, b.vk_buffer, b.offset,
+					    b.range, b.buffer_size);
+				}
+				if (op.total_buffers > op.buffer_count) {
+					report += fmt::format("      ... ({} more bound buffers omitted)\n",
+					                      op.total_buffers - op.buffer_count);
+				}
+			}
 		}
 
 		// If no per-op GPU marker narrowed down the suspect, gather hashes from the suspect

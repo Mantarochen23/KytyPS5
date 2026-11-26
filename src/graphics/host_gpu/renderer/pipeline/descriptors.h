@@ -28,8 +28,9 @@ struct TextureBinding {
 
 struct PreparedBindings {
 	struct BufferSource {
-		uint64_t address = 0;
-		uint64_t size    = 0;
+		uint64_t address      = 0;
+		uint64_t size         = 0;
+		uint64_t backing_size = 0;
 		BufferId id;
 	};
 	// What an image was resolved from; the module id fixes its resource.

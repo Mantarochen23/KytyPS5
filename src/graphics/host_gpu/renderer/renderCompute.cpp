@@ -30,6 +30,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -274,6 +275,90 @@ static void BindSharedMemory(RenderContext& context, ShaderComputeInputInfo& inp
 	bindings.shared_memory = {storage.Handle(), 0, size};
 }
 
+static void CaptureComputeBufferBreadcrumbs(RenderContext&          context,
+                                          const PreparedBindings& bindings,
+                                          OpBreadcrumb&           op) {
+	const auto& program = bindings.runtime->module->info;
+	using BindingKind   = ShaderRecompiler::IR::DescriptorBindingKind;
+
+	const auto push_buf = [&](uint16_t binding, uint16_t array_element, uint64_t guest_va,
+	                          const vk::DescriptorBufferInfo& info, uint64_t buffer_size,
+	                          bool is_storage_array) {
+		if (op.total_buffers < UINT16_MAX) {
+			++op.total_buffers;
+		}
+		if (op.buffer_count >= OpBreadcrumb::kMaxBuffers) {
+			return;
+		}
+		op.buffers[op.buffer_count++] = {
+		    .guest_va         = guest_va,
+		    .vk_buffer        = static_cast<uint64_t>(
+                reinterpret_cast<uintptr_t>(static_cast<vk::Buffer::CType>(info.buffer))),
+		    .offset           = info.offset,
+		    .range            = info.range,
+		    .buffer_size      = buffer_size,
+		    .binding          = binding,
+		    .array_element    = array_element,
+		    .set              = 0,
+		    .is_storage_array = static_cast<uint8_t>(is_storage_array ? 1 : 0),
+		};
+	};
+
+	const auto buffers_binding =
+	    static_cast<uint16_t>(ShaderRecompiler::IR::NativeBinding(program.stage, BindingKind::Buffers));
+	for (uint32_t i = 0; i < bindings.buffers.size(); ++i) {
+		const uint64_t guest_va =
+		    i < bindings.buffer_sources.size() ? bindings.buffer_sources[i].address : 0;
+		const uint64_t backing_size =
+		    i < bindings.buffer_sources.size() ? bindings.buffer_sources[i].backing_size : 0;
+		push_buf(buffers_binding, static_cast<uint16_t>(i), guest_va, bindings.buffers[i],
+		         backing_size, true);
+	}
+
+	auto& cache = context.GetBufferCache();
+	for (auto mask = program.bindings.descriptor_mask; mask != 0; mask &= mask - 1) {
+		const auto kind = static_cast<BindingKind>(std::countr_zero(mask));
+		if (kind == BindingKind::Buffers ||
+		    ShaderRecompiler::IR::ImageBindingResourceClass(kind) !=
+		        ShaderRecompiler::IR::ImageResourceClass::None ||
+		    kind == BindingKind::Samplers) {
+			continue;
+		}
+		const auto binding =
+		    static_cast<uint16_t>(ShaderRecompiler::IR::NativeBinding(program.stage, kind));
+		switch (kind) {
+			case BindingKind::SharedMemory:
+				push_buf(binding, 0, 0, bindings.shared_memory,
+				         cache.GetUtilityBuffer(MemoryUsage::DeviceLocal).Size(), false);
+				break;
+			case BindingKind::FlattenedSrt:
+				push_buf(binding, 0, 0, bindings.flattened_srt,
+				         cache.GetUtilityBuffer(MemoryUsage::Stream).Size(), false);
+				break;
+			case BindingKind::ShaderData:
+				push_buf(binding, 0, 0, bindings.shader_data_buffer,
+				         cache.GetUtilityBuffer(MemoryUsage::Stream).Size(), false);
+				break;
+			case BindingKind::Gds:
+				push_buf(binding, 0, 0, bindings.gds, cache.GetGdsBuffer()->Size(), false);
+				break;
+			case BindingKind::BdaPagetable: {
+				const auto* buf = cache.GetBdaPageTableBuffer();
+				const vk::DescriptorBufferInfo info {buf->Handle(), 0, buf->Size()};
+				push_buf(binding, 0, 0, info, buf->Size(), false);
+				break;
+			}
+			case BindingKind::FaultBuffer: {
+				const auto* buf = cache.GetFaultBuffer();
+				const vk::DescriptorBufferInfo info {buf->Handle(), 0, buf->Size()};
+				push_buf(binding, 0, 0, info, buf->Size(), false);
+				break;
+			}
+			default: break;
+		}
+	}
+}
+
 static bool HasStorageWrites(const ShaderComputeInputInfo& input_info,
                              const PreparedBindings&       bindings) {
 	const auto& images = input_info.stage.module->info.info.images;
@@ -469,6 +554,7 @@ void RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 	dispatch_op.dim_z       = thread_group_z;
 	dispatch_op.stage_count = 1;
 	dispatch_op.stages[0]   = {program.stage, program.shader_hash, input_info.stage.module->id};
+	CaptureComputeBufferBreadcrumbs(m_context, bindings, dispatch_op);
 	auto&          graphics  = m_context.GetGraphics();
 	const uint32_t marker_id = graphics.breadcrumbs.BeginOp(graphics, vk_buffer, dispatch_op);
 	constexpr uint32_t DISPATCH_INITIATOR_ORDERED_APPEND_ENABLE = 1u << 3u;
@@ -554,6 +640,7 @@ void RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 	dispatch_op.kind        = BreadcrumbOpKind::DispatchIndirect;
 	dispatch_op.stage_count = 1;
 	dispatch_op.stages[0]   = {program.stage, program.shader_hash, input_info.stage.module->id};
+	CaptureComputeBufferBreadcrumbs(m_context, bindings, dispatch_op);
 	auto&          graphics  = m_context.GetGraphics();
 	const uint32_t marker_id = graphics.breadcrumbs.BeginOp(graphics, vk_buffer, dispatch_op);
 	vk_buffer.dispatchIndirect(args_buffer->Handle(), args_offset);
