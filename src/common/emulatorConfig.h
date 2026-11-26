@@ -145,6 +145,11 @@ struct ConfigOptions {
 	// --async-pump-budget-ms: render-thread time per PumpAsync call for applying finished
 	// shader jobs; 0 = unlimited.
 	uint32_t                 async_pump_budget_ms       = 2;
+	// --async-workers: shader worker threads; 0 = hardware threads minus four, at least two.
+	uint32_t                 async_workers              = 0;
+	// --async-speculative-modules: a finished compute translation whose resources need no guest
+	// memory also gets its module on the worker (and so into the shader store). 0 = off.
+	uint32_t                 async_speculative_modules  = 1;
 };
 
 void Load(const ConfigOptions& cfg);
@@ -248,6 +253,8 @@ const std::vector<uint64_t>& BufferProbeHashes();
 uint32_t LoopGuardLimit();
 bool ShaderKeyIndexEnabled();
 uint32_t AsyncPumpBudgetMs();
+uint32_t AsyncWorkers();
+bool     AsyncSpeculativeModules();
 
 } // namespace Config
 

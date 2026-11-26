@@ -33,6 +33,8 @@ struct PipelineCache::StageInputs {
 	std::vector<uint32_t>                                     back_code;
 	std::array<uint32_t, 40>                                  user_data {};
 	ShaderRecompiler::Spirv::Profile                          profile;
+	// The shader's guest address, for resolving its resources on a worker.
+	uint64_t                                                  shader_base = 0;
 	// Points into the members above, so a StageInputs is never copied or moved.
 	ShaderRecompiler::CompileOptions                          options;
 
@@ -49,8 +51,10 @@ struct PipelineCache::Async {
 	struct Translation {
 		std::shared_ptr<StageInputs>                       inputs;
 		std::unique_ptr<ShaderRecompiler::TranslateResult> translated;
-		// When the translation finished, for the status line.
+		// When the translation finished, and when a draw or dispatch last asked for it. A
+		// translation expires a minute after the later of the two.
 		uint64_t since = 0;
+		uint64_t asked = 0;
 	};
 
 	// A job a worker has or will run for a program, and what it does.
@@ -76,18 +80,37 @@ struct PipelineCache::Async {
 		PendingStage& operator=(const PendingStage&) = delete;
 	};
 
+	// A finished job: `flight` is the id it was in `in_flight` under, 0 for pipelines.
+	struct FinishedJob {
+		uint64_t                     flight = 0;
+		Common::UniqueFunction<void> apply;
+		void operator()() { apply(); }
+	};
 	// What a worker finished, to be applied by the render thread.
-	void Finish(Common::UniqueFunction<void>&& apply);
+	void Finish(Common::UniqueFunction<void>&& apply, uint64_t flight = 0);
+	// Render thread only: a job's result is applied; it is no longer in flight or waited for.
+	void Settle(uint64_t flight) {
+		in_flight.erase(flight);
+		wanted.erase(flight);
+	}
+	// Render thread only: a draw or dispatch is blocked on this job; it runs and is applied before
+	// the jobs nobody waits for.
+	void Want(uint64_t flight, const ShaderWorkers::JobPtr& job) {
+		wanted.insert(flight);
+		workers.MarkWaited(job);
+	}
+	// Render thread only: moves the finished jobs a draw waits for to the front of `backlog`.
+	void PrioritizeBacklog();
 	// Render thread only: moves what the workers finished into `backlog`.
 	void TakeFinished();
 
 	ShaderWorkers                             workers;
 	std::mutex                                done_mutex;
 	std::condition_variable                   done_cv;
-	std::vector<Common::UniqueFunction<void>> done;
+	std::vector<FinishedJob> done;
 	// Render thread only: finished jobs taken from `done` that PumpAsync's time budget has not
 	// applied yet.
-	std::deque<Common::UniqueFunction<void>> backlog;
+	std::deque<FinishedJob> backlog;
 	// Render thread only, for the status line: time spent in PumpAsync and jobs applied since the
 	// last report, and the worker job count at the last report.
 	uint64_t pump_us          = 0;
@@ -102,8 +125,29 @@ struct PipelineCache::Async {
 	// Render thread only: compute shaders with GPU-selected calls (s_swappc_b64) that must
 	// link callees from guest memory on the render thread.
 	std::unordered_set<ProgramKey, ProgramKeyHash>               sync_only_keys;
+	// Render thread only: the flights a draw or dispatch is blocked on.
+	std::unordered_set<uint64_t> wanted;
 	// Render thread only: pipelines being created on workers.
 	uint32_t pipelines_building = 0;
+
+	// Render thread only: what happened to the jobs, since the start. A job goes requested ->
+	// translated -> (module) -> (pipeline) -> ready, or failed.
+	struct Counters {
+		uint64_t requested         = 0; // translation jobs posted
+		uint64_t translated        = 0; // translations applied
+		uint64_t translate_failed  = 0;
+		uint64_t module_jobs       = 0; // module compile jobs posted
+		uint64_t modules_ready     = 0;
+		uint64_t module_failed     = 0;
+		uint64_t speculative       = 0; // modules built with the translation, none posted
+		uint64_t speculative_lost  = 0; // translation consumed, module unusable
+		uint64_t pipeline_jobs     = 0;
+		uint64_t pipelines_ready   = 0;
+		uint64_t pipeline_failed   = 0;
+		uint64_t expired           = 0; // translations dropped unasked for a minute
+	};
+	Counters counters;
+	uint64_t last_store_report_ms = 0;
 
 	// Render thread only: when the game last drew into each render target, and in which of the
 	// frames before that.
@@ -139,6 +183,8 @@ struct PipelineCache::Async {
 	// Render thread only: every two seconds while anything is pending, one line on the console
 	// with what the workers are doing and how many draws were skipped meanwhile.
 	void     ReportStatus();
+	// The line `[store] written=.. pending=.. failed=..`.
+	void     ReportStore(const ShaderStoreWriter::Counts& counts);
 	uint64_t last_report_ms   = 0;
 	uint64_t reported_skipped = 0;
 	bool     was_busy         = false;

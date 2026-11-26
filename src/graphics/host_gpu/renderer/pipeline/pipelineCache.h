@@ -166,6 +166,18 @@ public:
 	// Compresses `record` and appends it on the store thread, in call order.
 	void Append(std::vector<uint8_t>&& record);
 	void Post(Common::UniqueFunction<void>&& job);
+	// Records appended, written to the file, and failed to write, for the status line.
+	struct Counts {
+		uint64_t written = 0;
+		uint64_t pending = 0;
+		uint64_t failed  = 0;
+	};
+	[[nodiscard]] Counts GetCounts() const {
+		const auto appended = m_appended.load(std::memory_order_relaxed);
+		const auto written  = m_written.load(std::memory_order_relaxed);
+		const auto failed   = m_failed.load(std::memory_order_relaxed);
+		return {written, appended - written - failed, failed};
+	}
 	// Runs the queued jobs and stops the thread; jobs posted later never run. Safe to call again.
 	void Finish() { m_thread = {}; }
 
@@ -173,6 +185,9 @@ private:
 	friend struct PipelineCacheTestAccess;
 
 	Common::File                             m_file;
+	std::atomic<uint64_t>                    m_appended {0};
+	std::atomic<uint64_t>                    m_written {0};
+	std::atomic<uint64_t>                    m_failed {0};
 	std::mutex                               m_mutex;
 	std::condition_variable_any              m_ready;
 	std::queue<Common::UniqueFunction<void>> m_jobs;

@@ -790,6 +790,20 @@ struct PipelineCacheTestAccess {
 
   static const auto &TessLayouts(const PipelineCache &cache) { return cache.m_tess_layouts; }
 
+  static void StoreFailed(PipelineCache &cache, const PipelineCache::ProgramKey &key,
+                          std::string_view reason) {
+    cache.StoreFailedProgram(key, reason);
+  }
+
+  // The failure reason a restarted cache holds for `key`, or null when it is not a failed program.
+  static const std::string *FailedReason(const PipelineCache &cache,
+                                         const PipelineCache::ProgramKey &key) {
+    const auto found = cache.m_program_cache.find(key);
+    return found != cache.m_program_cache.end() && found->second.skip_dispatch
+               ? &found->second.failure_reason
+               : nullptr;
+  }
+
   static std::array<size_t, 2> Pipelines(const PipelineCache &cache) {
     return {cache.m_graphics_pipelines.size(), cache.m_compute_pipelines.size()};
   }
@@ -51894,9 +51908,13 @@ void CheckShaderStore(VulkanHarness &vulkan) {
   // Reflecting a layout decodes LS and HS, so a restart takes it from the store. Records land
   // while the cache lives; one still queued at its destruction lands before it is gone.
   const ShaderTessellationInputInfo layout{1, 2, 3, 4, 5, 6, 7, 8, 9};
+  // A translation that failed on a worker is stored when it finishes, with no module behind it.
+  const PipelineCache::ProgramKey failed_key{
+      .stage = ShaderType::Compute, .hash = 0x7777ull, .user_data_count = 2, .static_state = {1, 2}};
   {
     RenderContext context(vulkan.RuntimeContext(), store);
     auto &cache = context.GetPipelineCache();
+    PipelineCacheTestAccess::StoreFailed(cache, failed_key, "stored failure");
     PipelineCacheTestAccess::StoreLayout(cache, 1, layout);
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     while (std::filesystem::file_size(store) <= size && std::chrono::steady_clock::now() < deadline)
@@ -51912,6 +51930,10 @@ void CheckShaderStore(VulkanHarness &vulkan) {
     Require(name, "tessellation layout",
             layouts.contains(1) && std::memcmp(&layouts.at(1), &layout, sizeof(layout)) == 0,
             "a restart did not load the stored tessellation layout");
+    const auto *failure = PipelineCacheTestAccess::FailedReason(context.GetPipelineCache(), failed_key);
+    Require(name, "failed program",
+            failure != nullptr && *failure == "stored failure",
+            "a restart did not load the stored failed program");
     Require(name, "drain at exit", layouts.contains(2),
             "a record still queued when the cache was destroyed was dropped");
   }

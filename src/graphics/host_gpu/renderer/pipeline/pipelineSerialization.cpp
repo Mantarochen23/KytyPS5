@@ -12,6 +12,7 @@
 #include "graphics/shader/recompiler/ir/Serialize.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstring>
@@ -94,6 +95,7 @@ ShaderStoreWriter::ShaderStoreWriter() {
 }
 
 void ShaderStoreWriter::Append(std::vector<uint8_t>&& record) {
+	m_appended.fetch_add(1, std::memory_order_relaxed);
 	Post([this, record = std::move(record)] {
 		std::vector<uint8_t> bytes(sizeof(Frame) + ZSTD_compressBound(record.size()));
 		const auto size = ZSTD_compress(bytes.data() + sizeof(Frame), bytes.size() - sizeof(Frame),
@@ -104,7 +106,10 @@ void ShaderStoreWriter::Append(std::vector<uint8_t>&& record) {
 		                   .checksum        = XXH3_64bits(bytes.data() + sizeof(Frame), size)};
 		std::memcpy(bytes.data(), &frame, sizeof(frame));
 		// A failed write leaves a partial record; the next run drops it and everything after it.
-		m_file.Write(bytes.data(), static_cast<uint32_t>(sizeof(Frame) + size));
+		const auto total   = static_cast<uint32_t>(sizeof(Frame) + size);
+		uint32_t   written = 0;
+		m_file.Write(bytes.data(), total, &written);
+		(written == total ? m_written : m_failed).fetch_add(1, std::memory_order_relaxed);
 	});
 }
 
@@ -233,6 +238,33 @@ void PipelineCache::WarmUp(const std::filesystem::path& path) {
 		}
 		Log::WriteToConsoleAndLog(fmt::format(
 		    "Shader cache: indexed {} keys for {} hashes\n", indexed_keys, m_key_index.size()));
+	}
+	{
+		// Per stage: programs with at least one module, and programs recorded as failed.
+		constexpr size_t stages = static_cast<size_t>(ShaderType::TessellationEvaluation) + 1;
+		std::array<size_t, stages> with_modules {};
+		std::array<size_t, stages> failed {};
+		for (const auto& [key, program]: m_program_cache) {
+			const auto stage = static_cast<size_t>(key.stage);
+			if (stage >= stages) {
+				continue;
+			}
+			with_modules[stage] += program.modules.empty() ? 0u : 1u;
+			failed[stage] += program.skip_dispatch ? 1u : 0u;
+		}
+		const auto text = [&](const auto& counts) {
+			return fmt::format("vs={} ps={} cs={} gs={} ls={} hs={} tes={}",
+			                   counts[static_cast<size_t>(ShaderType::Vertex)],
+			                   counts[static_cast<size_t>(ShaderType::Pixel)],
+			                   counts[static_cast<size_t>(ShaderType::Compute)],
+			                   counts[static_cast<size_t>(ShaderType::Mesh)],
+			                   counts[static_cast<size_t>(ShaderType::Local)],
+			                   counts[static_cast<size_t>(ShaderType::TessellationControl)],
+			                   counts[static_cast<size_t>(ShaderType::TessellationEvaluation)]);
+		};
+		Log::WriteToConsoleAndLog(fmt::format(
+		    "Shader cache: loaded per stage: programs with modules {}; failed programs {}\n",
+		    text(with_modules), text(failed)));
 	}
 	Log::WriteToConsoleAndLog(fmt::format(
 	    "Shader cache: loaded {} programs, {} modules, {} pipelines in {} ms\n",

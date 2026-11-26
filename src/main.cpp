@@ -144,7 +144,12 @@ static void PrintUsage() {
 	::printf("  --shader-key-index                   Persist a shader hash -> ProgramKey index in the\n"
 	         "                                       shader store for next-boot lookup. Default: off.\n");
 	::printf("  --async-pump-budget-ms <ms>          Render-thread time per frame step spent applying finished\n"
-	         "                                       async shader jobs; 0 = unlimited. Default: 2.\n");
+	         "                                       async shader jobs; 0 = unlimited. Default: 2.\n"
+	         "  --async-workers <n>                  Shader worker threads. 0 = hardware threads minus 4, at\n"
+	         "                                       least 2. Default: 0.\n"
+	         "  --async-speculative-modules <0|1>    Build the module of a finished compute translation on\n"
+	         "                                       the worker when its resources need no guest memory, so it\n"
+	         "                                       is stored at once. Default: 1.\n");
 }
 
 static bool NextArg(int argc, char* argv[], int& index, std::string& out) {
@@ -556,6 +561,16 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 		} else if (arg == "--async-pump-budget-ms") {
 			if (!ParseUint32(value, options.config.async_pump_budget_ms)) {
 				::printf("invalid async pump budget: %s\n", value.c_str());
+				return false;
+			}
+		} else if (arg == "--async-workers") {
+			if (!ParseUint32(value, options.config.async_workers)) {
+				::printf("invalid async worker count: %s\n", value.c_str());
+				return false;
+			}
+		} else if (arg == "--async-speculative-modules") {
+			if (!ParseUint32(value, options.config.async_speculative_modules)) {
+				::printf("invalid async speculative modules value: %s\n", value.c_str());
 				return false;
 			}
 		} else {

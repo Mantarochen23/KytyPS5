@@ -502,4 +502,12 @@ uint32_t AsyncPumpBudgetMs() {
 	return g_config != nullptr ? g_config->async_pump_budget_ms : 2u;
 }
 
+uint32_t AsyncWorkers() {
+	return g_config != nullptr ? g_config->async_workers : 0u;
+}
+
+bool AsyncSpeculativeModules() {
+	return g_config == nullptr || g_config->async_speculative_modules != 0u;
+}
+
 } // namespace Config

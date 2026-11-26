@@ -739,7 +739,8 @@ PipelineCache::PipelineCache(GraphicContext&                         graphics,
 	InitializeDriverCache();
 	WarmUp(shader_store);
 	if (Config::AsyncShaderCompileEnabled()) {
-		const auto threads = static_cast<uint32_t>(Common::ParallelThreads());
+		const auto threads = ShaderWorkerCount(std::thread::hardware_concurrency(),
+		                                       Config::AsyncWorkers());
 		m_async            = std::make_unique<Async>(threads);
 		PipelineCacheLog("Async shader compile: {} worker threads", threads);
 	}
@@ -859,6 +860,9 @@ void PipelineCache::CheckpointDriverCache() {
 
 void PipelineCache::Save() {
 	m_store.Finish();
+	if (m_async != nullptr) {
+		m_async->ReportStore(m_store.GetCounts());
+	}
 	if (m_driver_cache_dirty) {
 		m_driver_cache_dirty = false;
 		WriteDriverCache();
