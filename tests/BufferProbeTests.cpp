@@ -97,9 +97,10 @@ void TestLineAndLimiter() {
 		if (limiter.OnDispatch(mismatch, mismatch)) printed++;
 		Check(limiter.SummaryDue() == ((i + 1) % 500 == 0), "summary every 500 dispatches");
 	}
-	Check(printed == BufferProbe::MaxMismatchPrints && limiter.Printed() == 40 &&
+	// 40 mismatching dispatches plus the clean ones among the first 5 probed dispatches.
+	Check(printed == BufferProbe::MaxMismatchPrints + 2 && limiter.Printed() == 40 &&
 	          limiter.Mismatches() == 500 && limiter.Dispatches() == 1000,
-	      "only the first 40 mismatching dispatches print");
+	      "the first 40 mismatching and the first 5 probed dispatches print");
 	Check(limiter.Summary().find("probed_dispatches=1000 mismatching=500 unexpected=500") !=
 	          std::string::npos,
 	      "summary text");

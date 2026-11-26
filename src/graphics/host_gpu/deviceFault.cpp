@@ -684,6 +684,12 @@ void GpuBreadcrumbTracker::ReportDeviceLost(GraphicContext& graphics, const char
 	           SafeDescription(props.deviceName.data(), props.deviceName.size()), props.vendorID,
 	           props.deviceID, props.driverVersion);
 
+	// The guard records live in a device-local buffer that is unreadable once the device is lost:
+	// a hang with the guard on therefore means no loop tripped before the stall (the records of
+	// completed dispatches were already logged as [loop-guard] lines).
+	out.Printf("debug_options: loop_guard_limit={} buffer_probe_shaders={} loop_guard_records=unreadable_after_device_loss\n",
+	           Config::LoopGuardLimit(), Config::BufferProbeHashes().size());
+
 	// Signal-handler safe: never block on m_mutex if the interrupted thread holds it.
 	std::unique_lock lock(m_mutex, std::try_to_lock);
 	const bool       locked               = lock.owns_lock();

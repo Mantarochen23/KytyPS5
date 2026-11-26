@@ -142,12 +142,16 @@ enum class CacheState : uint8_t {
 // SummaryInterval probed dispatches.
 class Limiter {
 public:
+	static constexpr uint32_t AlwaysPrintedDispatches = 5;
+
 	// Call once per probed dispatch. Returns true when this dispatch's lines should be printed.
 	[[nodiscard]] bool OnDispatch(bool mismatch, bool unexpected) {
 		m_dispatches++;
 		if (mismatch) m_mismatches++;
 		if (unexpected) m_unexpected++;
-		return mismatch && m_printed < MaxMismatchPrints && (++m_printed, true);
+		const bool print_mismatch = mismatch && m_printed < MaxMismatchPrints && (++m_printed, true);
+		// The first dispatches are always printed, so a run with no difference is still visible.
+		return print_mismatch || m_dispatches <= AlwaysPrintedDispatches;
 	}
 	[[nodiscard]] bool SummaryDue() const noexcept {
 		return m_dispatches != 0 && m_dispatches % SummaryInterval == 0;

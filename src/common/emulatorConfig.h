@@ -238,6 +238,7 @@ bool BdaTableValidateEnabled();
 uint32_t HangDumpWaitSeconds();
 bool     BufferProbeShader(uint64_t hash);
 bool     BufferProbeEnabled();
+const std::vector<uint64_t>& BufferProbeHashes();
 uint32_t LoopGuardLimit();
 
 } // namespace Config

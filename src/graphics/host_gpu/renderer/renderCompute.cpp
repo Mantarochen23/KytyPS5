@@ -406,12 +406,13 @@ static void CaptureComputeBufferBreadcrumbs(RenderContext&               context
 // storage buffer with the bytes the GPU reads.
 //
 // Ordering: the probe runs on the GPU thread after the dispatch's bindings are final (the cache has
-// uploaded every CPU-dirty range it was going to) and records, in the dispatch's own command
-// buffer right before the dispatch, one barrier, a copy of each bound range into a host-visible
-// buffer and a second barrier. The barrier makes every earlier command of the stream (cache
-// uploads, earlier dispatches and draws) visible to the copy, so the copy sees exactly what the
-// dispatch will start with. The guest bytes are read at record time. The comparison runs once the
-// command buffer has completed, so a guest write after recording shows up as a difference.
+// uploaded every CPU-dirty range it was going to). It records, in the stream's current command
+// buffer, one barrier, a copy of each bound range into a host-visible buffer and a second
+// barrier, then submits the stream and waits for it before the dispatch itself is recorded. The
+// barrier makes every earlier command of the stream (cache uploads, earlier dispatches and draws)
+// visible to the copy, so the copy shows what the dispatch will start with; guest bytes are read
+// right before the submit. The findings are logged before the dispatch exists, so they survive a
+// hang of that dispatch. Slow by design (one stall per probed dispatch).
 // The cache state is sampled BEFORE the binding step, so "synced" on a differing range means the
 // cache believed the range was up to date.
 namespace {
@@ -531,16 +532,16 @@ public:
 		native.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
 		                       vk::PipelineStageFlagBits::eAllCommands, {}, 1, &after, 0, nullptr,
 		                       0, nullptr);
-		// A host write-back of the copy is also needed for non-coherent memory.
 		const uint32_t dispatch = m_dispatch++;
 		std::vector<std::string> alias_lines =
 		    FindSplitAliases(hash, dispatch, probed, host_start, sources);
-		context.GetCommandScheduler().DeferOperation(
-		    [this, hash, dispatch, total, host_stream = std::move(host_stream),
-		     probed = std::move(probed), alias_lines = std::move(alias_lines),
-		     staging = std::move(staging)]() mutable {
-			    Report(hash, dispatch, total, host_stream, probed, alias_lines, *staging);
-		    });
+		// Debug option, correctness over speed: submit what is recorded so far (every upload and
+		// earlier dispatch of the stream plus the copy) and wait for it, so the findings are
+		// logged before this dispatch can hang the queue. The deferred form never ran when the
+		// dispatch itself hung.
+		auto& scheduler = context.GetCommandScheduler();
+		scheduler.Wait(scheduler.CurrentTick());
+		Report(hash, dispatch, total, host_stream, probed, alias_lines, *staging);
 	}
 
 private:
@@ -756,6 +757,9 @@ bool RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 	RebindImages(bindings);
 	BindSharedMemory(m_context, input_info, bindings);
 	RebindBuffers(bindings);
+	if (buffer_probe) {
+		GetBufferProbe().Record(m_context, buffer, program.shader_hash, bindings, probe_states);
+	}
 
 	const auto vk_buffer = buffer.Handle();
 	CommitBindings(buffer, vk::PipelineBindPoint::eCompute, pipeline,
@@ -828,9 +832,6 @@ bool RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 	}
 
 	vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.pipeline);
-	if (buffer_probe) {
-		GetBufferProbe().Record(m_context, buffer, program.shader_hash, bindings, probe_states);
-	}
 	OpBreadcrumb dispatch_op {};
 	dispatch_op.kind        = BreadcrumbOpKind::Dispatch;
 	dispatch_op.dim_x       = thread_group_x;
@@ -925,6 +926,9 @@ bool RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 	    args_addr, sizeof(vk::DispatchIndirectCommand), false);
 	EXIT_IF((args_offset & 3u) != 0);
 	RebindBuffers(bindings);
+	if (buffer_probe) {
+		GetBufferProbe().Record(m_context, buffer, program.shader_hash, bindings, probe_states);
+	}
 	CommitBindings(buffer, vk::PipelineBindPoint::eCompute, pipeline,
 	               std::span {&descriptor_stage, 1u});
 	const auto vk_buffer = buffer.Handle();
@@ -932,9 +936,6 @@ bool RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 		ShaderWriteHazardBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
 	}
 	vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.pipeline);
-	if (buffer_probe) {
-		GetBufferProbe().Record(m_context, buffer, program.shader_hash, bindings, probe_states);
-	}
 	OpBreadcrumb dispatch_op {};
 	dispatch_op.kind        = BreadcrumbOpKind::DispatchIndirect;
 	dispatch_op.stage_count = 1;

@@ -475,6 +475,11 @@ bool BufferProbeShader(uint64_t hash) {
 	       std::ranges::binary_search(g_config->buffer_probe_hashes, hash);
 }
 
+const std::vector<uint64_t>& BufferProbeHashes() {
+	static const std::vector<uint64_t> none;
+	return g_config != nullptr ? g_config->buffer_probe_hashes : none;
+}
+
 bool BufferProbeEnabled() {
 	return g_config != nullptr && !g_config->buffer_probe_hashes.empty();
 }
