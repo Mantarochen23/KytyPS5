@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <bit>
 #include <cstdint>
+#include <deque>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -133,17 +134,89 @@ bool MayForwardPatternChange(ValueOpcode opcode) {
 	}
 }
 
+// Instruction -> fold state. Open addressing over pointer keys; entries live in a deque, so a
+// Location keeps its address while the table grows.
+template <typename Location>
+class LocationMap {
+public:
+	void Reserve(size_t count) {
+		size_t capacity = 16;
+		while (capacity < count * 2u) capacity <<= 1u;
+		if (capacity > m_table.size()) Rehash(capacity);
+	}
+
+	Location* Find(const Inst* inst) {
+		if (m_table.empty()) return nullptr;
+		for (size_t slot = Hash(inst) & m_mask;; slot = (slot + 1u) & m_mask) {
+			if (m_table[slot].key == inst) return m_table[slot].location;
+			if (m_table[slot].key == nullptr) return nullptr;
+		}
+	}
+
+	Location& At(const Inst* inst) {
+		auto* found = Find(inst);
+		EXIT_IF(found == nullptr);
+		return *found;
+	}
+
+	// Returns the existing entry when the instruction is already registered.
+	Location& Emplace(const Inst* inst, Location value) {
+		if (auto* found = Find(inst)) return *found;
+		if ((m_storage.size() + 1u) * 2u > m_table.size()) Rehash(m_table.empty() ? 16u : m_table.size() * 2u);
+		m_storage.push_back(std::move(value));
+		Insert(inst, &m_storage.back());
+		return m_storage.back();
+	}
+
+private:
+	struct Slot {
+		const Inst* key      = nullptr;
+		Location*   location = nullptr;
+	};
+
+	size_t Hash(const Inst* inst) const {
+		return static_cast<size_t>((reinterpret_cast<uintptr_t>(inst) >> 4u) * 0x9e3779b97f4a7c15ull >> 20u);
+	}
+
+	void Insert(const Inst* inst, Location* location) {
+		size_t slot = Hash(inst) & m_mask;
+		while (m_table[slot].key != nullptr) slot = (slot + 1u) & m_mask;
+		m_table[slot] = {inst, location};
+	}
+
+	void Rehash(size_t capacity) {
+		std::vector<Slot> old = std::move(m_table);
+		m_table.assign(capacity, Slot {});
+		m_mask = capacity - 1u;
+		for (const auto& slot: old) {
+			if (slot.key != nullptr) Insert(slot.key, slot.location);
+		}
+	}
+
+	std::deque<Location> m_storage;
+	std::vector<Slot>    m_table;
+	size_t               m_mask = 0;
+};
+
 class FoldWorklist {
 public:
 	struct Location {
 		Block::iterator instruction;
-		uint32_t        flush_epoch = 0;
-		bool            queued      = false;
+		uint32_t        flush_epoch   = 0;
+		uint32_t        index_maximum = 0;
+		bool            queued        = false;
+		bool            tracks_index  = false;
 	};
 
 	void Register(Block::iterator instruction) {
-		auto& loc = locations.emplace(&*instruction, Location {instruction}).first->second;
-		if (MayFold(instruction->GetOpcode())) {
+		auto& loc = locations.Emplace(&*instruction, Location {instruction});
+		const auto op = instruction->GetOpcode();
+		if ((op == ValueOpcode::IEqual32 || op == ValueOpcode::ULessThan32) &&
+		    instruction->Flags<IntegerCompareFlags>().register_index) {
+			register_index_comparisons.push_back(&*instruction);
+			instruction->SetFlags(IntegerCompareFlags {});
+		}
+		if (MayFold(op)) {
 			Queue(loc);
 		}
 	}
@@ -167,9 +240,7 @@ public:
 
 	void NotifyMutated(Inst& inst) {
 		QueueUsers(inst.Uses());
-		if (const auto found = locations.find(&inst); found != locations.end()) {
-			Queue(found->second);
-		}
+		if (auto* found = locations.Find(&inst)) Queue(*found);
 		++mutation_epoch;
 	}
 
@@ -180,12 +251,12 @@ public:
 		++m_flush_epoch;
 		for (size_t i = 0; i < affected.size(); ++i) {
 			auto*      inst  = affected[i];
-			const auto found = locations.find(inst);
-			if (found == locations.end() || found->second.flush_epoch == m_flush_epoch) continue;
-			found->second.flush_epoch = m_flush_epoch;
+			auto* found = locations.Find(inst);
+			if (found == nullptr || found->flush_epoch == m_flush_epoch) continue;
+			found->flush_epoch = m_flush_epoch;
 			const auto op             = inst->GetOpcode();
 			if (op == ValueOpcode::Identity || op == ValueOpcode::Void) continue;
-			if (MayFold(op)) Queue(found->second);
+			if (MayFold(op)) Queue(*found);
 			if (MayForwardPatternChange(op)) {
 				for (const auto& use: inst->Uses()) affected.push_back(use.user);
 			}
@@ -200,7 +271,8 @@ public:
 		return result;
 	}
 
-	std::unordered_map<Inst*, Location> locations;
+	LocationMap<Location>               locations;
+	std::vector<Inst*>                  register_index_comparisons;
 	std::vector<Location*>              pending; // Map nodes keep their addresses across rehashes.
 	std::unordered_set<Inst*>           lowered_ancillary;
 	uint64_t                            mutation_epoch = 0;
@@ -209,6 +281,82 @@ private:
 	uint32_t           m_flush_epoch = 0;
 	std::vector<Inst*> affected;
 };
+
+// M0 indexes VGPRs across lanes. Trace only the definitions feeding its register
+// comparisons; loop-carried writes can themselves depend on those comparisons.
+void FoldRegisterIndexComparisons(FoldWorklist& worklist) {
+	const auto maximum = [&](Value value) -> uint32_t {
+		if (IsImmediate(value, Type::U32)) return value.U32();
+		if (IsImmediate(value, Type::U1)) return value.U1();
+		auto* found = worklist.locations.Find(value.TryInstruction());
+		if (found == nullptr) return UINT32_MAX;
+		auto& location = *found;
+		if (!location.tracks_index) {
+			location.tracks_index = true;
+			worklist.Queue(location);
+		}
+		return location.index_maximum;
+	};
+	const auto evaluate = [&](const Inst& inst) -> uint32_t {
+		const auto bound = [&](size_t arg) { return maximum(inst.Arg(arg)); };
+		switch (inst.GetOpcode()) {
+			case ValueOpcode::Phi: {
+				uint32_t result = 0;
+				for (size_t arg = 0; arg < inst.NumArgs(); ++arg) result = std::max(result, bound(arg));
+				return inst.NumArgs() != 0 ? result : UINT32_MAX;
+			}
+			case ValueOpcode::SelectU32: return bound(0) == 0 ? bound(2) : std::max(bound(1), bound(2));
+			// ReadFirstLane takes lane zero for empty EXEC, so the source bound covers every lane.
+			case ValueOpcode::ReadFirstLane:
+			case ValueOpcode::Identity: return bound(0);
+			case ValueOpcode::LogicalAnd:
+			case ValueOpcode::BitwiseAnd32: return std::min(bound(0), bound(1));
+			case ValueOpcode::IMul32:
+				return static_cast<uint32_t>(std::min<uint64_t>(uint64_t {bound(0)} * bound(1), UINT32_MAX));
+			case ValueOpcode::BitFieldUExtract: {
+				const auto offset = inst.Arg(1).Resolve(), width = inst.Arg(2).Resolve();
+				if (!offset.IsImmediate() || !width.IsImmediate() ||
+				    offset.U32() >= 32u || width.U32() > 32u - offset.U32()) return UINT32_MAX;
+				const auto mask = width.U32() == 32u ? UINT32_MAX : (1u << width.U32()) - 1u;
+				return std::min(bound(0) >> offset.U32(), mask);
+			}
+			case ValueOpcode::IEqual32:
+				for (size_t arg = 0; arg < 2; ++arg) {
+					const auto value = inst.Arg(arg).Resolve();
+					if (value.IsImmediate() && value.U32() > bound(arg ^ 1u)) return 0;
+				}
+				return 1;
+			case ValueOpcode::ULessThan32: {
+				const auto left = inst.Arg(0).Resolve();
+				return !left.IsImmediate() || left.U32() < bound(1);
+			}
+			default: return inst.GetType() == Type::U1 ? 1u : UINT32_MAX;
+		}
+	};
+	for (auto* compare: worklist.register_index_comparisons) {
+		const auto op = compare->GetOpcode();
+		if (op != ValueOpcode::Identity) maximum(compare->Arg(op == ValueOpcode::IEqual32 ? 0u : 1u));
+	}
+	for (size_t i = 0; i < worklist.pending.size(); ++i) {
+		auto& location = *worklist.pending[i];
+		auto& inst = *location.instruction;
+		location.queued = false;
+		const auto next = evaluate(inst);
+		auto& previous = location.index_maximum;
+		if (next <= previous) continue;
+		// Widen a growing loop-carried bound; only stable finite bounds can prune registers.
+		previous = inst.GetOpcode() == ValueOpcode::Phi && previous != 0 ? UINT32_MAX : next;
+		for (const auto& use: inst.Uses()) {
+			auto* user = worklist.locations.Find(use.user);
+			if (user != nullptr && user->tracks_index) worklist.Queue(*user);
+		}
+	}
+	worklist.pending.clear();
+	for (auto* compare: worklist.register_index_comparisons) {
+		if (compare->GetOpcode() == ValueOpcode::Identity || evaluate(*compare) != 0) continue;
+		worklist.Replace(*compare, Value(false));
+	}
+}
 
 // Reads an immediate operand of a fold function's parameter type.
 template <typename T>
@@ -1071,7 +1219,7 @@ private:
 		if (const auto found = m_values.find(source); found != m_values.end()) return found->second.Resolve();
 		if (const auto predicate = BallotPredicate(*source); !predicate.IsEmpty()) return predicate;
 		auto* block = source->Parent();
-		const auto where = m_worklist.locations.at(source).instruction;
+		const auto where = m_worklist.locations.At(source).instruction;
 		const auto op = source->GetOpcode() == ValueOpcode::BitwiseAnd32 ? ValueOpcode::LogicalAnd
 		              : source->GetOpcode() == ValueOpcode::BitwiseOr32 ? ValueOpcode::LogicalOr
 		              : source->GetOpcode() == ValueOpcode::BitwiseNot32 ? ValueOpcode::LogicalNot
@@ -1109,7 +1257,7 @@ void ConstantPropagationPass(const BlockList& blocks, uint32_t wave_size) {
 	LaneMaskProjection mask_projection(worklist);
 	size_t total_insts = 0;
 	for (const auto* block: blocks) total_insts += block->Instructions().size();
-	worklist.locations.reserve(total_insts * 2u);
+	worklist.locations.Reserve(total_insts);
 	for (auto* block: blocks)
 		for (auto inst = block->begin(); inst != block->end(); ++inst) worklist.Register(inst);
 	const auto drain = [&] {
@@ -1129,6 +1277,10 @@ void ConstantPropagationPass(const BlockList& blocks, uint32_t wave_size) {
 		} while (!worklist.pending.empty());
 	};
 	drain();
+	if (!worklist.register_index_comparisons.empty()) {
+		FoldRegisterIndexComparisons(worklist);
+		drain();
+	}
 	// Normalize retained PHI/select values only after every supported field read has
 	// been lowered; direct raw consumers remain unsupported.
 	bool normalized;

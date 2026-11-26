@@ -44,7 +44,9 @@
 #include <cstring>
 #include <deque>
 #include <initializer_list>
+#include <chrono>
 #include <iterator>
+#include <map>
 #include <span>
 #include <sstream>
 #include <string>
@@ -63,9 +65,16 @@
 namespace Libs::Graphics {
 namespace {
 
+// Set by --pass-continue: report failed checks but keep going, so the
+// benchmark sees every test shader even when an unrelated check fails.
+bool g_continue_on_failure = false;
+
 void Check(bool value, const char *text) {
   if (!value) {
     std::fprintf(stderr, "ShaderCfgTests: failed: %s\n", text);
+    if (g_continue_on_failure) {
+      return;
+    }
     std::abort();
   }
 }
@@ -143,10 +152,146 @@ struct TestCompileResult {
   ShaderRecompiler::IR::ResourceSnapshot resources;
 };
 
+
+// Translation benchmark / output-identity harness. Off unless --pass-bench is given.
+// --pass-bench[=N]      repeat every recompile N extra times and time the IR passes
+// --pass-baseline=FILE  record per-shader SPIR-V digests (file missing) or compare against them
+// --pass-dump=DIR       write the SPIR-V of every recompiled test shader to DIR
+struct PassBench {
+  bool enabled = false;
+  unsigned repeat = 0;
+  std::string baseline;
+  std::string dump_dir;
+  std::vector<std::pair<uint64_t, size_t>> digests; // xxh64 of the SPIR-V words, word count
+  std::map<std::string, std::pair<uint64_t, uint64_t>> passes; // name -> sum of per-shader best ns, shaders
+  std::map<std::string, uint64_t> current;                       // this repeat: name -> ns
+  std::map<std::pair<size_t, std::string>, uint64_t> best;       // (shader, name) -> fastest repeat
+  uint64_t translate_ns = 0;
+  uint64_t compile_ns = 0;
+  bool measuring = false;
+};
+PassBench g_pass_bench;
+
+void PassBenchHook(const char *name, uint64_t ns) {
+  if (!g_pass_bench.measuring) {
+    return;
+  }
+  g_pass_bench.current[name] += ns;
+}
+
+uint64_t NowNs() {
+  return static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count());
+}
+
+void PassBenchRecord(std::span<const uint32_t> spirv) {
+  const auto index = g_pass_bench.digests.size();
+  g_pass_bench.digests.emplace_back(
+      XXH64(spirv.data(), spirv.size_bytes(), 0), spirv.size());
+  if (!g_pass_bench.dump_dir.empty()) {
+    char name[32];
+    std::snprintf(name, sizeof(name), "/%05zu.spv", index);
+    if (auto *file = std::fopen((g_pass_bench.dump_dir + name).c_str(), "wb")) {
+      std::fwrite(spirv.data(), sizeof(uint32_t), spirv.size(), file);
+      std::fclose(file);
+    }
+  }
+}
+
+template <typename Compile>
+void PassBenchRepeat(const Compile &compile) {
+  g_pass_bench.measuring = true;
+  // Shared build hosts are noisy: keep the fastest repeat of every shader and pass.
+  const auto shader = g_pass_bench.digests.size();
+  uint64_t best_total = UINT64_MAX;
+  for (unsigned i = 0; i < g_pass_bench.repeat; i++) {
+    g_pass_bench.current.clear();
+    const auto begin = NowNs();
+    (void)compile();
+    best_total = std::min(best_total, NowNs() - begin);
+    for (const auto &[name, ns] : g_pass_bench.current) {
+      auto [it, inserted] = g_pass_bench.best.try_emplace({shader, name}, ns);
+      if (!inserted) it->second = std::min(it->second, ns);
+    }
+  }
+  if (best_total != UINT64_MAX) g_pass_bench.translate_ns += best_total;
+  g_pass_bench.measuring = false;
+}
+
+int PassBenchReport() {
+  if (!g_pass_bench.enabled) {
+    return 0;
+  }
+  std::printf("PASSBENCH shaders=%zu repeat=%u total_ms=%.1f\n",
+              g_pass_bench.digests.size(), g_pass_bench.repeat,
+              static_cast<double>(g_pass_bench.translate_ns) / 1e6);
+  for (const auto &[key, ns] : g_pass_bench.best) {
+    auto &entry = g_pass_bench.passes[key.second];
+    entry.first += ns;
+    entry.second++;
+  }
+  for (const auto &[name, entry] : g_pass_bench.passes) {
+    std::printf("PASSBENCH pass %-24s best_ms=%9.2f shaders=%llu\n",
+                name.c_str(), static_cast<double>(entry.first) / 1e6,
+                static_cast<unsigned long long>(entry.second));
+  }
+  uint64_t combined = 0;
+  for (const auto &digest : g_pass_bench.digests) {
+    combined = XXH64(&digest, sizeof(digest), combined);
+  }
+  std::printf("PASSBENCH digest=%016llx\n", static_cast<unsigned long long>(combined));
+  if (g_pass_bench.baseline.empty()) {
+    return 0;
+  }
+  std::vector<std::pair<uint64_t, size_t>> base;
+  if (auto *file = std::fopen(g_pass_bench.baseline.c_str(), "r")) {
+    unsigned long long hash = 0;
+    unsigned long long words = 0;
+    while (std::fscanf(file, "%llx %llu", &hash, &words) == 2) {
+      base.emplace_back(hash, static_cast<size_t>(words));
+    }
+    std::fclose(file);
+  }
+  if (base.empty()) {
+    if (auto *file = std::fopen(g_pass_bench.baseline.c_str(), "w")) {
+      for (const auto &digest : g_pass_bench.digests) {
+        std::fprintf(file, "%016llx %zu\n",
+                     static_cast<unsigned long long>(digest.first), digest.second);
+      }
+      std::fclose(file);
+    }
+    std::printf("PASSBENCH baseline recorded\n");
+    return 0;
+  }
+  size_t mismatches = 0;
+  if (base.size() != g_pass_bench.digests.size()) {
+    std::printf("PASSBENCH MISMATCH count baseline=%zu now=%zu\n", base.size(),
+                g_pass_bench.digests.size());
+    mismatches++;
+  }
+  for (size_t i = 0; i < std::min(base.size(), g_pass_bench.digests.size()); i++) {
+    if (base[i] != g_pass_bench.digests[i]) {
+      if (++mismatches <= 10) {
+        std::printf("PASSBENCH MISMATCH shader %zu\n", i);
+      }
+    }
+  }
+  std::printf("PASSBENCH compare %s mismatches=%zu\n",
+              mismatches == 0 ? "IDENTICAL" : "DIFFERENT", mismatches);
+  return mismatches == 0 ? 0 : 1;
+}
+
 TestCompileResult RecompileForTest(
     std::span<const uint32_t> code,
     const ShaderRecompiler::CompileOptions &options,
-    ShaderRecompiler::IR::PushData::Window push_data = {}) {
+    ShaderRecompiler::IR::PushData::Window push_data = {});
+
+TestCompileResult RecompileForTestOnce(
+    std::span<const uint32_t> code,
+    const ShaderRecompiler::CompileOptions &options,
+    ShaderRecompiler::IR::PushData::Window push_data) {
   auto translated = ShaderRecompiler::TranslateProgram(code, options);
   auto plan = ShaderRecompiler::IR::ExtractResourcePlan(translated.program);
   ShaderRecompiler::IR::ResourceSnapshot resources;
@@ -164,6 +309,19 @@ TestCompileResult RecompileForTest(
   return {std::move(compiled.spirv), std::move(compiled.decoded_dump),
           std::move(compiled.ir_dump), std::move(compiled.program),
           std::move(resources)};
+}
+
+TestCompileResult RecompileForTest(
+    std::span<const uint32_t> code,
+    const ShaderRecompiler::CompileOptions &options,
+    ShaderRecompiler::IR::PushData::Window push_data) {
+  auto result = RecompileForTestOnce(code, options, push_data);
+  if (g_pass_bench.enabled) {
+    PassBenchRecord(result.spirv);
+    PassBenchRepeat(
+        [&] { return RecompileForTestOnce(code, options, push_data); });
+  }
+  return result;
 }
 
 void CompilePixelRuntime(const ShaderParams &params,
@@ -6081,6 +6239,42 @@ void TestBoundedMaterialBufferStores(bool scalar_key) {
     code[0xa8u / 4u] = EncodeMubuf0(0x0cu, 52u);
     code[0xacu / 4u] = EncodeMubuf1(24u, 2u, 27u);
   }
+  if (g_pass_bench.enabled && !scalar_key) {
+    // Scaling input for the pass benchmark: the captured body repeated back to back
+    // (branches are pc-relative, so only the final end-of-program stays).
+    for (const size_t copies : {size_t{24}, size_t{96}}) {
+      std::vector<uint32_t> big;
+      // Save the entry scalar state once, restore it before every copy.
+      for (uint32_t reg = 0; reg < 16u; reg++) big.push_back(EncodeSMovB32(32u + reg, reg));
+      big.push_back(EncodeSMovB32(48u, 126u));
+      for (size_t copy = 0; copy < copies; copy++) {
+        for (uint32_t reg = 0; reg < 16u; reg++) big.push_back(EncodeSMovB32(reg, 32u + reg));
+        big.push_back(EncodeSMovB32(126u, 48u));
+        big.insert(big.end(), code.begin(),
+                   copy + 1 == copies ? code.end() : code.end() - 1);
+      }
+      auto big_options = options;
+      big_options.dump_ir = true;
+      auto big_translated = ShaderRecompiler::TranslateProgram(big, big_options);
+      const auto big_plan = ShaderRecompiler::IR::ExtractResourcePlan(big_translated.program);
+      ShaderRecompiler::IR::ResourceSnapshot big_snapshot;
+      ShaderRecompiler::IR::ResourceSpecialization big_specialization;
+      const ShaderRecompiler::IR::SrtRuntime big_runtime{
+          .user_data = user_data, .read_specialization_memory = ReadHostTestMemory};
+      Check(ShaderRecompiler::IR::MaterializeResources(
+                big_plan, big_runtime, big_snapshot, big_specialization),
+            "benchmark input did not materialize");
+      auto big_compiled = ShaderRecompiler::CompileProgram(
+          std::move(big_translated), big_options, big_specialization, {});
+      PassBenchRecord(big_compiled.spirv);
+      g_pass_bench.digests.back().first ^=
+          XXH64(big_compiled.ir_dump.data(), big_compiled.ir_dump.size(), 1);
+      PassBenchRepeat([&] {
+        auto result = ShaderRecompiler::TranslateProgram(big, options);
+        return result.program.blocks.size();
+      });
+    }
+  }
   auto translated = ShaderRecompiler::TranslateProgram(code, options);
   auto plan = ShaderRecompiler::IR::ExtractResourcePlan(translated.program);
   ShaderRecompiler::IR::ResourceSnapshot snapshot;
@@ -11002,47 +11196,41 @@ void TestLogicalAlphaBlendExport() {
         "guest dual-source export was replaced by synthetic alpha");
 }
 
-void TestNewShaderRecompilerEarlyZDisabledWhenPixelKillEnabled() {
+void TestNewShaderRecompilerPixelDepthOrder() {
   constexpr uint32_t ExecutionModeEarlyFragmentTests = 9;
-
-  const uint32_t shader[] = {
-      EncodeExp0(0x00, 0xf, true, false, true),
-      EncodeExp1(0, 1, 2, 3),
-      0xbf810000u,
-  };
-
-  ShaderPixelInputInfo ps_info;
-  ps_info.ps_early_z = true;
-  ps_info.ps_pixel_kill_enable = true;
-
-  auto options = MakeCompileOptions(ShaderType::Pixel);
-  options.input_info.pixel = &ps_info;
-
-  auto result = RecompileForTest(shader, options);
-  Check(SpirvInstructionOpcodeCount(result.spirv, 252) != 0,
-        "pixel valid-mask export should still lower to OpKill");
-  Check(!SpirvContainsExecutionMode(result.spirv,
-                                    ExecutionModeEarlyFragmentTests),
-        "pixel shaders that may kill fragments must not request "
-        "EarlyFragmentTests");
-  CheckSpirvBinaryValidates(result.spirv);
-
-  const uint32_t ordinary_shader[] = {
-      EncodeExp0(0x00, 0xf),
-      EncodeExp1(0, 1, 2, 3),
-      0xbf810000u,
-  };
-  ps_info.ps_pixel_kill_enable = false;
-  auto ordinary_result = RecompileForTest(ordinary_shader, options);
-  const auto ordinary_source = DisassembleSpirvBinary(ordinary_result.spirv);
-  Check(SpirvInstructionOpcodeCount(ordinary_result.spirv, 252) == 0,
-        "ordinary pixel shader unexpectedly contains OpKill");
-  Check((ordinary_source.find("pixel_valid_mask_active") == std::string::npos),
-        "ordinary pixel shader allocated pixel-valid state");
-  Check(SpirvContainsExecutionMode(ordinary_result.spirv,
-                                   ExecutionModeEarlyFragmentTests),
-        "ordinary early-Z pixel shader lost EarlyFragmentTests");
-  CheckSpirvBinaryValidates(ordinary_result.spirv);
+  const std::array<Prospero::ColorComponentMapping, 8> mappings{};
+  const std::array cases{std::array{false, false, true},
+                         std::array{true, false, false},
+                         std::array{true, true, true}};
+  for (const auto &[kill, depth_before_shader, early_tests] : cases) {
+    const uint32_t shader[] = {EncodeExp0(0x00, 0xf, true, false, kill),
+                               EncodeExp1(0, 1, 2, 3), EncodeSopp(0x01)};
+    HW::PixelShaderInfo regs{};
+    regs.ps_regs.data_addr = reinterpret_cast<uint64_t>(shader);
+    ShaderMappedData mapped{};
+    mapped.code_size_bytes = sizeof(shader);
+    ShaderMapUserData(regs.ps_regs.data_addr, mapped);
+    HW::ShaderRegisters sh{};
+    sh.db_shader_control.shader_z_behavior = 1;
+    sh.db_shader_control.shader_kill_enable = kill;
+    sh.db_shader_control.depth_before_shader = depth_before_shader;
+    ShaderPixelInputInfo input{};
+    const auto params = PrepareProgram(regs, sh, mappings, input);
+    auto options = MakeCompileOptions(ShaderType::Pixel);
+    options.input_info.pixel = &input;
+    const auto result = RecompileForTest(params.code, options);
+    Check(SpirvContainsExecutionMode(result.spirv, ExecutionModeEarlyFragmentTests) ==
+              early_tests,
+          "pixel depth ordering did not match DB_SHADER_CONTROL");
+    Check((SpirvInstructionOpcodeCount(result.spirv, 252) != 0) == kill,
+          "pixel discard did not match the valid-mask export");
+    if (!kill) {
+      Check(DisassembleSpirvBinary(result.spirv).find("pixel_valid_mask_active") ==
+                std::string::npos,
+            "ordinary pixel shader allocated pixel-valid state");
+    }
+    CheckSpirvBinaryValidates(result.spirv);
+  }
 }
 
 void TestNewShaderRecompilerNativeBindingPlan() {
@@ -11647,6 +11835,71 @@ void TestUniformSelectedWritableDescriptor() {
               descriptor[2] == 14u && descriptor[3] == 0x16204u,
           "uniform writable descriptor lost its branch, carry, or post-merge stride");
   }
+}
+
+void TestGuardedScalarDescriptor() {
+  using namespace ShaderRecompiler::IR;
+  // The counter's optional base and its atomic are gated by two compares of the saved flag.
+  std::vector<uint32_t> shader{
+      EncodeSmem0(0, 10, 0), (125u << 25u) | 0x18u,
+      EncodeSop1(0x04, 4, 128),                // s_mov_b64 s[4:5], 0
+      EncodeSopc(0x07, 128, 10), EncodeSopp(0x04, 2),
+      EncodeSmem0(1, 4, 0), (125u << 25u) | 0x50u,
+      EncodeSop1(0x1d, 5, 146),                // s_bitset1_b32 s5, 18
+      EncodeSMovB32(6, 144), EncodeSMovB32(7, 255), 0x16204u,
+      EncodeSopc(0x07, 128, 10), EncodeSopp(0x04, 8),
+      EncodeVopc(0xc2, 128, 0),                // v_cmp_eq_u32 vcc, 0, v0
+      EncodeSop1(0x24, 12, 106),               // s_and_saveexec_b64 s[12:13], vcc
+      EncodeSopp(0x08, 2),                     // s_cbranch_execz restore
+      EncodeMubuf0(0x32), EncodeMubuf1(0, 1, 0),
+      EncodeSop1(0x04, 126, 12),               // s_mov_b64 exec, s[12:13]
+      EncodeMubuf0(0x32), EncodeMubuf1(0, 1, 0), EncodeSopp(0x01)};
+  std::array<uint32_t, 2> user_data{0x1000u, 0u};
+  auto options = MakeCompileOptions(ShaderType::Compute);
+  options.user_data = user_data;
+  auto translated = ShaderRecompiler::TranslateProgram(shader, options);
+  auto plan = ExtractResourcePlan(translated.program);
+  Check(plan.info.buffers.size() == 1u && plan.info.buffers[0].written,
+        "guarded atomic lost its direct buffer binding");
+  struct Memory { uint32_t enabled; uint32_t base_reads; } memory{};
+  FakeGuestMemory fake(+[](void *data, uint64_t address, std::span<uint32_t> words) {
+    auto &memory = *static_cast<Memory *>(data);
+    if (address == 0x1018u) {
+      words[0] = memory.enabled;
+      return true;
+    }
+    if (address != 0x1050u && address != 0x1054u) return false;
+    ++memory.base_reads;
+    words[0] = address == 0x1050u ? 0x5000u : 1u;
+    return memory.enabled != 0u;
+  }, &memory);
+  ResourceSnapshot snapshot;
+  ResourceSpecialization specialization;
+  for (const uint32_t enabled : {0u, 1u, 0u}) {
+    memory = {enabled, 0u};
+    Check(MaterializeResources(plan, {.user_data = user_data}, snapshot, specialization) &&
+              memory.base_reads == 2u * enabled,
+          "guarded atomic read an inactive base or lost its enabled address");
+    const auto &words = snapshot.buffers[0].dwords;
+    Check(enabled ? words[0] == 0x5000u && words[1] == 0x40001u &&
+                        words[2] == 16u && words[3] == 0x16204u
+                  : words[0] == 0u,
+          "guarded atomic used the wrong V# source");
+  }
+#if KYTY_PLATFORM != KYTY_PLATFORM_WINDOWS
+  auto unguarded = shader;
+  unguarded.insert(unguarded.end() - 1, {EncodeMubuf0(0x32), EncodeMubuf1(0, 1, 0)});
+  ExpectFatal([&] { ShaderRecompiler::TranslateProgram(unguarded, options); },
+              "unguarded use shared a conditional buffer binding");
+  auto address_write = shader;
+  address_write.insert(address_write.end() - 1,
+                       {EncodeFlat0(0x1c, 2, 0), EncodeFlat1(0, 0x7d, 3, 0)});
+  ExpectFatal([&] { ShaderRecompiler::TranslateProgram(address_write, options); },
+              "ungated address writes allowed host reads of an optional base");
+  shader.insert(shader.begin() + 11, {EncodeSmem0(0, 10, 0), (125u << 25u) | 0x18u});
+  ExpectFatal([&] { ShaderRecompiler::TranslateProgram(shader, options); },
+              "a second load from the flag address was mistaken for the original SSA value");
+#endif
 }
 
 void TestUniformSelectedDescriptorLoadAddress() {
@@ -13867,6 +14120,23 @@ void TestNewShaderRecompilerSpirvSizeBaselines() {
 int main(int argc, char** argv) {
   using namespace Libs::Graphics;
 
+  for (int i = 1; i < argc; i++) {
+    const std::string arg = argv[i];
+    if (arg.rfind("--pass-bench", 0) == 0) {
+      g_pass_bench.enabled = true;
+      g_pass_bench.repeat = arg.size() > 13 ? static_cast<unsigned>(std::atoi(arg.c_str() + 13)) : 1;
+    } else if (arg == "--pass-continue") {
+      g_continue_on_failure = true;
+    } else if (arg.rfind("--pass-baseline=", 0) == 0) {
+      g_pass_bench.baseline = arg.substr(16);
+    } else if (arg.rfind("--pass-dump=", 0) == 0) {
+      g_pass_bench.dump_dir = arg.substr(12);
+    }
+  }
+  if (g_pass_bench.enabled) {
+    ShaderRecompiler::SetPassTimingHook(PassBenchHook);
+  }
+
   EnsureConfigInitialized();
   if (argc == 2 && std::strcmp(argv[1], "--bda-miss-only") == 0) {
     TestGetBdaPointerMissTelemetryShape();
@@ -14045,12 +14315,13 @@ int main(int argc, char** argv) {
   TestRenderTargetReverseExportMapping();
   TestBlendMappingClassification();
   TestLogicalAlphaBlendExport();
-  TestNewShaderRecompilerEarlyZDisabledWhenPixelKillEnabled();
+  TestNewShaderRecompilerPixelDepthOrder();
   TestTypedDescriptorRealWideMoveTranslation();
   TestComputeImageFill();
   TestPatternFill();
   TestGpuProducedWritableDescriptor();
   TestUniformSelectedWritableDescriptor();
+  TestGuardedScalarDescriptor();
   TestUniformSelectedDescriptorLoadAddress();
   TestBoundedScalarMaterialImageKeys();
   TestImmutableDescriptorPredicate();
@@ -14092,5 +14363,5 @@ int main(int argc, char** argv) {
 
   TestNewShaderRecompilerVop3LaneReadDestinationEncoding();
 
-  return 0;
+  return PassBenchReport();
 }

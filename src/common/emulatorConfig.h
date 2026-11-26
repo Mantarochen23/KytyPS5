@@ -139,6 +139,9 @@ struct ConfigOptions {
 	// --loop-guard: evaluated loop exits per invocation before every loop of a shader is left and
 	// reported. 0 = off.
 	uint32_t                 loop_guard_limit           = 0;
+	// --disable-port: names from common/ports.h whose ported behaviour is turned off.
+	std::vector<std::string> disabled_ports;
+	bool                     shader_key_index_enabled   = false;
 };
 
 void Load(const ConfigOptions& cfg);
@@ -240,6 +243,7 @@ bool     BufferProbeShader(uint64_t hash);
 bool     BufferProbeEnabled();
 const std::vector<uint64_t>& BufferProbeHashes();
 uint32_t LoopGuardLimit();
+bool ShaderKeyIndexEnabled();
 
 } // namespace Config
 

@@ -34,6 +34,7 @@ void RemoveIdentities(Program& program) {
 				if (use.user->Parent() != nullptr && use.user->GetOpcode() == ValueOpcode::Identity) {
 					continue;
 				}
+				IrMutationEpoch()++;
 				Inst::ArgSlot(*use.user, use.operand) = replacement;
 				if (target != nullptr) {
 					target->uses.push_back(use);

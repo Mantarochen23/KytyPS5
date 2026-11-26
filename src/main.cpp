@@ -1,6 +1,7 @@
 #include "common/archive.h"
 #include "common/common.h"
 #include "common/file.h"
+#include "common/ports.h"
 #include "common/stringUtils.h"
 #include "common/threads.h"
 #include "emulator.h"
@@ -136,6 +137,12 @@ static void PrintUsage() {
 	::printf("  --loop-guard <n>                     Debug: after n evaluated loop exits an invocation leaves all\n"
 	         "                                       its loops and the shader hash and loop are logged. 0 = off\n"
 	         "                                       (default). Also reads KYTY_LOOP_GUARD.\n");
+	::printf("  --disable-port <names>               Turn off ported fixes (comma-separated names, or all):\n");
+	for (const auto& port: Config::PORTS) {
+		::printf("                                         %s (%s)\n", port.name, port.source);
+	}
+	::printf("  --shader-key-index                   Persist a shader hash -> ProgramKey index in the\n"
+	         "                                       shader store for next-boot lookup. Default: off.\n");
 }
 
 static bool NextArg(int argc, char* argv[], int& index, std::string& out) {
@@ -268,6 +275,7 @@ static constexpr Flag FLAGS[] = {
     {"--redzone", &ConfigOptions::red_zone_protection_enabled},
 #endif
     {"--bda-table-validate", &ConfigOptions::bda_table_validate_enabled},
+    {"--shader-key-index", &ConfigOptions::shader_key_index_enabled},
 };
 
 static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_help) {
@@ -536,6 +544,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 		} else if (arg == "--loop-guard") {
 			if (!ParseUint32(value, options.config.loop_guard_limit)) {
 				::printf("invalid loop guard limit: %s\n", value.c_str());
+				return false;
+			}
+		} else if (arg == "--disable-port") {
+			if (!Config::ParseDisabledPorts(value, options.config.disabled_ports)) {
+				::printf("unknown port in --disable-port: %s\n", value.c_str());
 				return false;
 			}
 		} else {
