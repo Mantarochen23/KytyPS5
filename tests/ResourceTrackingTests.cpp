@@ -5,6 +5,7 @@
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceTracking.h"
 #include "graphics/shader/recompiler/ir/passes/ShaderInfoCollection.h"
+#include "graphics/host_gpu/renderer/pipeline/shaderStoreCapability.h"
 #include "SrtWalkerTestMemory.h"
 
 #include <array>
@@ -9659,6 +9660,117 @@ void TestMalformedMemoryKindsRejected() {
   }
 }
 
+// A legacy store through a V# read from a constant buffer whose V# comes from the SRT.
+void TestSrtRootedBufferStore() {
+  Fixture f;
+  const auto pointer = f.Address(f.UserData(0), f.UserData(1), 4);
+  const auto srt_read = f.Emit(ValueOpcode::LoadAddressU32,
+      {pointer, Value(0u), Value(0u), Value(true)},
+      f.AddMemory({.kind = ResourceKind::ScalarAddress, .offset = 4u}, 0x100u));
+  const auto table = f.Buffer({srt_read, Value(0u), Value(64u), Value(0u)}, 0x104u);
+  const auto key = f.UserData(4u);
+  std::array<Value, 4> words{};
+  for (uint32_t word = 0; word < 4u; ++word) {
+    words[word] = f.Emit(ValueOpcode::ReadConstBuffer,
+        {table, f.Emit(ValueOpcode::IMul32, {key, Value(16u)})},
+        f.AddMemory({.kind = ResourceKind::ScalarBuffer, .offset = 64u + word * 4u}, 0x180u));
+  }
+  const auto handle = f.Buffer(words, 0x190u);
+  const auto lane = f.Emit(ValueOpcode::LaneId);
+  f.Emit(ValueOpcode::StoreBufferU32,
+      {handle, lane, Value(0u), Value(0u), Value(7u), Value(true)},
+      f.AddMemory({.kind = ResourceKind::Buffer, .idxen = true}, 0x1a0u));
+  f.PlanAndTrack();
+
+  Check(f.program.resource_tracking_complete,
+        "SRT-rooted store descriptor did not finish translation");
+}
+
+// The table V# is fetched from a dynamically indexed SRT slot: the exact reported shape
+// GetBufferResource->ReadConstBuffer->GetBufferResource->ReadConst->GetSrtResource.
+void TestSrtDynamicSlotDescriptor() {
+  Fixture f;
+  const auto srt = f.Emit(ValueOpcode::GetSrtResource);
+  const auto srt_read = f.Emit(ValueOpcode::ReadConst, {srt, f.UserData(5u)});
+  const auto table = f.Buffer({srt_read, Value(0u), Value(64u), Value(0u)}, 0x104u);
+  const auto key = f.UserData(4u);
+  std::array<Value, 4> words{};
+  for (uint32_t word = 0; word < 4u; ++word) {
+    words[word] = f.Emit(ValueOpcode::ReadConstBuffer,
+        {table, f.Emit(ValueOpcode::IMul32, {key, Value(16u)})},
+        f.AddMemory({.kind = ResourceKind::ScalarBuffer, .offset = word * 4u}, 0x180u));
+  }
+  const auto handle = f.Buffer(words, 0x190u);
+  f.Emit(ValueOpcode::StoreBufferU32,
+      {handle, Value(0u), Value(0u), Value(0u), Value(7u), Value(true)},
+      f.AddMemory({.kind = ResourceKind::Buffer, .idxen = true}, 0x1a0u));
+  f.PlanAndTrack();
+  Check(f.program.resource_tracking_complete,
+        "dynamic-SRT-rooted pointer descriptor did not finish translation");
+}
+
+// A control-dependent V# word with no invariant value cannot be decoded by the host; a
+// GPU-selected store through it must stay rejected.
+void TestSrtRootedStoreRejected() {
+  namespace CFG = Libs::Graphics::ShaderRecompiler::CFG;
+  Fixture f;
+  auto *left = f.block;
+  auto *right = f.AddBlock();
+  auto *merge = f.AddBlock();
+  left->AddBranch(merge);
+  right->AddBranch(merge);
+  merge->terminator.kind = CFG::TerminatorKind::Return;
+  auto &phi = merge->AppendNewInst(ValueOpcode::Phi, {}, uint64_t(Type::U32));
+  phi.AddPhiOperand(left, Value(0x100u));
+  phi.AddPhiOperand(right, Value(0x200u));
+  f.block = merge;
+  const auto handle = f.Buffer({Value(&phi), Value(0u), Value(64u), Value(0u)}, 0x190u);
+  f.Emit(ValueOpcode::StoreBufferU32,
+      {handle, Value(0u), Value(0u), Value(0u), Value(7u), Value(true)},
+      f.AddMemory({.kind = ResourceKind::Buffer, .idxen = true}, 0x1a0u));
+  CheckFatal([&] { f.PlanAndTrack(); }, "not a valid runtime value",
+             "control-dependent store V# was accepted without a decoded descriptor");
+}
+
+void TestTranslatorCapabilityVersion() {
+  using Libs::Graphics::FailureCacheApplies;
+  using Libs::Graphics::kTranslatorCapabilityVersion;
+  Check(kTranslatorCapabilityVersion >= 2u,
+        "translator capability version was not bumped with the pointer-descriptor fix");
+  Check(FailureCacheApplies(kTranslatorCapabilityVersion),
+        "a failure recorded by the current translator was discarded");
+  Check(!FailureCacheApplies(kTranslatorCapabilityVersion - 1u),
+        "a stale negative-cache entry would survive a translator fix");
+  Check(!FailureCacheApplies(kTranslatorCapabilityVersion + 1u),
+        "a future translator generation was treated as current");
+}
+
+// The four-dword V# is itself read from a scalar buffer whose own V# comes from the SRT.
+void TestSrtRootedBufferDescriptor() {
+  Fixture f;
+  const auto pointer = f.Address(f.UserData(0), f.UserData(1), 4);
+  const auto srt_read = f.Emit(ValueOpcode::LoadAddressU32,
+      {pointer, Value(0u), Value(0u), Value(true)},
+      f.AddMemory({.kind = ResourceKind::ScalarAddress, .offset = 4u}, 0x100u));
+  const auto table = f.Buffer({srt_read, Value(0u), Value(64u), Value(0u)}, 0x104u);
+  const auto key = f.UserData(4u);
+  std::array<Value, 4> words{};
+  for (uint32_t word = 0; word < 4u; ++word) {
+    words[word] = f.Emit(ValueOpcode::ReadConstBuffer,
+        {table, f.Emit(ValueOpcode::IMul32, {key, Value(16u)})},
+        f.AddMemory({.kind = ResourceKind::ScalarBuffer, .offset = word * 4u}, 0x180u));
+  }
+  const auto handle = f.Buffer(words, 0x190u);
+  const auto lane = f.Emit(ValueOpcode::LaneId);
+  f.Emit(ValueOpcode::StoreBufferU8,
+      {handle, lane, Value(0u), Value(0u), Value(uint8_t{7u}), Value(true)},
+      f.AddMemory({.kind = ResourceKind::Buffer, .data_bits = 8u, .idxen = true}, 0x1a0u));
+  f.PlanAndTrack();
+
+  Check(f.program.resource_tracking_complete,
+        "SRT-rooted pointer descriptor did not finish translation");
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -9752,6 +9864,11 @@ int main(int argc, char **argv) {
     Run("live shader data collection", TestLiveShaderDataCollection);
     Run("resource limit", TestResourceLimitIsTransactional);
     Run("malformed memory kinds", TestMalformedMemoryKindsRejected);
+    Run("srt-descriptor", TestSrtRootedBufferDescriptor);
+    Run("srt-store", TestSrtRootedBufferStore);
+    Run("srt-dynamic", TestSrtDynamicSlotDescriptor);
+    Run("srt-reject", TestSrtRootedStoreRejected);
+    Run("translator capability version", TestTranslatorCapabilityVersion);
   } catch (const std::exception &exception) {
     std::cerr << "resource tracking test failed: " << exception.what() << '\n';
     return 1;

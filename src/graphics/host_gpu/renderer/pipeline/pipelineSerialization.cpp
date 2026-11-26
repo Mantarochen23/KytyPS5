@@ -1,4 +1,5 @@
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
+#include "graphics/host_gpu/renderer/pipeline/shaderStoreCapability.h"
 
 #include "common/emulatorConfig.h"
 #include "common/logging/log.h"
@@ -321,13 +322,16 @@ PipelineCache::LoadRecordStatus PipelineCache::LoadRecord(std::span<const uint8_
 		}
 		case Record::FailedProgram: {
 			ProgramKey  key;
+			uint64_t    capability_version = 0;
 			std::string reason;
 			IoKey(reader, key);
-			IoAll(reader, reason);
+			IoAll(reader, capability_version, reason);
 			if (!complete()) {
 				return LoadRecordStatus::Failed;
 			}
-			if (!Config::ShaderCacheRetryFailed()) {
+			// A translator fix starts a new capability generation: a failure recorded by an
+			// older translator is not evidence this one cannot translate the program.
+			if (FailureCacheApplies(capability_version) && !Config::ShaderCacheRetryFailed()) {
 				auto& program          = m_program_cache.try_emplace(std::move(key)).first->second;
 				program.skip_dispatch  = true;
 				program.failure_reason = std::move(reason);
@@ -365,7 +369,7 @@ void PipelineCache::StoreFailedProgram(const ProgramKey& key, std::string_view r
 	std::string text(reason);
 	IoAll(record, Record::FailedProgram);
 	IoKey(record, key);
-	IoAll(record, text);
+	IoAll(record, kTranslatorCapabilityVersion, text);
 	m_store.Append(std::move(record.bytes));
 }
 

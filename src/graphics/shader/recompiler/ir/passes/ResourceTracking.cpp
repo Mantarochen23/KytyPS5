@@ -1175,7 +1175,10 @@ private:
 			if (descriptor.dwords[i].Resolve().GetType() != Type::U32) {
 				return false;
 			}
-			if (!ValidateRuntimeValue(m_program, descriptor.dwords[i])) {
+			// Descriptor words are decoded on the GPU: a dynamically selected SRT slot is
+			// emitted as an access chain into the flattened SRT and needs no host slot.
+			if (!ValidateRuntimeValue(m_program, descriptor.dwords[i], RuntimeValueType::Any,
+			                          true)) {
 				return false;
 			}
 		}
