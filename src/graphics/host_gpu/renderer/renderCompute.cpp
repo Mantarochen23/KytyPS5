@@ -289,7 +289,7 @@ static void CaptureComputeBufferBreadcrumbs(RenderContext&               context
 	const size_t user_count = std::min<size_t>(
 	    std::max<size_t>(cs_regs.cs_regs.user_sgpr, 16u), op.user_data_dwords.size());
 	op.user_data_count = static_cast<uint8_t>(user_count);
-	std::copy_n(cs_regs.cs_user_sgpr.data.data(), user_count, op.user_data_dwords.data());
+	std::copy_n(cs_regs.cs_user_sgpr.value, user_count, op.user_data_dwords.data());
 
 	const auto push_buf = [&](uint16_t binding, uint16_t array_element, uint64_t guest_va,
 	                          uint64_t gpu_va, const vk::DescriptorBufferInfo& info,
