@@ -136,6 +136,8 @@ if driver_hang or dumps:
         for n in ('vm_fault.log', 'dmesg.log'):
             p = os.path.join(d, n)
             if os.path.isfile(p):
+                if n == 'vm_fault.log' and os.path.getsize(p) == 0:
+                    fault.append("vm_fault.log: empty (no per-process GPUVM fault; kernel devcoredump fault may be stale)")
                 for l in open(p, errors='replace'):
                     if re.search(r'fault|address', l, re.I) and l.strip(): fault.append(f"{n}: {l.strip()[:200]}")
         out['driver_dumps'].append(dict(path=d, files=names, pipeline_log_bytes=os.path.getsize(pl) if os.path.isfile(pl) else None, fault_lines=fault[:6]))

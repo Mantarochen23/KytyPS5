@@ -256,6 +256,9 @@ void QueryDeviceFaultExt(VkDevice device, bool enabled, PFN_vkGetDeviceFaultInfo
 	           desc, counts.addressInfoCount, counts.vendorInfoCount, vendor_binary_bytes);
 
 	const uint32_t reported_addresses = std::min(counts.addressInfoCount, address_count);
+	if (counts.addressInfoCount == 0) {
+		out.Append("  fault_addr: none (no per-process GPUVM fault reported by driver)\n");
+	}
 	for (uint32_t i = 0; i < reported_addresses; ++i) {
 		const auto& addr = addresses[i];
 		out.Printf("  fault_addr[{}]: type={} ({}) gpu_va=0x{:016x} precision=0x{:x}\n", i,
