@@ -442,6 +442,19 @@ TEST(Config, ParseShaderHashListAndSkipLookup) {
 	Config::Shutdown();
 }
 
+TEST(Config, ShaderCacheRetryFailedDefaultsOffAndTracksLoadedOption) {
+	Config::Initialize();
+	Config::ConfigOptions options;
+	EXPECT_FALSE(options.shader_cache_retry_failed);
+	Config::Load(options);
+	EXPECT_FALSE(Config::ShaderCacheRetryFailed());
+
+	options.shader_cache_retry_failed = true;
+	Config::Load(options);
+	EXPECT_TRUE(Config::ShaderCacheRetryFailed());
+	Config::Shutdown();
+}
+
 TEST(Config, ShaderCacheKeepDefaultsOffAndTracksLoadedOption) {
 	Config::Initialize();
 	Config::ConfigOptions options;

@@ -217,7 +217,9 @@ private:
 		ShaderRecompiler::IR::ResourceSnapshot       resources;
 		ShaderRecompiler::IR::ResourceSpecialization specialization;
 		std::vector<ShaderModule>                    modules;
-		bool                                         skip_dispatch = false;
+		bool                                         skip_dispatch   = false;
+		bool                                         logged_neg_hit  = false;
+		std::string                                  failure_reason;
 
 		[[nodiscard]] std::span<const uint32_t> FunctionCode() const;
 		bool RefreshCallSource(const ShaderRecompiler::IR::SrtRuntime& runtime);
@@ -290,6 +292,7 @@ private:
 	LoadRecordStatus LoadRecord(std::span<const uint8_t>& records, bool keep_on_error);
 	void StoreModule(const ProgramKey& key, const Program& program, const ShaderModule& module,
 	                 const std::vector<uint32_t>& spirv);
+	void StoreFailedProgram(const ProgramKey& key, std::string_view reason);
 	void StorePipeline(const GraphicsPipelineKey& key);
 	void StoreLayout(uint64_t key, const ShaderTessellationInputInfo& layout);
 	// Every module by id, with id 0 naming an absent stage.

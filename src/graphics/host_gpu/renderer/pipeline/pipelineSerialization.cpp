@@ -28,7 +28,7 @@ using ShaderRecompiler::IR::IoAll;
 using ShaderRecompiler::IR::Reader;
 using ShaderRecompiler::IR::Writer;
 
-enum class Record : uint8_t { Module, GraphicsPipeline, TessellationLayout };
+enum class Record : uint8_t { Module, GraphicsPipeline, TessellationLayout, FailedProgram };
 
 // Precedes each record's zstd frame.
 struct Frame {
@@ -39,7 +39,7 @@ struct Frame {
 
 // Explicit store format version. Bump manually only when recompiler output, SPIR-V profile, or
 // store record layout changes so rebuilds across branches keep reusing compatible warm stores.
-constexpr uint64_t kShaderStoreFormatVersion = 1;
+constexpr uint64_t kShaderStoreFormatVersion = 2;
 
 // What every record depends on besides its own fields.
 std::vector<uint8_t> StoreHeader(const GraphicContext& graphics) {
@@ -319,6 +319,21 @@ PipelineCache::LoadRecordStatus PipelineCache::LoadRecord(std::span<const uint8_
 			m_tess_layouts.try_emplace(key, layout);
 			break;
 		}
+		case Record::FailedProgram: {
+			ProgramKey  key;
+			std::string reason;
+			IoKey(reader, key);
+			IoAll(reader, reason);
+			if (!complete()) {
+				return LoadRecordStatus::Failed;
+			}
+			if (!Config::ShaderCacheRetryFailed()) {
+				auto& program          = m_program_cache.try_emplace(std::move(key)).first->second;
+				program.skip_dispatch  = true;
+				program.failure_reason = std::move(reason);
+			}
+			break;
+		}
 		default: return LoadRecordStatus::Failed;
 	}
 	if (!keep_on_error) {
@@ -342,7 +357,17 @@ void PipelineCache::StoreModule(const ProgramKey& key, const Program& program,
 	m_store.Append(std::move(record.bytes));
 }
 
-void PipelineCache::StorePipeline(const GraphicsPipelineKey& key) {
+void PipelineCache::StoreFailedProgram(const ProgramKey& key, std::string_view reason) {
+	if (!m_store) {
+		return;
+	}
+	Writer      record;
+	std::string text(reason);
+	IoAll(record, Record::FailedProgram);
+	IoKey(record, key);
+	IoAll(record, text);
+	m_store.Append(std::move(record.bytes));
+}
 	if (!m_store) {
 		return;
 	}

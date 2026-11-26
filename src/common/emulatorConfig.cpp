@@ -304,6 +304,10 @@ bool ShaderCacheKeepEnabled() {
 	return g_config->shader_cache_keep_enabled;
 }
 
+bool ShaderCacheRetryFailed() {
+	return g_config->shader_cache_retry_failed;
+}
+
 LogDirection GetShaderLogDirection() {
 	return g_config->shader_log_direction;
 }

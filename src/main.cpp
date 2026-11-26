@@ -86,6 +86,8 @@ static void PrintUsage() {
 	::printf("  --shader-cache                       Keep compiled shaders and pipelines between boots.\n");
 	::printf("  --shader-cache-keep                  Keep usable records from a mismatched shader cache,\n"
 	         "                                       dropping only records that fail to load.\n");
+	::printf("  --shader-cache-retry-failed          Ignore negative-cache entries in the shader store,\n"
+	         "                                       forcing failed shaders to retranslate.\n");
 	::printf("  --tessellation                      Draw tessellation patches; skipped by default.\n");
 	::printf("  --occlusion-queries                  Count occlusion query samples on the GPU.\n");
 	::printf("  --relaxed-shader-float               Native GPU float ops in shaders; faster, can be inaccurate.\n");
@@ -225,6 +227,7 @@ static constexpr Flag FLAGS[] = {
     {"--keep-going", &ConfigOptions::keep_going_enabled},
     {"--shader-cache", &ConfigOptions::shader_cache_enabled},
     {"--shader-cache-keep", &ConfigOptions::shader_cache_keep_enabled},
+    {"--shader-cache-retry-failed", &ConfigOptions::shader_cache_retry_failed},
     {"--tessellation", &ConfigOptions::tessellation_enabled},
     {"--occlusion-queries", &ConfigOptions::occlusion_queries_enabled},
     {"--relaxed-shader-float", &ConfigOptions::relaxed_shader_float},

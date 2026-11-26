@@ -354,15 +354,21 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 	}
 	m_lookup_key_ready = false;
 	Common::RecoverableScope scope;
+	std::string              failure_reason;
 	try {
 		return GetProgramImpl(params, input_info, push_data);
 	} catch (const Common::RecoverableFailure& e) {
-		RecordShaderFailure(params, e.what(), e.file, e.line);
+		failure_reason = e.what();
+		RecordShaderFailure(params, failure_reason, e.file, e.line);
 	} catch (const std::exception& e) {
-		RecordShaderFailure(params, e.what(), "", 0);
+		failure_reason = e.what();
+		RecordShaderFailure(params, failure_reason, "", 0);
 	}
 	if (m_lookup_key_ready) {
-		m_program_cache.try_emplace(m_lookup_key).first->second.skip_dispatch = true;
+		auto& prog          = m_program_cache.try_emplace(m_lookup_key).first->second;
+		prog.skip_dispatch  = true;
+		prog.failure_reason = std::move(failure_reason);
+		StoreFailedProgram(m_lookup_key, prog.failure_reason);
 	}
 	return nullptr;
 }
@@ -441,13 +447,17 @@ const ShaderModule* PipelineCache::GetProgramImpl(const ShaderParams& params, In
 			PipelineCacheLog("!!! TEMPORARY COMPUTE DISPATCH SKIP !!! shader=0x{:016x} pc=0x{:08x} "
 			                 "reason=unsupported GPU-selected callable target; rendering is incomplete",
 			                 params.hash, source.unsupported_call_pc);
-			m_program_cache.emplace(m_lookup_key, Program {.skip_dispatch = true});
+			auto& prog =
+			    m_program_cache.emplace(m_lookup_key, Program {.skip_dispatch = true}).first->second;
+			prog.failure_reason = "unsupported GPU-selected callable target";
+			StoreFailedProgram(m_lookup_key, prog.failure_reason);
 			return nullptr;
 		}
 	}
 	auto* current = entry == m_program_cache.end() ? &source : entry->second.call_source.get();
 	ShaderRecompiler::TranslateResult translated;
-	bool tracking_failed = false;
+	bool        tracking_failed = false;
+	std::string tracking_error;
 	try {
 	if (current != nullptr) {
 		if (!current->calls.empty()) {
@@ -464,14 +474,17 @@ const ShaderModule* PipelineCache::GetProgramImpl(const ShaderParams& params, In
 		if (Config::KeepGoingEnabled()) throw; // GetProgram records it in the failure ledger.
 		PipelineCacheLog("!!! SHADER DISPATCH SKIP (resource tracking failed) shader=0x{:016x}: {}",
 		                 params.hash, e.what());
+		tracking_error  = e.what();
 		tracking_failed = true;
 	}
 	if (tracking_failed) {
-		if (entry == m_program_cache.end()) {
-			m_program_cache.emplace(m_lookup_key, Program {.skip_dispatch = true});
-		} else {
-			entry->second.skip_dispatch = true;
-		}
+		auto& prog = (entry == m_program_cache.end())
+		                 ? m_program_cache.emplace(m_lookup_key, Program {.skip_dispatch = true})
+		                       .first->second
+		                 : entry->second;
+		prog.skip_dispatch  = true;
+		prog.failure_reason = std::move(tracking_error);
+		StoreFailedProgram(m_lookup_key, prog.failure_reason);
 		return nullptr;
 	}
 	if (entry == m_program_cache.end()) {
@@ -488,7 +501,9 @@ const ShaderModule* PipelineCache::GetProgramImpl(const ShaderParams& params, In
 			PipelineCacheLog("!!! SHADER DISPATCH SKIP (resource materialization failed) "
 			                 "shader=0x{:016x}; rendering is incomplete",
 			                 params.hash);
-			program.skip_dispatch = true;
+			program.skip_dispatch  = true;
+			program.failure_reason = "resource materialization failed";
+			StoreFailedProgram(m_lookup_key, program.failure_reason);
 			return nullptr;
 		}
 	} else if (source_changed) {
