@@ -27,7 +27,7 @@ FaultManager::FaultManager(GraphicContext& graphics, CommandScheduler& scheduler
                            BufferCache& buffer_cache)
     : m_graphics(graphics), m_scheduler(scheduler), m_buffer_cache(buffer_cache),
       m_fault_buffer(graphics, scheduler, MemoryUsage::DeviceLocal, 0, AllFlags,
-                     BufferCache::CACHING_NUMPAGES / 8),
+                     BufferCache::FAULT_BUFFER_SIZE),
       m_download_buffer(graphics, scheduler, MemoryUsage::Download, 0, AllFlags,
                         MaxPendingFaults * PageFaultAreaSize) {
 	SetVulkanObjectNameF(m_graphics.device, m_fault_buffer.Handle(), "Fault Buffer");
@@ -89,7 +89,7 @@ void FaultManager::ProcessFaultBuffer() {
 	post_barrier.dstStageMask  = vk::PipelineStageFlagBits2::eAllCommands;
 
 	const vk::DescriptorBufferInfo infos[] {
-	    {m_fault_buffer.Handle(), 0, m_fault_buffer.Size()},
+	    {m_fault_buffer.Handle(), 0, BufferCache::FAULT_BITMAP_SIZE},
 	    {m_download_buffer.Handle(), offset, PageFaultAreaSize},
 	};
 	std::array<vk::WriteDescriptorSet, 2> writes {};

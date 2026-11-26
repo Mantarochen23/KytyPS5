@@ -34,6 +34,20 @@ public:
 	static constexpr uint64_t CACHING_NUMPAGES  = (LOWER_ADDRESS_SIZE + LibKernel::Memory::kExtendedMemorySize) >> CACHING_PAGEBITS;
 	static constexpr uint64_t BDA_PAGETABLE_SIZE =
 	    CACHING_NUMPAGES * sizeof(vk::DeviceAddress);
+	static constexpr uint64_t FAULT_BITMAP_SIZE = CACHING_NUMPAGES / 8;
+	static constexpr uint32_t FAULT_BITMAP_DWORDS =
+	    static_cast<uint32_t>(FAULT_BITMAP_SIZE / sizeof(uint32_t));
+	// Reserved tail of the fault buffer: [counter, reserved, slot0_lo, slot0_hi, ...].
+	static constexpr uint32_t BDA_MISS_SLOT_COUNT    = 64;
+	static constexpr uint32_t BDA_MISS_COUNTER_DWORD = FAULT_BITMAP_DWORDS;
+	static constexpr uint32_t BDA_MISS_SLOTS_DWORD   = BDA_MISS_COUNTER_DWORD + 2;
+	static constexpr uint32_t BDA_MISS_AREA_DWORDS   = 2 + BDA_MISS_SLOT_COUNT * 2;
+	static constexpr uint64_t BDA_MISS_AREA_SIZE =
+	    uint64_t {BDA_MISS_AREA_DWORDS} * sizeof(uint32_t);
+	static constexpr uint64_t FAULT_BUFFER_SIZE = FAULT_BITMAP_SIZE + BDA_MISS_AREA_SIZE;
+	static_assert(CACHING_NUMPAGES % 128 == 0);
+	static_assert(FAULT_BITMAP_SIZE % sizeof(uint64_t) == 0);
+	static_assert((BDA_MISS_SLOTS_DWORD & 1u) == 0u);
 
 	static constexpr uint64_t PageIndex(uint64_t address) {
 		return (address < LOWER_ADDRESS_SIZE

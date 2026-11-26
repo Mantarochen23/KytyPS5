@@ -25538,7 +25538,7 @@ private:
     m_bda_pagetable_buffer =
         CreateDeviceBuffer(shader_name, BufferCache::BDA_PAGETABLE_SIZE, usage);
     m_fault_buffer = CreateDeviceBuffer(
-        shader_name, BufferCache::CACHING_NUMPAGES / 8, usage | vk::BufferUsageFlagBits::eTransferSrc);
+        shader_name, BufferCache::FAULT_BUFFER_SIZE, usage | vk::BufferUsageFlagBits::eTransferSrc);
   }
 
   Buffer CreateHostBuffer(const char *shader_name, vk::DeviceSize size,

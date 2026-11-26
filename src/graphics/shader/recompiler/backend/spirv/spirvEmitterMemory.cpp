@@ -180,6 +180,31 @@ void RecordBdaFault(EmitterState& state, uint32_t page) {
 	                          ConstantU32(state, spv::MemorySemanticsMaskNone), bit);
 }
 
+void RecordBdaMiss(EmitterState& state, uint32_t address) {
+	const auto index = state.builder.AllocateId();
+	state.builder.AddFunction(
+	    spv::OpAtomicIAdd, TypeU32(state), index,
+	    FaultElementPointer(state, ConstantU32(state, BufferCache::BDA_MISS_COUNTER_DWORD)),
+	    ConstantU32(state, spv::ScopeDevice),
+	    ConstantU32(state, spv::MemorySemanticsMaskNone), ConstantU32(state, 1));
+	const auto in_slots = Binary(state, spv::OpULessThan, TypeBool(state), index,
+	                             ConstantU32(state, BufferCache::BDA_MISS_SLOT_COUNT));
+	EmitIfCondition(state, in_slots, [&]() {
+		const auto slot_base = Binary(
+		    state, spv::OpIAdd, TypeU32(state),
+		    ConstantU32(state, BufferCache::BDA_MISS_SLOTS_DWORD),
+		    Binary(state, spv::OpShiftLeftLogical, TypeU32(state), index, ConstantU32(state, 1)));
+		const auto lo = EmitCompositeExtractU64(state, address, IR::Value(0u));
+		const auto hi = EmitCompositeExtractU64(state, address, IR::Value(1u));
+		state.builder.AddFunction(spv::OpStore, FaultElementPointer(state, slot_base), lo);
+		state.builder.AddFunction(
+		    spv::OpStore,
+		    FaultElementPointer(state, Binary(state, spv::OpIAdd, TypeU32(state), slot_base,
+		                                      ConstantU32(state, 1))),
+		    hi);
+	});
+}
+
 uint32_t LoadBdaDword(ValueEmitContext& ctx, uint32_t address, bool coherent = false) {
 	auto&      state   = ctx.state;
 	const auto bda     = GetBdaPointer(state, address);
@@ -1388,6 +1413,7 @@ void DefineGetBdaPointer(EmitterState& state) {
 	state.builder.AddFunction(spv::OpSelectionMerge, mapped_label, spv::SelectionControlMaskNone);
 	state.builder.AddFunction(spv::OpBranchConditional, mapped, mapped_label, unmapped_label);
 	EmitLabel(state, unmapped_label);
+	RecordBdaMiss(state, address);
 	state.builder.AddFunction(spv::OpReturnValue, ConstantU64(state, 0));
 	EmitLabel(state, mapped_label);
 	const auto page          = Unary(state, spv::OpUConvert, TypeU32(state), page64);
