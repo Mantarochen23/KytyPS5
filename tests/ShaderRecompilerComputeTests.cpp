@@ -94,6 +94,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <initializer_list>
 #include <limits>
 #include <map>
@@ -1172,10 +1173,71 @@ std::string Hex(u32 value) {
   return buffer;
 }
 
+struct TestCaseFailure {
+  std::string name;
+  std::string stage;
+  std::string message;
+};
+
+bool g_catch_test_failures = false;
+
+enum class CaseStatus { Pass, Fail, Skip };
+
+struct CaseResult {
+  std::string name;
+  CaseStatus status = CaseStatus::Pass;
+  std::string detail;
+};
+
+struct TestSuiteSummary {
+  std::vector<CaseResult> results;
+  u32 passed = 0;
+  u32 failed = 0;
+  u32 skipped = 0;
+
+  void RecordPass(std::string name) {
+    ++passed;
+    results.push_back({std::move(name), CaseStatus::Pass, {}});
+  }
+  void RecordFail(std::string name, std::string detail) {
+    ++failed;
+    results.push_back({std::move(name), CaseStatus::Fail, std::move(detail)});
+  }
+  void RecordSkip(std::string name, std::string detail) {
+    ++skipped;
+    results.push_back({std::move(name), CaseStatus::Skip, std::move(detail)});
+  }
+};
+
+template <typename Function>
+void RunSuiteStep(TestSuiteSummary &summary, const char *name, Function &&fn) {
+  const bool prev = g_catch_test_failures;
+  g_catch_test_failures = true;
+  try {
+    fn();
+    summary.RecordPass(name);
+  } catch (const TestCaseFailure &failure) {
+    std::string detail = failure.stage + ": " + failure.message;
+    if (!failure.name.empty() && failure.name != name) {
+      detail = failure.name + " @ " + detail;
+    }
+    summary.RecordFail(name, std::move(detail));
+  } catch (const std::exception &ex) {
+    std::fprintf(stderr, "ShaderRecompilerComputeTests: %s threw exception: %s\n",
+                 name, ex.what());
+    summary.RecordFail(name, std::string("exception: ") + ex.what());
+  }
+  g_catch_test_failures = prev;
+}
+
 [[noreturn]] void Fail(const char *shader_name, const char *stage,
                        const std::string &message) {
   std::fprintf(stderr, "ShaderRecompilerComputeTests: %s failed at %s: %s\n",
                shader_name, stage, message.c_str());
+  if (g_catch_test_failures) {
+    throw TestCaseFailure{shader_name != nullptr ? shader_name : "",
+                          stage != nullptr ? stage : "", message};
+  }
   std::abort();
 }
 
@@ -1475,6 +1537,7 @@ void ExpectFatal(const char *name, Function function) {
   Require(name, "fatal subprocess", pid >= 0,
           "fork failed while starting fatal shader test");
   if (pid == 0) {
+    g_catch_test_failures = false;
     function();
     ::_exit(0);
   }
@@ -59406,189 +59469,246 @@ int main(int argc, char **argv) {
     std::fprintf(stderr, "unknown test selector: %s\n", argv[1]);
     return 2;
   }
+  TestSuiteSummary summary;
   VulkanHarness vulkan;
   // Keep compute and host checks running when rasterization features are missing.
   const bool rasterization = vulkan.RasterizationSupported();
   bool skipped_device_checks = false;
-  CheckRenderTargetFormatContract();
-  CheckSampledColorViews();
-  CheckImageTransitionState(vulkan.RuntimeRenderer());
-  CheckSampledDepthResource();
-  CheckDepthTextureEncoding();
-  vulkan.CheckSamplerBorderColors();
-  vulkan.CheckSamplerFilterMode();
+  RunSuiteStep(summary, "RenderTargetFormatContract", [&] { CheckRenderTargetFormatContract(); });
+  RunSuiteStep(summary, "SampledColorViews", [&] { CheckSampledColorViews(); });
+  RunSuiteStep(summary, "ImageTransitionState", [&] { CheckImageTransitionState(vulkan.RuntimeRenderer()); });
+  RunSuiteStep(summary, "SampledDepthResource", [&] { CheckSampledDepthResource(); });
+  RunSuiteStep(summary, "DepthTextureEncoding", [&] { CheckDepthTextureEncoding(); });
+  RunSuiteStep(summary, "SamplerBorderColors", [&] { vulkan.CheckSamplerBorderColors(); });
+  RunSuiteStep(summary, "SamplerFilterMode", [&] { vulkan.CheckSamplerFilterMode(); });
   if (rasterization) {
-    vulkan.CheckComparisonDepthTexture();
-    vulkan.CheckOneDimensionalDepthAlias();
-    vulkan.CheckRasterization(true);
+    RunSuiteStep(summary, "ComparisonDepthTexture", [&] { vulkan.CheckComparisonDepthTexture(); });
+    RunSuiteStep(summary, "OneDimensionalDepthAlias", [&] { vulkan.CheckOneDimensionalDepthAlias(); });
+    RunSuiteStep(summary, "RasterizationPresent", [&] { vulkan.CheckRasterization(true); });
   } else {
     skipped_device_checks = true;
+    summary.RecordSkip("ComparisonDepthTexture", "production rasterization features unavailable");
+    summary.RecordSkip("OneDimensionalDepthAlias", "production rasterization features unavailable");
+    summary.RecordSkip("RasterizationPresent", "production rasterization features unavailable");
   }
-  CheckBasicStorageTextureDescriptor();
-  CheckStorageTextureLinearUploadLayout();
-  CheckStorageTextureDepthTileUploadLayout();
-  CheckStandard64RenderTargetTileRoundTrip();
-  CheckStorageTextureVolumeUploadLayout();
-  CheckStorageTextureVolumeMipRegions();
-  CheckStorageTextureGpuOwnedRebindState();
-  CheckNativeMsaaState();
-  CheckPs5DepthRegisterDecoding();
-  CheckDepthAttachmentWrites();
-  CheckDepthFeedbackAspects();
-  CheckDynamicRenderingState();
-  CheckDepthTargetFootprints();
+  RunSuiteStep(summary, "BasicStorageTextureDescriptor", [&] { CheckBasicStorageTextureDescriptor(); });
+  RunSuiteStep(summary, "StorageTextureLinearUploadLayout", [&] { CheckStorageTextureLinearUploadLayout(); });
+  RunSuiteStep(summary, "StorageTextureDepthTileUploadLayout", [&] { CheckStorageTextureDepthTileUploadLayout(); });
+  RunSuiteStep(summary, "Standard64RenderTargetTileRoundTrip", [&] { CheckStandard64RenderTargetTileRoundTrip(); });
+  RunSuiteStep(summary, "StorageTextureVolumeUploadLayout", [&] { CheckStorageTextureVolumeUploadLayout(); });
+  RunSuiteStep(summary, "StorageTextureVolumeMipRegions", [&] { CheckStorageTextureVolumeMipRegions(); });
+  RunSuiteStep(summary, "StorageTextureGpuOwnedRebindState", [&] { CheckStorageTextureGpuOwnedRebindState(); });
+  RunSuiteStep(summary, "NativeMsaaState", [&] { CheckNativeMsaaState(); });
+  RunSuiteStep(summary, "Ps5DepthRegisterDecoding", [&] { CheckPs5DepthRegisterDecoding(); });
+  RunSuiteStep(summary, "DepthAttachmentWrites", [&] { CheckDepthAttachmentWrites(); });
+  RunSuiteStep(summary, "DepthFeedbackAspects", [&] { CheckDepthFeedbackAspects(); });
+  RunSuiteStep(summary, "DynamicRenderingState", [&] { CheckDynamicRenderingState(); });
+  RunSuiteStep(summary, "DepthTargetFootprints", [&] { CheckDepthTargetFootprints(); });
 #else
   if (argc != 1) {
     std::fprintf(stderr, "unknown test selector: %s\n", argv[1]);
     return 2;
   }
-  CheckShaderRecompilerFatalContracts();
-  CheckDepthFeedbackAspects();
+  TestSuiteSummary summary;
+  RunSuiteStep(summary, "ShaderRecompilerFatalContracts", [&] { CheckShaderRecompilerFatalContracts(); });
+  RunSuiteStep(summary, "DepthFeedbackAspects", [&] { CheckDepthFeedbackAspects(); });
   VulkanHarness vulkan;
   const bool rasterization = vulkan.RasterizationSupported();
   bool skipped_device_checks = false;
 #endif
-  CheckImageSamplerSpecialization();
-  CheckStorageTextureDescriptors();
-  CheckResourcePlanHandoff();
-  CheckNativeImageDescriptorTypes();
-  CheckClipControlDepthClipState();
-  CheckReferenceClockScale();
-  CheckErrorDialogLifecycle();
-  CheckSigninDialogLifecycle();
-  CheckVulkan13FeatureRequirements();
-  CheckPm4AcquireMemPackets(vulkan.RuntimeRenderer());
-  CheckPm4ResetQueue(vulkan.RuntimeRenderer());
-  CheckPm4SyntheticOcclusionCounterDump(vulkan.RuntimeRenderer());
-  CheckPm4Predication(vulkan.RuntimeRenderer());
-  CheckPm4StencilInfoValueLane(vulkan.RuntimeRenderer());
-  CheckPm4NativeTargetGeometryRegisters(vulkan.RuntimeRenderer());
-  CheckPm4IndirectShaderRegisters(vulkan.RuntimeRenderer());
-  CheckPm4IndirectUconfigRegisters(vulkan.RuntimeRenderer());
-  CheckPm4DirectShaderRegisterFallback(vulkan.RuntimeRenderer());
-  CheckPm4GuardBandRegisterRanges(vulkan.RuntimeRenderer());
-  CheckPm4BlendColorRegisterRanges(vulkan.RuntimeRenderer());
-  CheckPm4PolygonOffsetRegisters(vulkan.RuntimeRenderer());
-  CheckPm4DepthControlHighBits(vulkan.RuntimeRenderer());
-  CheckPm4DepthRenderOverride(vulkan.RuntimeRenderer());
-  CheckShaderFusion();
-  CheckAgcSystemTable(vulkan.RuntimeRenderer());
-  CheckPm4WaitPackets(vulkan.RuntimeRenderer());
-  CheckPm4DrawIndirectMultiPacket(vulkan.RuntimeRenderer());
-  CheckPm4ContextStateOperations(vulkan.RuntimeRenderer());
-  CheckPm4IndirectControlFlow(vulkan.RuntimeRenderer());
-  CheckPm4WaitResume(vulkan.RuntimeRenderer());
-  CheckPm4LodStats(vulkan.RuntimeRenderer());
-  CheckPm4LodStatsBoundTextures(vulkan, false);
-  CheckPm4LodStatsBoundTextures(vulkan, true);
-  CheckPm4MemSemaphore(vulkan.RuntimeRenderer());
-  CheckPm4WriteDataGds(vulkan);
-  CheckPm4DmaDataAddress(vulkan.RuntimeRenderer());
-  CheckPm4RewindResume(vulkan.RuntimeRenderer());
-  CheckEmbeddedFetchVertexOffset();
-  CheckEmbeddedFetchLaneSpill();
-  CheckTessellationPrograms();
-  CheckPixelParameterAliases();
-  CheckPixelFrontFaceModes();
-  CheckRectListShaders();
-  CheckSigned16ImageStore(vulkan);
-  CheckBoundedFormattedBufferCopy(vulkan);
-  CheckIndirectBufferStore(vulkan);
-  CheckBoundedRecordBufferAccess(vulkan);
-  CheckGpuSelectedRecordBufferAccess(vulkan);
-  CheckGuardedWaterfallBufferRecords(vulkan);
-  CheckGpuSelectedFormattedRecordStore(vulkan);
-  CheckFiniteBufferSelection(vulkan);
-  CheckStorageBufferBindingOver2GiB(vulkan);
-  CheckRuntimeBufferRecords(vulkan);
-  CheckSharedIndirectBufferLoads(vulkan);
-  CheckComputeThreadDimensions(vulkan);
-  CheckCountedRowImageSelector(vulkan);
-  CheckPointerImageTable(vulkan);
-  CheckWorkgroupDividedImageTable(vulkan);
-  CheckWaterfallFloorImageTable(vulkan);
-  CheckMixedDimensionImageTable(vulkan);
-  CheckClampedSiblingImageTable(vulkan);
-  CheckLaneCountedImageTable(vulkan);
-  CheckGuardedSelectorImageTable(vulkan);
-  CheckInclusiveGuardImageTable(vulkan);
-  CheckNestedPointerImageTable(vulkan);
-  CheckGuardedRecordImageTable(vulkan);
-  CheckIndirectImageKeySwitch(vulkan);
-  vulkan.CheckResidentImageHeap();
-  CheckDynamicSampleOffsets(vulkan, 32u);
-  CheckDynamicSampleOffsets(vulkan, 64u);
-  CheckFiniteFirstLaneImageChoice(vulkan);
-  CheckFiniteInlineSamplerPhi(vulkan);
-  CheckSamplerCandidateTables(vulkan);
-  CheckWave64WholeWaveResults();
-  CheckPs5GameExampleImageClearRuntimeShape();
-  vulkan.CheckSchedulerTimeline();
-  vulkan.CheckHostImageAllocation();
-  vulkan.CheckVideoOutHdr10ToSdr();
-  vulkan.CheckDescriptorHeapLargeSet();
-  vulkan.CheckGpuMappedRangeLifecycle();
-  vulkan.CheckStreamBufferRing();
-  vulkan.CheckStreamCopyWindow();
-  vulkan.CheckResolveCache();
-  vulkan.CheckGpuTilerCpuParity();
-  vulkan.CheckNativeIndirectDispatch();
-  CheckComputeLdsLimit(vulkan);
-  CheckTessellationWaveSizes(vulkan);
-  CheckStableProgramIds(vulkan);
-  CheckComputeQueueModules(vulkan);
-  CheckGraphicsPushDataModules(vulkan);
-  CheckVertexFormatModules(vulkan);
-  CheckShaderStore(vulkan);
-  vulkan.CheckOrderedDispatch();
-  vulkan.CheckZeroStrideBufferBinding();
-  vulkan.CheckNullStorageBufferDescriptor();
-  vulkan.CheckNullTextureDescriptors();
-  vulkan.CheckBdaPageTableUploads();
-  vulkan.CheckBdaSyncUploads();
-  vulkan.CheckBvhMirror();
-  vulkan.CheckRayQueryTraversal();
-  vulkan.CheckFaultBufferScan();
-  vulkan.CheckFaultRecordsOverflow();
-  vulkan.CheckLargeSparseImageUpload();
-  vulkan.CheckUnifiedTextureCacheFlow();
-  vulkan.CheckUnifiedImageViewCache();
-  vulkan.CheckPackedTextureComponents();
-  vulkan.CheckCubeFaceStorage();
+  RunSuiteStep(summary, "ImageSamplerSpecialization", [&] { CheckImageSamplerSpecialization(); });
+  RunSuiteStep(summary, "StorageTextureDescriptors", [&] { CheckStorageTextureDescriptors(); });
+  RunSuiteStep(summary, "ResourcePlanHandoff", [&] { CheckResourcePlanHandoff(); });
+  RunSuiteStep(summary, "NativeImageDescriptorTypes", [&] { CheckNativeImageDescriptorTypes(); });
+  RunSuiteStep(summary, "ClipControlDepthClipState", [&] { CheckClipControlDepthClipState(); });
+  RunSuiteStep(summary, "ReferenceClockScale", [&] { CheckReferenceClockScale(); });
+  RunSuiteStep(summary, "ErrorDialogLifecycle", [&] { CheckErrorDialogLifecycle(); });
+  RunSuiteStep(summary, "SigninDialogLifecycle", [&] { CheckSigninDialogLifecycle(); });
+  RunSuiteStep(summary, "Vulkan13FeatureRequirements", [&] { CheckVulkan13FeatureRequirements(); });
+  RunSuiteStep(summary, "Pm4AcquireMemPackets", [&] { CheckPm4AcquireMemPackets(vulkan.RuntimeRenderer()); });
+  RunSuiteStep(summary, "Pm4ResetQueue", [&] { CheckPm4ResetQueue(vulkan.RuntimeRenderer()); });
+  RunSuiteStep(summary, "Pm4SyntheticOcclusionCounterDump", [&] { CheckPm4SyntheticOcclusionCounterDump(vulkan.RuntimeRenderer()); });
+  RunSuiteStep(summary, "Pm4Predication", [&] { CheckPm4Predication(vulkan.RuntimeRenderer()); });
+  RunSuiteStep(summary, "Pm4StencilInfoValueLane", [&] { CheckPm4StencilInfoValueLane(vulkan.RuntimeRenderer()); });
+  RunSuiteStep(summary, "Pm4NativeTargetGeometryRegisters", [&] { CheckPm4NativeTargetGeometryRegisters(vulkan.RuntimeRenderer()); });
+  RunSuiteStep(summary, "Pm4IndirectShaderRegisters", [&] { CheckPm4IndirectShaderRegisters(vulkan.RuntimeRenderer()); });
+  RunSuiteStep(summary, "Pm4IndirectUconfigRegisters", [&] { CheckPm4IndirectUconfigRegisters(vulkan.RuntimeRenderer()); });
+  RunSuiteStep(summary, "Pm4DirectShaderRegisterFallback", [&] { CheckPm4DirectShaderRegisterFallback(vulkan.RuntimeRenderer()); });
+  RunSuiteStep(summary, "Pm4GuardBandRegisterRanges", [&] { CheckPm4GuardBandRegisterRanges(vulkan.RuntimeRenderer()); });
+  RunSuiteStep(summary, "Pm4BlendColorRegisterRanges", [&] { CheckPm4BlendColorRegisterRanges(vulkan.RuntimeRenderer()); });
+  RunSuiteStep(summary, "Pm4PolygonOffsetRegisters", [&] { CheckPm4PolygonOffsetRegisters(vulkan.RuntimeRenderer()); });
+  RunSuiteStep(summary, "Pm4DepthControlHighBits", [&] { CheckPm4DepthControlHighBits(vulkan.RuntimeRenderer()); });
+  RunSuiteStep(summary, "Pm4DepthRenderOverride", [&] { CheckPm4DepthRenderOverride(vulkan.RuntimeRenderer()); });
+  RunSuiteStep(summary, "ShaderFusion", [&] { CheckShaderFusion(); });
+  RunSuiteStep(summary, "AgcSystemTable", [&] { CheckAgcSystemTable(vulkan.RuntimeRenderer()); });
+  RunSuiteStep(summary, "Pm4WaitPackets", [&] { CheckPm4WaitPackets(vulkan.RuntimeRenderer()); });
+  RunSuiteStep(summary, "Pm4DrawIndirectMultiPacket", [&] { CheckPm4DrawIndirectMultiPacket(vulkan.RuntimeRenderer()); });
+  RunSuiteStep(summary, "Pm4ContextStateOperations", [&] { CheckPm4ContextStateOperations(vulkan.RuntimeRenderer()); });
+  RunSuiteStep(summary, "Pm4IndirectControlFlow", [&] { CheckPm4IndirectControlFlow(vulkan.RuntimeRenderer()); });
+  RunSuiteStep(summary, "Pm4WaitResume", [&] { CheckPm4WaitResume(vulkan.RuntimeRenderer()); });
+  RunSuiteStep(summary, "Pm4LodStats", [&] { CheckPm4LodStats(vulkan.RuntimeRenderer()); });
+  RunSuiteStep(summary, "Pm4LodStatsBoundTextures", [&] { CheckPm4LodStatsBoundTextures(vulkan, false); });
+  RunSuiteStep(summary, "Pm4LodStatsBoundTexturesSwizzled", [&] { CheckPm4LodStatsBoundTextures(vulkan, true); });
+  RunSuiteStep(summary, "Pm4MemSemaphore", [&] { CheckPm4MemSemaphore(vulkan.RuntimeRenderer()); });
+  RunSuiteStep(summary, "Pm4WriteDataGds", [&] { CheckPm4WriteDataGds(vulkan); });
+  RunSuiteStep(summary, "Pm4DmaDataAddress", [&] { CheckPm4DmaDataAddress(vulkan.RuntimeRenderer()); });
+  RunSuiteStep(summary, "Pm4RewindResume", [&] { CheckPm4RewindResume(vulkan.RuntimeRenderer()); });
+  RunSuiteStep(summary, "EmbeddedFetchVertexOffset", [&] { CheckEmbeddedFetchVertexOffset(); });
+  RunSuiteStep(summary, "EmbeddedFetchLaneSpill", [&] { CheckEmbeddedFetchLaneSpill(); });
+  RunSuiteStep(summary, "TessellationPrograms", [&] { CheckTessellationPrograms(); });
+  RunSuiteStep(summary, "PixelParameterAliases", [&] { CheckPixelParameterAliases(); });
+  RunSuiteStep(summary, "PixelFrontFaceModes", [&] { CheckPixelFrontFaceModes(); });
+  RunSuiteStep(summary, "RectListShaders", [&] { CheckRectListShaders(); });
+  RunSuiteStep(summary, "Signed16ImageStore", [&] { CheckSigned16ImageStore(vulkan); });
+  RunSuiteStep(summary, "BoundedFormattedBufferCopy", [&] { CheckBoundedFormattedBufferCopy(vulkan); });
+  RunSuiteStep(summary, "IndirectBufferStore", [&] { CheckIndirectBufferStore(vulkan); });
+  RunSuiteStep(summary, "BoundedRecordBufferAccess", [&] { CheckBoundedRecordBufferAccess(vulkan); });
+  RunSuiteStep(summary, "GpuSelectedRecordBufferAccess", [&] { CheckGpuSelectedRecordBufferAccess(vulkan); });
+  RunSuiteStep(summary, "GuardedWaterfallBufferRecords", [&] { CheckGuardedWaterfallBufferRecords(vulkan); });
+  RunSuiteStep(summary, "GpuSelectedFormattedRecordStore", [&] { CheckGpuSelectedFormattedRecordStore(vulkan); });
+  RunSuiteStep(summary, "FiniteBufferSelection", [&] { CheckFiniteBufferSelection(vulkan); });
+  RunSuiteStep(summary, "StorageBufferBindingOver2GiB", [&] { CheckStorageBufferBindingOver2GiB(vulkan); });
+  RunSuiteStep(summary, "RuntimeBufferRecords", [&] { CheckRuntimeBufferRecords(vulkan); });
+  RunSuiteStep(summary, "SharedIndirectBufferLoads", [&] { CheckSharedIndirectBufferLoads(vulkan); });
+  RunSuiteStep(summary, "ComputeThreadDimensions", [&] { CheckComputeThreadDimensions(vulkan); });
+  RunSuiteStep(summary, "CountedRowImageSelector", [&] { CheckCountedRowImageSelector(vulkan); });
+  RunSuiteStep(summary, "PointerImageTable", [&] { CheckPointerImageTable(vulkan); });
+  RunSuiteStep(summary, "WorkgroupDividedImageTable", [&] { CheckWorkgroupDividedImageTable(vulkan); });
+  RunSuiteStep(summary, "WaterfallFloorImageTable", [&] { CheckWaterfallFloorImageTable(vulkan); });
+  RunSuiteStep(summary, "MixedDimensionImageTable", [&] { CheckMixedDimensionImageTable(vulkan); });
+  RunSuiteStep(summary, "ClampedSiblingImageTable", [&] { CheckClampedSiblingImageTable(vulkan); });
+  RunSuiteStep(summary, "LaneCountedImageTable", [&] { CheckLaneCountedImageTable(vulkan); });
+  RunSuiteStep(summary, "GuardedSelectorImageTable", [&] { CheckGuardedSelectorImageTable(vulkan); });
+  RunSuiteStep(summary, "InclusiveGuardImageTable", [&] { CheckInclusiveGuardImageTable(vulkan); });
+  RunSuiteStep(summary, "NestedPointerImageTable", [&] { CheckNestedPointerImageTable(vulkan); });
+  RunSuiteStep(summary, "GuardedRecordImageTable", [&] { CheckGuardedRecordImageTable(vulkan); });
+  RunSuiteStep(summary, "IndirectImageKeySwitch", [&] { CheckIndirectImageKeySwitch(vulkan); });
+  RunSuiteStep(summary, "ResidentImageHeap", [&] { vulkan.CheckResidentImageHeap(); });
+  RunSuiteStep(summary, "DynamicSampleOffsetsWave32", [&] { CheckDynamicSampleOffsets(vulkan, 32u); });
+  RunSuiteStep(summary, "DynamicSampleOffsetsWave64", [&] { CheckDynamicSampleOffsets(vulkan, 64u); });
+  RunSuiteStep(summary, "FiniteFirstLaneImageChoice", [&] { CheckFiniteFirstLaneImageChoice(vulkan); });
+  RunSuiteStep(summary, "FiniteInlineSamplerPhi", [&] { CheckFiniteInlineSamplerPhi(vulkan); });
+  RunSuiteStep(summary, "SamplerCandidateTables", [&] { CheckSamplerCandidateTables(vulkan); });
+  RunSuiteStep(summary, "Wave64WholeWaveResults", [&] { CheckWave64WholeWaveResults(); });
+  RunSuiteStep(summary, "Ps5GameExampleImageClearRuntimeShape", [&] { CheckPs5GameExampleImageClearRuntimeShape(); });
+  RunSuiteStep(summary, "SchedulerTimeline", [&] { vulkan.CheckSchedulerTimeline(); });
+  RunSuiteStep(summary, "HostImageAllocation", [&] { vulkan.CheckHostImageAllocation(); });
+  RunSuiteStep(summary, "VideoOutHdr10ToSdr", [&] { vulkan.CheckVideoOutHdr10ToSdr(); });
+  RunSuiteStep(summary, "DescriptorHeapLargeSet", [&] { vulkan.CheckDescriptorHeapLargeSet(); });
+  RunSuiteStep(summary, "GpuMappedRangeLifecycle", [&] { vulkan.CheckGpuMappedRangeLifecycle(); });
+  RunSuiteStep(summary, "StreamBufferRing", [&] { vulkan.CheckStreamBufferRing(); });
+  RunSuiteStep(summary, "StreamCopyWindow", [&] { vulkan.CheckStreamCopyWindow(); });
+  RunSuiteStep(summary, "ResolveCache", [&] { vulkan.CheckResolveCache(); });
+  RunSuiteStep(summary, "GpuTilerCpuParity", [&] { vulkan.CheckGpuTilerCpuParity(); });
+  RunSuiteStep(summary, "NativeIndirectDispatch", [&] { vulkan.CheckNativeIndirectDispatch(); });
+  RunSuiteStep(summary, "ComputeLdsLimit", [&] { CheckComputeLdsLimit(vulkan); });
+  RunSuiteStep(summary, "TessellationWaveSizes", [&] { CheckTessellationWaveSizes(vulkan); });
+  RunSuiteStep(summary, "StableProgramIds", [&] { CheckStableProgramIds(vulkan); });
+  RunSuiteStep(summary, "ComputeQueueModules", [&] { CheckComputeQueueModules(vulkan); });
+  RunSuiteStep(summary, "GraphicsPushDataModules", [&] { CheckGraphicsPushDataModules(vulkan); });
+  RunSuiteStep(summary, "VertexFormatModules", [&] { CheckVertexFormatModules(vulkan); });
+  RunSuiteStep(summary, "ShaderStore", [&] { CheckShaderStore(vulkan); });
+  RunSuiteStep(summary, "OrderedDispatch", [&] { vulkan.CheckOrderedDispatch(); });
+  RunSuiteStep(summary, "ZeroStrideBufferBinding", [&] { vulkan.CheckZeroStrideBufferBinding(); });
+  RunSuiteStep(summary, "NullStorageBufferDescriptor", [&] { vulkan.CheckNullStorageBufferDescriptor(); });
+  RunSuiteStep(summary, "NullTextureDescriptors", [&] { vulkan.CheckNullTextureDescriptors(); });
+  RunSuiteStep(summary, "BdaPageTableUploads", [&] { vulkan.CheckBdaPageTableUploads(); });
+  RunSuiteStep(summary, "BdaSyncUploads", [&] { vulkan.CheckBdaSyncUploads(); });
+  RunSuiteStep(summary, "BvhMirror", [&] { vulkan.CheckBvhMirror(); });
+  RunSuiteStep(summary, "RayQueryTraversal", [&] { vulkan.CheckRayQueryTraversal(); });
+  RunSuiteStep(summary, "FaultBufferScan", [&] { vulkan.CheckFaultBufferScan(); });
+  RunSuiteStep(summary, "FaultRecordsOverflow", [&] { vulkan.CheckFaultRecordsOverflow(); });
+  RunSuiteStep(summary, "LargeSparseImageUpload", [&] { vulkan.CheckLargeSparseImageUpload(); });
+  RunSuiteStep(summary, "UnifiedTextureCacheFlow", [&] { vulkan.CheckUnifiedTextureCacheFlow(); });
+  RunSuiteStep(summary, "UnifiedImageViewCache", [&] { vulkan.CheckUnifiedImageViewCache(); });
+  RunSuiteStep(summary, "PackedTextureComponents", [&] { vulkan.CheckPackedTextureComponents(); });
+  RunSuiteStep(summary, "CubeFaceStorage", [&] { vulkan.CheckCubeFaceStorage(); });
   if (rasterization) {
-    vulkan.CheckGraphicsPushConstantBank();
-    vulkan.CheckRenderExecutorColorDiscovery();
-    vulkan.CheckRenderExecutorColor1DArrayDiscovery();
-    vulkan.CheckColorResolvePlacedTarget();
-    vulkan.CheckRenderExecutorColorVolumeDiscovery();
-    vulkan.CheckRenderExecutorColorMetadataClear();
-    vulkan.CheckSampledDccClear();
-    vulkan.CheckDepthBitsCopy();
-    vulkan.CheckSampledSrgbViews();
-    vulkan.CheckMsaaStorageClear();
-    vulkan.CheckRenderExecutorColorStandardTileDiscovery();
-    vulkan.CheckRenderExecutorColorDepthTileDiscovery();
-    vulkan.CheckRenderExecutorStencilBindingDiscovery();
-    vulkan.CheckBgra16Readback();
-    vulkan.CheckRasterization(false);
-    vulkan.CheckRasterization(false, Prospero::BufferFormat::k11_11_10Float);
-    vulkan.CheckRasterization(false, Prospero::BufferFormat::k10_10_10_2UScaled);
-    vulkan.CheckBufferCacheDirtyGarbageCollection();
+    RunSuiteStep(summary, "GraphicsPushConstantBank", [&] { vulkan.CheckGraphicsPushConstantBank(); });
+    RunSuiteStep(summary, "RenderExecutorColorDiscovery", [&] { vulkan.CheckRenderExecutorColorDiscovery(); });
+    RunSuiteStep(summary, "RenderExecutorColor1DArrayDiscovery", [&] { vulkan.CheckRenderExecutorColor1DArrayDiscovery(); });
+    RunSuiteStep(summary, "ColorResolvePlacedTarget", [&] { vulkan.CheckColorResolvePlacedTarget(); });
+    RunSuiteStep(summary, "RenderExecutorColorVolumeDiscovery", [&] { vulkan.CheckRenderExecutorColorVolumeDiscovery(); });
+    RunSuiteStep(summary, "RenderExecutorColorMetadataClear", [&] { vulkan.CheckRenderExecutorColorMetadataClear(); });
+    RunSuiteStep(summary, "SampledDccClear", [&] { vulkan.CheckSampledDccClear(); });
+    RunSuiteStep(summary, "DepthBitsCopy", [&] { vulkan.CheckDepthBitsCopy(); });
+    RunSuiteStep(summary, "SampledSrgbViews", [&] { vulkan.CheckSampledSrgbViews(); });
+    RunSuiteStep(summary, "MsaaStorageClear", [&] { vulkan.CheckMsaaStorageClear(); });
+    RunSuiteStep(summary, "RenderExecutorColorStandardTileDiscovery", [&] { vulkan.CheckRenderExecutorColorStandardTileDiscovery(); });
+    RunSuiteStep(summary, "RenderExecutorColorDepthTileDiscovery", [&] { vulkan.CheckRenderExecutorColorDepthTileDiscovery(); });
+    RunSuiteStep(summary, "RenderExecutorStencilBindingDiscovery", [&] { vulkan.CheckRenderExecutorStencilBindingDiscovery(); });
+    RunSuiteStep(summary, "Bgra16Readback", [&] { vulkan.CheckBgra16Readback(); });
+    RunSuiteStep(summary, "RasterizationDefault", [&] { vulkan.CheckRasterization(false); });
+    RunSuiteStep(summary, "Rasterization11_11_10Float", [&] { vulkan.CheckRasterization(false, Prospero::BufferFormat::k11_11_10Float); });
+    RunSuiteStep(summary, "Rasterization10_10_10_2UScaled", [&] { vulkan.CheckRasterization(false, Prospero::BufferFormat::k10_10_10_2UScaled); });
+    RunSuiteStep(summary, "BufferCacheDirtyGarbageCollection", [&] { vulkan.CheckBufferCacheDirtyGarbageCollection(); });
   } else {
     skipped_device_checks = true;
+    for (const char *name : {
+             "GraphicsPushConstantBank", "RenderExecutorColorDiscovery",
+             "RenderExecutorColor1DArrayDiscovery", "ColorResolvePlacedTarget",
+             "RenderExecutorColorVolumeDiscovery", "RenderExecutorColorMetadataClear",
+             "SampledDccClear", "DepthBitsCopy", "SampledSrgbViews",
+             "MsaaStorageClear", "RenderExecutorColorStandardTileDiscovery",
+             "RenderExecutorColorDepthTileDiscovery",
+             "RenderExecutorStencilBindingDiscovery", "Bgra16Readback",
+             "RasterizationDefault", "Rasterization11_11_10Float",
+             "Rasterization10_10_10_2UScaled",
+             "BufferCacheDirtyGarbageCollection"}) {
+      summary.RecordSkip(name, "production rasterization features unavailable");
+    }
   }
   const auto tests = MakeCases();
   const auto graphics_tests = MakeGraphicsCases();
-  CheckOpcodeCoverage(tests, graphics_tests);
+  RunSuiteStep(summary, "OpcodeCoverage", [&] { CheckOpcodeCoverage(tests, graphics_tests); });
   for (const auto &test : tests) {
-    RunCase(&vulkan, test);
+    const u32 skipped_before = vulkan.SkippedRobustCaseCount();
+    const bool prev = g_catch_test_failures;
+    g_catch_test_failures = true;
+    try {
+      RunCase(&vulkan, test);
+      if (vulkan.SkippedRobustCaseCount() > skipped_before) {
+        summary.RecordSkip(
+            test.name,
+            "robustBufferAccess2 alignment=" +
+                std::to_string(static_cast<uint64_t>(
+                    vulkan.RobustStorageBufferAlignment())));
+      } else {
+        summary.RecordPass(test.name);
+      }
+    } catch (const TestCaseFailure &failure) {
+      summary.RecordFail(test.name, failure.stage + ": " + failure.message);
+    } catch (const std::exception &ex) {
+      std::fprintf(stderr, "ShaderRecompilerComputeTests: %s threw exception: %s\n",
+                   test.name, ex.what());
+      summary.RecordFail(test.name, std::string("exception: ") + ex.what());
+    }
+    g_catch_test_failures = prev;
   }
   for (const auto &test : graphics_tests) {
-    RunGraphicsCase(&vulkan, test);
+    const u32 skipped_before = vulkan.SkippedCaseCount();
+    const bool prev = g_catch_test_failures;
+    g_catch_test_failures = true;
+    try {
+      RunGraphicsCase(&vulkan, test);
+      if (vulkan.SkippedCaseCount() > skipped_before) {
+        summary.RecordSkip(test.name,
+                           "production rasterization features unavailable");
+      } else {
+        summary.RecordPass(test.name);
+      }
+    } catch (const TestCaseFailure &failure) {
+      summary.RecordFail(test.name, failure.stage + ": " + failure.message);
+    } catch (const std::exception &ex) {
+      std::fprintf(stderr, "ShaderRecompilerComputeTests: %s threw exception: %s\n",
+                   test.name, ex.what());
+      summary.RecordFail(test.name, std::string("exception: ") + ex.what());
+    }
+    g_catch_test_failures = prev;
   }
-  vulkan.CheckGpuSuspendPoint();
-  vulkan.CheckGpuCommandLane();
-  vulkan.CheckScalarLeafCall();
+  RunSuiteStep(summary, "GpuSuspendPoint", [&] { vulkan.CheckGpuSuspendPoint(); });
+  RunSuiteStep(summary, "GpuCommandLane", [&] { vulkan.CheckGpuCommandLane(); });
+  RunSuiteStep(summary, "ScalarLeafCall", [&] { vulkan.CheckScalarLeafCall(); });
   if (skipped_device_checks) {
     std::printf(
         "ShaderRecompilerComputeTests: device rasterization checks skipped, this "
@@ -59602,6 +59722,34 @@ int main(int argc, char **argv) {
     std::printf("ShaderRecompilerComputeTests: %u robust buffer cases skipped\n",
                 vulkan.SkippedRobustCaseCount());
   }
-  std::printf("ShaderRecompilerComputeTests: all cases passed\n");
-  return 0;
+  std::printf("\n=== ShaderRecompilerComputeTests per-case summary ===\n");
+  for (const auto &entry : summary.results) {
+    const char *tag = entry.status == CaseStatus::Pass   ? "PASS"
+                      : entry.status == CaseStatus::Skip ? "SKIP"
+                                                         : "FAIL";
+    if (entry.detail.empty()) {
+      std::printf("[%s] %s\n", tag, entry.name.c_str());
+    } else {
+      std::printf("[%s] %s (%s)\n", tag, entry.name.c_str(),
+                  entry.detail.c_str());
+    }
+  }
+  if (summary.failed > 0) {
+    std::printf("\n=== ShaderRecompilerComputeTests failed cases (%u) ===\n",
+                summary.failed);
+    for (const auto &entry : summary.results) {
+      if (entry.status == CaseStatus::Fail) {
+        std::printf("[FAIL] %s (%s)\n", entry.name.c_str(),
+                    entry.detail.c_str());
+      }
+    }
+  }
+  std::printf("ShaderRecompilerComputeTests: %u passed, %u failed, %u skipped (%zu total)\n",
+              summary.passed, summary.failed, summary.skipped,
+              summary.results.size());
+  if (summary.failed == 0) {
+    std::printf("ShaderRecompilerComputeTests: all cases passed\n");
+    return 0;
+  }
+  return 1;
 }
