@@ -19,6 +19,7 @@ enum class Port : uint32_t {
 	Wave64LdsSync,     // order LDS between the halves of a wave64 compute program
 	GuestLaneNumber,   // number lanes inside the guest wave when the host subgroup is wider
 	GpuSelectedWrites, // keyed-table atomics; buffer writes do not block scalar branch lowering
+	DispatchGuard,     // zero indirect dispatches whose GPU-written group counts are out of range
 	Count
 };
 
@@ -35,6 +36,7 @@ inline constexpr PortInfo PORTS[] = {
     {Port::Wave64LdsSync, "wave64-lds-sync", "Senaxx/KytyPS5@86151b7251", true},
     {Port::GuestLaneNumber, "guest-lane-number", "lordra9-svg/KytyPS5@85c70d0416", true},
     {Port::GpuSelectedWrites, "gpu-selected-writes", "wololo-wololo/VIcky-Blue@d134910670", true},
+    {Port::DispatchGuard, "dispatch-guard", "wololo-wololo/VIcky-Blue@841cb9cac2", false},
 };
 static_assert(std::size(PORTS) == static_cast<size_t>(Port::Count));
 

@@ -13,6 +13,7 @@
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/guest_gpu/pm4.h"
 #include "graphics/host_gpu/graphicContext.h"
+#include "graphics/host_gpu/renderer/dispatchGuard.h"
 #include "graphics/host_gpu/renderer/image/imageInfo.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
@@ -38,6 +39,7 @@
 #include <limits>
 #include <mutex>
 #include <span>
+#include <tuple>
 #include <unordered_map>
 #include <vector>
 
@@ -924,6 +926,17 @@ bool RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 	const auto [args_buffer, args_offset] = m_context.GetBufferCache().ObtainBuffer(
 	    args_addr, sizeof(vk::DispatchIndirectCommand), false);
 	EXIT_IF((args_offset & 3u) != 0);
+	// Temporary workaround: counts the GPU wrote are checked on the GPU (dispatchGuard.h).
+	vk::Buffer indirect_buffer = args_buffer->Handle();
+	uint64_t   indirect_offset = args_offset;
+	if (DispatchArgsGuard::Enabled()) {
+		if (!m_dispatch_guard) {
+			m_dispatch_guard = std::make_unique<DispatchArgsGuard>(
+			    m_context.GetGraphics(), m_context.GetCommandScheduler());
+		}
+		std::tie(indirect_buffer, indirect_offset) =
+		    m_dispatch_guard->Record(buffer, *args_buffer, args_offset, args_addr);
+	}
 	RebindBuffers(bindings);
 	CommitBindings(buffer, vk::PipelineBindPoint::eCompute, pipeline,
 	               std::span {&descriptor_stage, 1u});
@@ -943,7 +956,7 @@ bool RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 	CaptureComputeBufferBreadcrumbs(m_context, cs_regs, bindings, dispatch_op);
 	auto&          graphics  = m_context.GetGraphics();
 	const uint32_t marker_id = graphics.breadcrumbs.BeginOp(graphics, vk_buffer, dispatch_op);
-	vk_buffer.dispatchIndirect(args_buffer->Handle(), args_offset);
+	vk_buffer.dispatchIndirect(indirect_buffer, indirect_offset);
 	graphics.breadcrumbs.EndOp(graphics, vk_buffer, marker_id);
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::Dispatches);
 	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
