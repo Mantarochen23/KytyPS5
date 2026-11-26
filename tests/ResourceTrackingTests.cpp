@@ -8389,6 +8389,66 @@ void TestFiniteBufferAtomic() {
              "finite buffer planning accepted a 64-bit atomic without candidate selection");
 }
 
+void TestFiniteBufferAtomicSelect() {
+  const auto build = [](Fixture& fixture, bool mismatched) {
+    const auto lane = fixture.Emit(ValueOpcode::GetBuiltin,
+        {Value(static_cast<uint32_t>(StageInputKind::LocalInvocationId)), Value(0u)});
+    auto condition = fixture.Emit(ValueOpcode::IEqual32, {lane, Value(0u)});
+    std::array<Value, 4> words;
+    for (uint32_t word = 0; word < words.size(); ++word) {
+      if (mismatched && word == 2u)
+        condition = fixture.Emit(ValueOpcode::IEqual32, {lane, Value(1u)});
+      words[word] = fixture.Emit(ValueOpcode::SelectU32,
+          {condition, fixture.UserData(word), fixture.UserData(word + 4u)});
+    }
+    const auto handle = fixture.Buffer(words, 0x9a0);
+    MemoryInfo memory;
+    memory.kind = ResourceKind::Buffer;
+    fixture.Emit(ValueOpcode::BufferAtomicIAdd32,
+        {handle, Value(0u), Value(0u), Value(0u), Value(1u), Value(true)},
+        fixture.AddMemory(memory, 0x9a0));
+    return handle;
+  };
+  Fixture fixture;
+  const auto handle = build(fixture, false);
+  fixture.PlanAndTrack();
+  const auto root = fixture.program.memory_info[0].resource;
+  const auto& finite = fixture.program
+      .descriptor_sources[fixture.program.info.buffers[root].source].indirect_descriptor;
+  Check(finite && finite->sources.size() == 2,
+        "two-way select between two buffer descriptors was not planned as finite");
+  const auto* selection = handle.Instruction()->Arg(0).TryInstruction();
+  const auto* key = selection == nullptr ? nullptr : selection->Arg(0).TryInstruction();
+  Check(selection != nullptr && selection->GetOpcode() == ValueOpcode::GetBufferResourceIndex &&
+            key != nullptr && key->GetOpcode() == ValueOpcode::SelectU32 &&
+            key->Arg(0).TryInstruction() != nullptr &&
+            key->Arg(0).TryInstruction()->GetOpcode() == ValueOpcode::IEqual32 &&
+            key->Arg(1).U32() == 0 && key->Arg(2).U32() == 1,
+        "finite buffer key does not follow the descriptor selects");
+  const std::array<uint32_t, 8> user_data{0x1000, 16u << 16u, 1, 0x4dfac,
+                                          0x3000, 16u << 16u, 1, 0x4dfac};
+  TestMemory memory;
+  const SrtRuntime runtime{.user_data = user_data, .userdata = &memory,
+                           .read_specialization_memory = ReadTestMemory};
+  ResourceSnapshot snapshot;
+  ResourceSpecialization specialization;
+  Check(MaterializeResources(ExtractResourcePlan(fixture.program), runtime, snapshot,
+                             specialization),
+        "finite buffer descriptors behind a select could not materialize");
+  ApplyResourceSpecialization(fixture.program, specialization);
+  const auto& candidates = fixture.program.info.buffers[root].indirect_resources;
+  Check(candidates.size() == 2 && snapshot.buffers[candidates[0]].dwords[0] == 0x1000 &&
+            snapshot.buffers[candidates[1]].dwords[0] == 0x3000,
+        "two-way select lost one of its descriptor candidates");
+
+  Fixture mismatched;
+  build(mismatched, true);
+  CheckFatal([&] { mismatched.PlanAndTrack(); },
+             "buffer descriptor is not a valid runtime value "
+             "(shape GetBufferResource->SelectU32->IEqual32",
+             "serial selects with different conditions were accepted as one finite descriptor");
+}
+
 void TestFiniteImageBitScanSentinel() {
   namespace CFG = Libs::Graphics::ShaderRecompiler::CFG;
   for (const bool nonzero : {false, true}) {
@@ -9625,6 +9685,7 @@ int main() {
     Run("finite image waterfall", TestFiniteImageWaterfall);
     Run("finite inline sampler", TestFiniteInlineSampler);
     Run("finite buffer atomic", TestFiniteBufferAtomic);
+    Run("finite buffer atomic select", TestFiniteBufferAtomicSelect);
     Run("finite image bit scan sentinel", TestFiniteImageBitScanSentinel);
     Run("runtime-rooted loop", TestLoopCycleEnteredThroughRuntimeValue);
     Run("invariant loop phi", TestInvariantLoopPhi);
