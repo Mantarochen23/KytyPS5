@@ -1,6 +1,7 @@
 #define SPV_ENABLE_UTILITY_CODE
 
 #include "common/assert.h"
+#include "common/recoverable.h"
 #include "common/debugCounters.h"
 #include "common/emulatorConfig.h"
 #include "common/file.h"
@@ -1179,7 +1180,18 @@ struct TestCaseFailure {
   std::string message;
 };
 
+struct TestCaseSkip {
+  std::string reason;
+};
+
 bool g_catch_test_failures = false;
+
+std::string TrimTrailingNewlines(std::string_view text) {
+  while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) {
+    text.remove_suffix(1);
+  }
+  return std::string(text);
+}
 
 enum class CaseStatus { Pass, Fail, Skip };
 
@@ -1214,14 +1226,33 @@ void RunSuiteStep(TestSuiteSummary &summary, const char *name, Function &&fn) {
   const bool prev = g_catch_test_failures;
   g_catch_test_failures = true;
   try {
+    Common::RecoverableScope recover;
     fn();
     summary.RecordPass(name);
+  } catch (const TestCaseSkip &skip) {
+    std::printf("[skip]    %-32s (%s)\n", name, skip.reason.c_str());
+    summary.RecordSkip(name, skip.reason);
   } catch (const TestCaseFailure &failure) {
     std::string detail = failure.stage + ": " + failure.message;
     if (!failure.name.empty() && failure.name != name) {
       detail = failure.name + " @ " + detail;
     }
     summary.RecordFail(name, std::move(detail));
+  } catch (const Common::RecoverableFailure &failure) {
+    const auto msg = TrimTrailingNewlines(failure.what());
+    if (msg.find("image format does not support required usage:") !=
+        std::string::npos) {
+      std::printf("[skip]    %-32s (%s)\n", name, msg.c_str());
+      summary.RecordSkip(name, msg);
+    } else {
+      std::fprintf(stderr, "ShaderRecompilerComputeTests: %s hit fatal at %s:%d: %s\n",
+                   name, failure.file != nullptr ? failure.file : "?", failure.line,
+                   msg.c_str());
+      summary.RecordFail(
+          name, std::string("fatal at ") +
+                    (failure.file != nullptr ? failure.file : "?") + ":" +
+                    std::to_string(failure.line) + ": " + msg);
+    }
   } catch (const std::exception &ex) {
     std::fprintf(stderr, "ShaderRecompilerComputeTests: %s threw exception: %s\n",
                  name, ex.what());
@@ -1538,6 +1569,7 @@ void ExpectFatal(const char *name, Function function) {
           "fork failed while starting fatal shader test");
   if (pid == 0) {
     g_catch_test_failures = false;
+    Common::SetThreadRecoverHook(nullptr);
     function();
     ::_exit(0);
   }
@@ -2381,6 +2413,16 @@ public:
   [[nodiscard]] u32 SkippedCaseCount() const { return m_skipped_cases; }
   [[nodiscard]] vk::DeviceSize RobustStorageBufferAlignment() const {
     return m_robust_storage_buffer_alignment;
+  }
+  [[nodiscard]] bool SupportsImageFormat(
+      vk::Format format, vk::ImageType type, vk::ImageUsageFlags usage,
+      vk::SampleCountFlagBits samples = vk::SampleCountFlagBits::e1,
+      vk::ImageCreateFlags flags = {}) const {
+    vk::ImageFormatProperties properties{};
+    const auto result = m_physical_device.getImageFormatProperties(
+        format, type, vk::ImageTiling::eOptimal, usage, flags, &properties);
+    return result == vk::Result::eSuccess &&
+           static_cast<bool>(properties.sampleCounts & samples);
   }
   // Hardware robustBufferAccess2 rounds storage buffer ranges up to
   // robustStorageBufferAccessSizeAlignment, so a robust-profile case only needs
@@ -5287,6 +5329,13 @@ public:
   }
 
   void CheckUnifiedImageViewCache() {
+    if (!SupportsImageFormat(vk::Format::eD24UnormS8Uint, vk::ImageType::e2D,
+                             vk::ImageUsageFlagBits::eTransferSrc |
+                                 vk::ImageUsageFlagBits::eTransferDst |
+                                 vk::ImageUsageFlagBits::eDepthStencilAttachment,
+                             vk::SampleCountFlagBits::e1)) {
+      throw TestCaseSkip{"format D24_UNORM_S8_UINT unsupported"};
+    }
     EnsureRuntimeContext();
     constexpr const char *name = "UnifiedImageViewCache";
     CommandScheduler scheduler(Renderer(), m_runtime_context);
@@ -7716,6 +7765,13 @@ public:
   }
 
   void CheckUnifiedTextureCacheFlow() {
+    if (!SupportsImageFormat(vk::Format::eD24UnormS8Uint, vk::ImageType::e2D,
+                             vk::ImageUsageFlagBits::eTransferSrc |
+                                 vk::ImageUsageFlagBits::eTransferDst |
+                                 vk::ImageUsageFlagBits::eDepthStencilAttachment,
+                             vk::SampleCountFlagBits::e2)) {
+      throw TestCaseSkip{"2-sample D24_UNORM_S8_UINT unsupported"};
+    }
     constexpr const char *name = "UnifiedTextureCacheFlow";
     constexpr uintptr_t base = 0x0000000200600000ull;
     constexpr uint64_t allocation_size = 0x3000000;
@@ -59666,6 +59722,7 @@ int main(int argc, char **argv) {
     const bool prev = g_catch_test_failures;
     g_catch_test_failures = true;
     try {
+      Common::RecoverableScope recover;
       RunCase(&vulkan, test);
       if (vulkan.SkippedRobustCaseCount() > skipped_before) {
         summary.RecordSkip(
@@ -59676,8 +59733,26 @@ int main(int argc, char **argv) {
       } else {
         summary.RecordPass(test.name);
       }
+    } catch (const TestCaseSkip &skip) {
+      std::printf("[skip]    %-32s (%s)\n", test.name, skip.reason.c_str());
+      summary.RecordSkip(test.name, skip.reason);
     } catch (const TestCaseFailure &failure) {
       summary.RecordFail(test.name, failure.stage + ": " + failure.message);
+    } catch (const Common::RecoverableFailure &failure) {
+      const auto msg = TrimTrailingNewlines(failure.what());
+      if (msg.find("image format does not support required usage:") !=
+          std::string::npos) {
+        std::printf("[skip]    %-32s (%s)\n", test.name, msg.c_str());
+        summary.RecordSkip(test.name, msg);
+      } else {
+        std::fprintf(stderr, "ShaderRecompilerComputeTests: %s hit fatal at %s:%d: %s\n",
+                     test.name, failure.file != nullptr ? failure.file : "?",
+                     failure.line, msg.c_str());
+        summary.RecordFail(
+            test.name, std::string("fatal at ") +
+                           (failure.file != nullptr ? failure.file : "?") + ":" +
+                           std::to_string(failure.line) + ": " + msg);
+      }
     } catch (const std::exception &ex) {
       std::fprintf(stderr, "ShaderRecompilerComputeTests: %s threw exception: %s\n",
                    test.name, ex.what());
@@ -59690,6 +59765,7 @@ int main(int argc, char **argv) {
     const bool prev = g_catch_test_failures;
     g_catch_test_failures = true;
     try {
+      Common::RecoverableScope recover;
       RunGraphicsCase(&vulkan, test);
       if (vulkan.SkippedCaseCount() > skipped_before) {
         summary.RecordSkip(test.name,
@@ -59697,8 +59773,26 @@ int main(int argc, char **argv) {
       } else {
         summary.RecordPass(test.name);
       }
+    } catch (const TestCaseSkip &skip) {
+      std::printf("[skip]    %-32s (%s)\n", test.name, skip.reason.c_str());
+      summary.RecordSkip(test.name, skip.reason);
     } catch (const TestCaseFailure &failure) {
       summary.RecordFail(test.name, failure.stage + ": " + failure.message);
+    } catch (const Common::RecoverableFailure &failure) {
+      const auto msg = TrimTrailingNewlines(failure.what());
+      if (msg.find("image format does not support required usage:") !=
+          std::string::npos) {
+        std::printf("[skip]    %-32s (%s)\n", test.name, msg.c_str());
+        summary.RecordSkip(test.name, msg);
+      } else {
+        std::fprintf(stderr, "ShaderRecompilerComputeTests: %s hit fatal at %s:%d: %s\n",
+                     test.name, failure.file != nullptr ? failure.file : "?",
+                     failure.line, msg.c_str());
+        summary.RecordFail(
+            test.name, std::string("fatal at ") +
+                           (failure.file != nullptr ? failure.file : "?") + ":" +
+                           std::to_string(failure.line) + ": " + msg);
+      }
     } catch (const std::exception &ex) {
       std::fprintf(stderr, "ShaderRecompilerComputeTests: %s threw exception: %s\n",
                    test.name, ex.what());
