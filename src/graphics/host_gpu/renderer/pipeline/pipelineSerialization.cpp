@@ -1,26 +1,22 @@
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 
+#include "common/emulatorConfig.h"
 #include "common/logging/log.h"
 #include "common/parallelFor.h"
+#include "common/recoverable.h"
 #include "common/stringUtils.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
 #include "graphics/shader/recompiler/ir/Serialize.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstring>
 #include <fmt/format.h>
 #include <ranges>
 #include <xxhash.h>
 #include <zstd.h>
-
-#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
-#elif defined(__APPLE__)
-#include <mach-o/dyld.h>
-#endif
 
 // The shader store: a header, then zstd-compressed records of everything a run created first.
 // Records are only appended, so a store cut short by a crash keeps every complete record.
@@ -41,34 +37,14 @@ struct Frame {
 	uint64_t checksum        = 0; // XXH3 of the compressed bytes.
 };
 
-// Changes with every build, so records never meet code that encodes them differently. Zero when
-// the executable cannot be found.
-uint64_t BuildStamp() {
-#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
-	std::array<wchar_t, 32768> name {};
-	GetModuleFileNameW(nullptr, name.data(), static_cast<DWORD>(name.size()));
-	const std::filesystem::path path = name.data();
-#elif defined(__APPLE__)
-	std::array<char, 4096> name {};
-	auto size = static_cast<uint32_t>(name.size());
-	_NSGetExecutablePath(name.data(), &size);
-	const std::filesystem::path path = name.data();
-#else
-	const std::filesystem::path path = "/proc/self/exe";
-#endif
-	std::error_code error;
-	const auto      time = std::filesystem::last_write_time(path, error).time_since_epoch().count();
-	return error ? 0 : static_cast<uint64_t>(time);
-}
+// Explicit store format version. Bump manually only when recompiler output, SPIR-V profile, or
+// store record layout changes so rebuilds across branches keep reusing compatible warm stores.
+constexpr uint64_t kShaderStoreFormatVersion = 1;
 
-// What every record depends on besides its own fields; empty when the build is unknown.
+// What every record depends on besides its own fields.
 std::vector<uint8_t> StoreHeader(const GraphicContext& graphics) {
-	const auto stamp = BuildStamp();
-	if (stamp == 0) {
-		return {};
-	}
 	Writer header;
-	IoAll(header, stamp, SpirvProfile(graphics),
+	IoAll(header, kShaderStoreFormatVersion, SpirvProfile(graphics),
 	      graphics.GetPhysicalDeviceProperties().limits.maxComputeSharedMemorySize);
 	return std::move(header.bytes);
 }
@@ -158,30 +134,68 @@ void PipelineCache::WarmUp(const std::filesystem::path& path) {
 	    "Shader cache: compiling shaders and pipelines from {} ({:.1f} MB) with {} threads\n",
 	    Common::PathToString(path), static_cast<double>(bytes.size()) / 1'000'000.0,
 	    Common::ParallelThreads()));
-	auto       records = std::span<const uint8_t>(bytes);
-	const bool reusable =
+	auto       records        = std::span<const uint8_t>(bytes);
+	const bool keep           = Config::ShaderCacheKeepEnabled();
+	const bool header_matches =
 	    records.size() >= header.size() && std::ranges::equal(records.first(header.size()), header);
-	if (reusable) {
+	const bool load_store     = header_matches || (keep && records.size() >= header.size());
+	size_t     loaded_records = 0;
+	size_t     dropped_records = 0;
+	if (load_store) {
 		records = records.subspan(header.size());
-		while (LoadRecord(records)) {
+		for (;;) {
+			const auto status = LoadRecord(records, keep);
+			if (status == LoadRecordStatus::Loaded) {
+				loaded_records++;
+			} else if (status == LoadRecordStatus::Failed && keep) {
+				dropped_records++;
+			} else {
+				break;
+			}
 		}
 	}
-	// A damaged record ends the store; the records before it stay.
-	m_store.Open(path, header, reusable ? bytes.size() - records.size() : 0);
 
 	const auto modules = MapModules();
 	std::vector<Common::UniqueFunction<void>> jobs;
 	jobs.reserve(m_graphics_pipelines.size() + modules.size());
+	std::atomic<size_t> dropped_pipelines = 0;
 	for (auto& node: m_graphics_pipelines) {
-		jobs.emplace_back([this, &modules, &node] {
-			CreateGraphicsPipeline(node.second, node.first, modules);
+		jobs.emplace_back([this, &modules, &node, keep, &dropped_pipelines] {
+			if (!keep) {
+				CreateGraphicsPipeline(node.second, node.first, modules);
+				return;
+			}
+			Common::RecoverableScope scope;
+			try {
+				CreateGraphicsPipeline(node.second, node.first, modules);
+			} catch (const Common::RecoverableFailure&) {
+				node.second.pipeline = nullptr;
+				dropped_pipelines.fetch_add(1, std::memory_order_relaxed);
+			} catch (const std::exception&) {
+				node.second.pipeline = nullptr;
+				dropped_pipelines.fetch_add(1, std::memory_order_relaxed);
+			}
 		});
 	}
 	// A compute pipeline depends only on its module.
 	for (const auto* module: modules | std::views::values) {
 		if (module != nullptr && module->info.stage == ShaderType::Compute) {
-			jobs.emplace_back([this, module, &pipeline = m_compute_pipelines[module->id]] {
-				CreatePipelineInternal(m_graphics, pipeline, *module, m_driver_cache);
+			jobs.emplace_back([this, module, &pipeline = m_compute_pipelines[module->id], keep,
+			                   &dropped_pipelines] {
+				if (!keep) {
+					CreatePipelineInternal(m_graphics, pipeline, *module, m_driver_cache);
+					return;
+				}
+				Common::RecoverableScope scope;
+				try {
+					CreatePipelineInternal(m_graphics, pipeline, *module, m_driver_cache);
+				} catch (const Common::RecoverableFailure&) {
+					pipeline.pipeline = nullptr;
+					dropped_pipelines.fetch_add(1, std::memory_order_relaxed);
+				} catch (const std::exception&) {
+					pipeline.pipeline = nullptr;
+					dropped_pipelines.fetch_add(1, std::memory_order_relaxed);
+				}
 			});
 		}
 	}
@@ -189,8 +203,25 @@ void PipelineCache::WarmUp(const std::filesystem::path& path) {
 	// A key with a stage missing from the store keeps no pipeline.
 	std::erase_if(m_graphics_pipelines,
 	              [](const auto& entry) { return entry.second.pipeline == nullptr; });
+	std::erase_if(m_compute_pipelines,
+	              [](const auto& entry) { return entry.second.pipeline == nullptr; });
+
+	const auto dropped_pipeline_count = dropped_pipelines.load();
+	if (bytes.empty() || !keep) {
+		// A damaged record ends the store; the records before it stay.
+		m_store.Open(path, header, header_matches ? bytes.size() - records.size() : 0);
+	} else if (header_matches && dropped_records == 0 && dropped_pipeline_count == 0) {
+		m_store.Open(path, header, bytes.size() - records.size());
+	}
+
 	if (!m_graphics_pipelines.empty() || !m_compute_pipelines.empty()) {
 		CheckpointDriverCache();
+	}
+	if (keep || dropped_records != 0 || dropped_pipeline_count != 0) {
+		Log::WriteToConsoleAndLog(fmt::format(
+		    "Shader cache: keep mode{} - loaded {} records, dropped {} ({} records, {} pipelines)\n",
+		    header_matches ? "" : " (header mismatch)", loaded_records,
+		    dropped_records + dropped_pipeline_count, dropped_records, dropped_pipeline_count));
 	}
 	Log::WriteToConsoleAndLog(fmt::format(
 	    "Shader cache: loaded {} programs, {} modules, {} pipelines in {} ms\n",
@@ -201,23 +232,28 @@ void PipelineCache::WarmUp(const std::filesystem::path& path) {
 	        .count()));
 }
 
-bool PipelineCache::LoadRecord(std::span<const uint8_t>& records) {
+PipelineCache::LoadRecordStatus PipelineCache::LoadRecord(std::span<const uint8_t>& records,
+                                                          bool keep_on_error) {
 	Frame frame;
 	if (records.size() < sizeof(frame)) {
-		return false;
+		return LoadRecordStatus::EndOfStream;
 	}
 	std::memcpy(&frame, records.data(), sizeof(frame));
 	if (records.size() - sizeof(frame) < frame.compressed_size) {
-		return false;
+		return LoadRecordStatus::EndOfStream;
 	}
 	const auto compressed = records.subspan(sizeof(frame), frame.compressed_size);
+	const auto advance    = [&] { records = records.subspan(sizeof(frame) + compressed.size()); };
+	if (keep_on_error) {
+		advance();
+	}
 	if (XXH3_64bits(compressed.data(), compressed.size()) != frame.checksum ||
 	    ZSTD_getFrameContentSize(compressed.data(), compressed.size()) != frame.raw_size) {
-		return false;
+		return LoadRecordStatus::Failed;
 	}
 	std::vector<uint8_t> raw(frame.raw_size);
 	if (ZSTD_decompress(raw.data(), raw.size(), compressed.data(), compressed.size()) != raw.size()) {
-		return false;
+		return LoadRecordStatus::Failed;
 	}
 	Reader     reader {raw};
 	auto       type     = Record::Module;
@@ -234,15 +270,32 @@ bool PipelineCache::LoadRecord(std::span<const uint8_t>& records) {
 			IoModule(reader, module);
 			IoAll(reader, spirv);
 			if (!complete()) {
-				return false;
+				return LoadRecordStatus::Failed;
 			}
 			const auto [program, inserted] = m_program_cache.try_emplace(std::move(key));
 			if (inserted &&
 			    !ShaderRecompiler::IR::LoadResourcePlan(plan, program->second.resource_plan)) {
 				m_program_cache.erase(program);
-				return false;
+				return LoadRecordStatus::Failed;
 			}
-			module.module = CompileSPV(spirv, m_graphics.device);
+			if (keep_on_error) {
+				Common::RecoverableScope scope;
+				try {
+					module.module = CompileSPV(spirv, m_graphics.device);
+				} catch (const Common::RecoverableFailure&) {
+					if (inserted) {
+						m_program_cache.erase(program);
+					}
+					return LoadRecordStatus::Failed;
+				} catch (const std::exception&) {
+					if (inserted) {
+						m_program_cache.erase(program);
+					}
+					return LoadRecordStatus::Failed;
+				}
+			} else {
+				module.module = CompileSPV(spirv, m_graphics.device);
+			}
 			program->second.modules.push_back(std::move(module));
 			break;
 		}
@@ -250,7 +303,7 @@ bool PipelineCache::LoadRecord(std::span<const uint8_t>& records) {
 			GraphicsPipelineKey key;
 			reader.Raw(&key, sizeof(key));
 			if (!complete()) {
-				return false;
+				return LoadRecordStatus::Failed;
 			}
 			// WarmUp creates the pipeline once every record is loaded.
 			m_graphics_pipelines.try_emplace(key);
@@ -261,15 +314,17 @@ bool PipelineCache::LoadRecord(std::span<const uint8_t>& records) {
 			ShaderTessellationInputInfo layout;
 			IoAll(reader, key, layout);
 			if (!complete()) {
-				return false;
+				return LoadRecordStatus::Failed;
 			}
 			m_tess_layouts.try_emplace(key, layout);
 			break;
 		}
-		default: return false;
+		default: return LoadRecordStatus::Failed;
 	}
-	records = records.subspan(sizeof(frame) + compressed.size());
-	return true;
+	if (!keep_on_error) {
+		advance();
+	}
+	return LoadRecordStatus::Loaded;
 }
 
 // Records are encoded here, since programs and modules change later.

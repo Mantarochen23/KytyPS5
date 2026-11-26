@@ -285,8 +285,9 @@ private:
 	void WriteDriverCache() const;
 
 	// pipelineSerialization.cpp
-	void WarmUp(const std::filesystem::path& path);
-	bool LoadRecord(std::span<const uint8_t>& records);
+	enum class LoadRecordStatus : uint8_t { Loaded, EndOfStream, Failed };
+	void             WarmUp(const std::filesystem::path& path);
+	LoadRecordStatus LoadRecord(std::span<const uint8_t>& records, bool keep_on_error);
 	void StoreModule(const ProgramKey& key, const Program& program, const ShaderModule& module,
 	                 const std::vector<uint32_t>& spirv);
 	void StorePipeline(const GraphicsPipelineKey& key);

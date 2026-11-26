@@ -442,6 +442,19 @@ TEST(Config, ParseShaderHashListAndSkipLookup) {
 	Config::Shutdown();
 }
 
+TEST(Config, ShaderCacheKeepDefaultsOffAndTracksLoadedOption) {
+	Config::Initialize();
+	Config::ConfigOptions options;
+	EXPECT_FALSE(options.shader_cache_keep_enabled);
+	Config::Load(options);
+	EXPECT_FALSE(Config::ShaderCacheKeepEnabled());
+
+	options.shader_cache_keep_enabled = true;
+	Config::Load(options);
+	EXPECT_TRUE(Config::ShaderCacheKeepEnabled());
+	Config::Shutdown();
+}
+
 } // namespace
 
 int main(int argc, char** argv) {

@@ -84,6 +84,8 @@ static void PrintUsage() {
 	         "                                       separated hex shader hash (or @path). Repeatable; also\n"
 	         "                                       reads KYTY_SKIP_SHADERS.\n");
 	::printf("  --shader-cache                       Keep compiled shaders and pipelines between boots.\n");
+	::printf("  --shader-cache-keep                  Keep usable records from a mismatched shader cache,\n"
+	         "                                       dropping only records that fail to load.\n");
 	::printf("  --tessellation                      Draw tessellation patches; skipped by default.\n");
 	::printf("  --occlusion-queries                  Count occlusion query samples on the GPU.\n");
 	::printf("  --relaxed-shader-float               Native GPU float ops in shaders; faster, can be inaccurate.\n");
@@ -222,6 +224,7 @@ static constexpr Flag FLAGS[] = {
     {"--shader-validation", &ConfigOptions::shader_validation_enabled},
     {"--keep-going", &ConfigOptions::keep_going_enabled},
     {"--shader-cache", &ConfigOptions::shader_cache_enabled},
+    {"--shader-cache-keep", &ConfigOptions::shader_cache_keep_enabled},
     {"--tessellation", &ConfigOptions::tessellation_enabled},
     {"--occlusion-queries", &ConfigOptions::occlusion_queries_enabled},
     {"--relaxed-shader-float", &ConfigOptions::relaxed_shader_float},

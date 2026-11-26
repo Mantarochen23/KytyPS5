@@ -93,6 +93,7 @@ struct ConfigOptions {
 	int32_t                auto_cross_seconds          = 0;
 	std::vector<uint64_t>  skip_shader_hashes;
 	bool                   shader_cache_enabled        = false;
+	bool                   shader_cache_keep_enabled   = false;
 	LogDirection           shader_log_direction        = LogDirection::Silent;
 	std::filesystem::path  shader_log_folder           = "_Shaders";
 	bool                   command_buffer_dump_enabled = false;
@@ -177,6 +178,7 @@ bool                   ParseShaderHashList(std::string_view text, std::vector<ui
 bool                   ShouldSkipShader(uint64_t hash);
 const std::vector<uint64_t>& GetSkipShaderHashes();
 bool                   ShaderCacheEnabled();
+bool                   ShaderCacheKeepEnabled();
 LogDirection           GetShaderLogDirection();
 std::filesystem::path  GetShaderLogFolder();
 
