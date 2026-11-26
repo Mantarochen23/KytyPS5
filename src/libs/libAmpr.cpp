@@ -26,6 +26,7 @@
 #include <limits>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
 #include <atomic>
@@ -651,6 +652,22 @@ struct CommandBufferState {
 	uint64_t                                       last_submit_seq = 0;
 	uint64_t                                       last_reset_seq  = 0;
 	uint64_t                                       last_setbuf_seq = 0;
+	bool                                           logged_record_space_ebusy = false;
+};
+
+struct AmprEbusyKey {
+	std::string_view op;
+	uint64_t         command_buffer = 0;
+
+	bool operator==(const AmprEbusyKey&) const = default;
+};
+
+struct AmprEbusyKeyHash {
+	size_t operator()(const AmprEbusyKey& key) const noexcept {
+		const size_t h1 = std::hash<std::string_view> {}(key.op);
+		const size_t h2 = std::hash<uint64_t> {}(key.command_buffer);
+		return h1 ^ (h2 + 0x9e3779b97f4a7c15ull + (h1 << 6) + (h1 >> 2));
+	}
 };
 
 struct AmmUsageStatsData {
@@ -663,11 +680,11 @@ struct AmmUsageStatsData {
 };
 static_assert(sizeof(AmmUsageStatsData) == 0x18);
 
-static std::mutex                                       g_command_buffer_mutex;
-static std::unordered_map<uint64_t, CommandBufferState> g_command_buffers;
-static std::unordered_map<uint64_t, uint64_t>           g_command_buffer_aliases;
-static std::atomic<uint64_t>                            g_ampr_op_seq {0};
-static std::atomic<uint32_t>                            g_ampr_ebusy_log_count {0};
+static std::mutex                                                  g_command_buffer_mutex;
+static std::unordered_map<uint64_t, CommandBufferState>            g_command_buffers;
+static std::unordered_map<uint64_t, uint64_t>                      g_command_buffer_aliases;
+static std::unordered_map<AmprEbusyKey, uint32_t, AmprEbusyKeyHash> g_ampr_ebusy_log_counts;
+static std::atomic<uint64_t>                                       g_ampr_op_seq {0};
 // AMM and APR share 256 32-bit counters; only the first 128 are application-writable.
 static std::array<std::atomic<uint32_t>, 256> g_counters {};
 using CommandBufferIterator = std::unordered_map<uint64_t, CommandBufferState>::iterator;
@@ -680,8 +697,13 @@ static bool AmprLifecycleLogEnabled() {
 	return env_enabled || Config::TraceCallsEnabled();
 }
 
-static bool ShouldLogAmprEbusy() {
-	const uint32_t n = g_ampr_ebusy_log_count.fetch_add(1, std::memory_order_relaxed) + 1;
+static bool ShouldLogAmprEbusyLocked(std::string_view op, uint64_t command_buffer,
+                                     CommandBufferState& state, bool is_record_space) {
+	const uint32_t n = ++g_ampr_ebusy_log_counts[{op, command_buffer}];
+	if (is_record_space && !state.logged_record_space_ebusy) {
+		state.logged_record_space_ebusy = true;
+		return true;
+	}
 	return n <= 32u || std::has_single_bit(n);
 }
 
@@ -699,10 +721,11 @@ static void RecordLifecycleEventLocked(CommandBufferState& state, const char* op
 	}
 }
 
-static void LogAmprEbusyLocked(const char* op, uint64_t command_buffer,
-                               const CommandBufferState& state, uint64_t record_size,
-                               uint32_t num_commands, int rc) {
-	if (!ShouldLogAmprEbusy()) {
+static void LogAmprEbusyLocked(const char* op, uint64_t command_buffer, CommandBufferState& state,
+                               uint64_t record_size, uint32_t num_commands, int rc,
+                               bool is_record_space) {
+	if (!ShouldLogAmprEbusyLocked(op != nullptr ? std::string_view(op) : std::string_view("?"),
+	                              command_buffer, state, is_record_space)) {
 		return;
 	}
 	LOGF("[ampr][ebusy] op=%s cb=0x%016" PRIx64 " buf=0x%016" PRIx64
@@ -745,6 +768,13 @@ static void EraseCommandBufferStateLocked(uint64_t command_buffer) {
 	for (auto it = g_command_buffer_aliases.begin(); it != g_command_buffer_aliases.end();) {
 		if (it->first == command_buffer || it->second == command_buffer) {
 			it = g_command_buffer_aliases.erase(it);
+		} else {
+			++it;
+		}
+	}
+	for (auto it = g_ampr_ebusy_log_counts.begin(); it != g_ampr_ebusy_log_counts.end();) {
+		if (it->first.command_buffer == command_buffer) {
+			it = g_ampr_ebusy_log_counts.erase(it);
 		} else {
 			++it;
 		}
@@ -818,8 +848,8 @@ static bool GetOrCreateCommandBufferStateLocked(uint64_t               command_b
 	return true;
 }
 
-static int CheckCommandBufferRecordSpaceLocked(uint64_t command_buffer,
-                                             CommandBufferState& state, uint64_t record_size) {
+static int CheckCommandBufferRecordSpaceLocked(uint64_t command_buffer, CommandBufferState& state,
+                                               uint64_t record_size, const char* op) {
 	if (state.buffer == 0) {
 		return LibKernel::KERNEL_ERROR_EPERM;
 	}
@@ -830,10 +860,9 @@ static int CheckCommandBufferRecordSpaceLocked(uint64_t command_buffer,
 		                     ? static_cast<uint32_t>(ReadCommandBufferUnchecked<int32_t>(
 		                           command_buffer + COMMAND_BUFFER_NUM_OFFSET))
 		                     : 0u;
-		RecordLifecycleEventLocked(state, "Append(EBUSY)", seq, tid, num,
-		                           LibKernel::KERNEL_ERROR_EBUSY);
-		LogAmprEbusyLocked("Append", command_buffer, state, record_size, num,
-		                   LibKernel::KERNEL_ERROR_EBUSY);
+		RecordLifecycleEventLocked(state, op, seq, tid, num, LibKernel::KERNEL_ERROR_EBUSY);
+		LogAmprEbusyLocked(op, command_buffer, state, record_size, num,
+		                   LibKernel::KERNEL_ERROR_EBUSY, true);
 		return LibKernel::KERNEL_ERROR_EBUSY;
 	}
 	if (!AprShared::IsValidGuestRange(state.buffer, state.size, true)) {
@@ -1011,7 +1040,7 @@ static bool InitializeAprReservedState(uint64_t command_buffer, uint64_t reserve
 
 static int AppendReadFileRecord(uint64_t command_buffer, uint8_t opcode, uint32_t file_id,
                                 uint64_t destination, uint64_t size, uint64_t file_offset,
-                                uint64_t record_size) {
+                                uint64_t record_size, const char* op) {
 	std::scoped_lock      lock(g_command_buffer_mutex);
 	CommandBufferIterator it;
 	if (!GetOrCreateCommandBufferStateLocked(command_buffer, &it)) {
@@ -1019,7 +1048,8 @@ static int AppendReadFileRecord(uint64_t command_buffer, uint8_t opcode, uint32_
 	}
 
 	auto& state = it->second;
-	if (const int result = CheckCommandBufferRecordSpaceLocked(command_buffer, state, record_size);
+	if (const int result =
+	        CheckCommandBufferRecordSpaceLocked(command_buffer, state, record_size, op);
 	    result != OK) {
 		return result;
 	}
@@ -1055,8 +1085,8 @@ static bool AppendKernelEventRecord(uint64_t command_buffer, uint64_t eq, int32_
 	}
 
 	auto& state = it->second;
-	if (CheckCommandBufferRecordSpaceLocked(command_buffer, state, KERNEL_EVENT_RECORD_SIZE) !=
-	    OK) {
+	if (CheckCommandBufferRecordSpaceLocked(command_buffer, state, KERNEL_EVENT_RECORD_SIZE,
+	                                        "WriteKernelEventQueue") != OK) {
 		return false;
 	}
 
@@ -1136,7 +1166,7 @@ static int ExecuteAmmMapCommand(const CommandBufferState::AmmMapCommand& command
 // Returns the zeroed record in the guest buffer, or null when it was not appended.
 static uint32_t* AppendCommandRecord(uint64_t                        command_buffer,
                                      CommandBufferState::CommandData command,
-                                     uint64_t                        record_size) {
+                                     uint64_t record_size, const char* op) {
 	std::scoped_lock      lock(g_command_buffer_mutex);
 	CommandBufferIterator it;
 	if (!GetOrCreateCommandBufferStateLocked(command_buffer, &it)) {
@@ -1144,7 +1174,7 @@ static uint32_t* AppendCommandRecord(uint64_t                        command_buf
 	}
 
 	auto& state = it->second;
-	if (CheckCommandBufferRecordSpaceLocked(command_buffer, state, record_size) != OK) {
+	if (CheckCommandBufferRecordSpaceLocked(command_buffer, state, record_size, op) != OK) {
 		return nullptr;
 	}
 
@@ -1392,7 +1422,7 @@ static int QueueCommandBuffer(Engine engine, uint64_t command_buffer, uint32_t b
 	return OK;
 }
 
-static bool AdvanceCommandBuffer(uint64_t command_buffer, uint64_t record_size) {
+static bool AdvanceCommandBuffer(uint64_t command_buffer, uint64_t record_size, const char* op) {
 	std::scoped_lock      lock(g_command_buffer_mutex);
 	CommandBufferIterator it;
 	if (!GetOrCreateCommandBufferStateLocked(command_buffer, &it)) {
@@ -1400,7 +1430,7 @@ static bool AdvanceCommandBuffer(uint64_t command_buffer, uint64_t record_size) 
 	}
 
 	auto& state = it->second;
-	if (CheckCommandBufferRecordSpaceLocked(command_buffer, state, record_size) != OK) {
+	if (CheckCommandBufferRecordSpaceLocked(command_buffer, state, record_size, op) != OK) {
 		return false;
 	}
 
@@ -1544,7 +1574,7 @@ static int KYTY_SYSV_ABI CommandBufferSetBuffer(void* command_buffer, void* buff
 		RecordLifecycleEventLocked(state, "SetBuffer(EBUSY)", seq, tid, num,
 		                           LibKernel::KERNEL_ERROR_EBUSY);
 		LogAmprEbusyLocked("SetBuffer", command_buffer_addr, state, size, num,
-		                   LibKernel::KERNEL_ERROR_EBUSY);
+		                   LibKernel::KERNEL_ERROR_EBUSY, false);
 		return LibKernel::KERNEL_ERROR_EBUSY;
 	}
 
@@ -1661,7 +1691,8 @@ static int KYTY_SYSV_ABI AprCommandBufferReadFile(void*    command_buffer, uint6
 	}
 
 	return AppendReadFileRecord(reinterpret_cast<uint64_t>(command_buffer), 0x17, file_id,
-	                            destination_addr, size, file_offset, AprReadFileRecordSize(file_offset));
+	                            destination_addr, size, file_offset,
+	                            AprReadFileRecordSize(file_offset), "AprReadFile");
 }
 
 static uint64_t AlignUp4(uint64_t value) {
@@ -1912,12 +1943,12 @@ static uint32_t KYTY_SYSV_ABI CommandBufferGetNumCommands(void* command_buffer) 
 	return num;
 }
 
-static int AppendNoOpCommand(void* command_buffer, uint64_t size) {
+static int AppendNoOpCommand(void* command_buffer, uint64_t size, const char* op = "NoOp") {
 	if (command_buffer == nullptr) {
 		return LibKernel::KERNEL_ERROR_EINVAL;
 	}
 
-	return AdvanceCommandBuffer(reinterpret_cast<uint64_t>(command_buffer), AlignUp4(size))
+	return AdvanceCommandBuffer(reinterpret_cast<uint64_t>(command_buffer), AlignUp4(size), op)
 	           ? OK
 	           : LibKernel::KERNEL_ERROR_EFAULT;
 }
@@ -2014,7 +2045,7 @@ static int KYTY_SYSV_ABI CommandBufferWaitOnAddress(void*              command_b
 	return AppendCommandRecord(reinterpret_cast<uint64_t>(command_buffer),
 	                           CommandBufferState::WaitCommand {
 	                               reinterpret_cast<uint64_t>(address), value, compare, false},
-	                           0x20)
+	                           0x20, "WaitOnAddress")
 	           ? OK
 	           : LibKernel::KERNEL_ERROR_EBUSY;
 }
@@ -2030,13 +2061,13 @@ static int KYTY_SYSV_ABI CommandBufferWaitOnCounter(void* command_buffer, uint8_
 	EXIT_NOT_IMPLEMENTED(access != 1 || mask_op != 0 || flush != 0 || value > UINT32_MAX);
 	return AppendCommandRecord(reinterpret_cast<uint64_t>(command_buffer),
 	                           CommandBufferState::WaitCommand {index, value, compare, true},
-	                           0x20)
+	                           0x20, "WaitOnCounter")
 	           ? OK
 	           : LibKernel::KERNEL_ERROR_EBUSY;
 }
 
 static int AppendWriteAddressCommand(void* command_buffer, volatile uint64_t* address,
-                                     uint64_t value, uint64_t record_size) {
+                                     uint64_t value, uint64_t record_size, const char* op) {
 	if (command_buffer == nullptr || address == nullptr ||
 	    (reinterpret_cast<uint64_t>(address) & 7) != 0) {
 		return LibKernel::KERNEL_ERROR_EINVAL;
@@ -2044,7 +2075,7 @@ static int AppendWriteAddressCommand(void* command_buffer, volatile uint64_t* ad
 	return AppendCommandRecord(
 	           reinterpret_cast<uint64_t>(command_buffer),
 	           CommandBufferState::WriteAddressCommand {reinterpret_cast<uint64_t>(address), value},
-	           record_size)
+	           record_size, op)
 	           ? OK
 	           : LibKernel::KERNEL_ERROR_EBUSY;
 }
@@ -2053,7 +2084,8 @@ static int KYTY_SYSV_ABI CommandBufferWriteAddress(void* command_buffer, volatil
                                                    uint64_t value, uint32_t) {
 	PRINT_NAME();
 
-	return AppendWriteAddressCommand(command_buffer, address, value, WriteAddressRecordSize(value));
+	return AppendWriteAddressCommand(command_buffer, address, value, WriteAddressRecordSize(value),
+	                                 "WriteAddress");
 }
 
 static int KYTY_SYSV_ABI CommandBufferWriteAddressOnCompletion(void*              command_buffer,
@@ -2061,7 +2093,8 @@ static int KYTY_SYSV_ABI CommandBufferWriteAddressOnCompletion(void*            
                                                                uint64_t           value) {
 	PRINT_NAME();
 
-	return AppendWriteAddressCommand(command_buffer, address, value, WriteAddressRecordSize(value));
+	return AppendWriteAddressCommand(command_buffer, address, value, WriteAddressRecordSize(value),
+	                                 "WriteAddressOnCompletion");
 }
 
 static int KYTY_SYSV_ABI CommandBufferWriteCounter(void* command_buffer, uint8_t index,
@@ -2076,7 +2109,7 @@ static int KYTY_SYSV_ABI CommandBufferWriteCounter(void* command_buffer, uint8_t
 	return AppendCommandRecord(reinterpret_cast<uint64_t>(command_buffer),
 	                           CommandBufferState::WriteCounterCommand {
 	                               index, static_cast<uint32_t>(value)},
-	                           0x20)
+	                           0x20, "WriteCounter")
 	           ? OK
 	           : LibKernel::KERNEL_ERROR_EBUSY;
 }
@@ -2085,7 +2118,7 @@ static int KYTY_SYSV_ABI CommandBufferWriteCounterOnCompletion(void* command_buf
                                                                uint8_t, uint64_t, uint8_t) {
 	PRINT_NAME();
 
-	return AppendNoOpCommand(command_buffer, 0x20);
+	return AppendNoOpCommand(command_buffer, 0x20, "WriteCounterOnCompletion");
 }
 
 static int KYTY_SYSV_ABI CommandBufferWriteAddressFromTimeCounter(void*              command_buffer,
@@ -2093,14 +2126,16 @@ static int KYTY_SYSV_ABI CommandBufferWriteAddressFromTimeCounter(void*         
                                                                   uint32_t) {
 	PRINT_NAME();
 
-	return AppendWriteAddressCommand(command_buffer, address, uint64_t {0}, 0x20);
+	return AppendWriteAddressCommand(command_buffer, address, uint64_t {0}, 0x20,
+	                                 "WriteAddressFromTimeCounter");
 }
 
 static int KYTY_SYSV_ABI CommandBufferWriteAddressFromTimeCounterOnCompletion(
     void* command_buffer, volatile uint64_t* address) {
 	PRINT_NAME();
 
-	return AppendWriteAddressCommand(command_buffer, address, uint64_t {0}, 0x20);
+	return AppendWriteAddressCommand(command_buffer, address, uint64_t {0}, 0x20,
+	                                 "WriteAddressFromTimeCounterOnCompletion");
 }
 
 static int KYTY_SYSV_ABI CommandBufferWriteAddressFromCounter(void*              command_buffer,
@@ -2108,14 +2143,16 @@ static int KYTY_SYSV_ABI CommandBufferWriteAddressFromCounter(void*             
                                                               uint32_t) {
 	PRINT_NAME();
 
-	return AppendWriteAddressCommand(command_buffer, address, uint64_t {0}, 0x20);
+	return AppendWriteAddressCommand(command_buffer, address, uint64_t {0}, 0x20,
+	                                 "WriteAddressFromCounter");
 }
 
 static int KYTY_SYSV_ABI CommandBufferWriteAddressFromCounterOnCompletion(
     void* command_buffer, volatile uint64_t* address, uint8_t) {
 	PRINT_NAME();
 
-	return AppendWriteAddressCommand(command_buffer, address, uint64_t {0}, 0x20);
+	return AppendWriteAddressCommand(command_buffer, address, uint64_t {0}, 0x20,
+	                                 "WriteAddressFromCounterOnCompletion");
 }
 
 static int KYTY_SYSV_ABI CommandBufferWriteAddressFromCounterPair(void*              command_buffer,
@@ -2123,14 +2160,16 @@ static int KYTY_SYSV_ABI CommandBufferWriteAddressFromCounterPair(void*         
                                                                   uint8_t, uint32_t) {
 	PRINT_NAME();
 
-	return AppendWriteAddressCommand(command_buffer, address, uint64_t {0}, 0x20);
+	return AppendWriteAddressCommand(command_buffer, address, uint64_t {0}, 0x20,
+	                                 "WriteAddressFromCounterPair");
 }
 
 static int KYTY_SYSV_ABI CommandBufferWriteAddressFromCounterPairOnCompletion(
     void* command_buffer, volatile uint64_t* address, uint8_t) {
 	PRINT_NAME();
 
-	return AppendWriteAddressCommand(command_buffer, address, uint64_t {0}, 0x20);
+	return AppendWriteAddressCommand(command_buffer, address, uint64_t {0}, 0x20,
+	                                 "WriteAddressFromCounterPairOnCompletion");
 }
 
 static int KYTY_SYSV_ABI AprCommandBufferReadFileGather(void*    command_buffer, uint64_t, uint64_t,
@@ -2154,7 +2193,7 @@ static int KYTY_SYSV_ABI AprCommandBufferReadFileGather(void*    command_buffer,
 
 	return AppendReadFileRecord(command_buffer_addr, 0x18, state.gather_scatter_file_id,
 	                            state.gather_scatter_destination, size, file_offset,
-	                            AprReadGatherRecordSize(file_offset));
+	                            AprReadGatherRecordSize(file_offset), "AprReadFileGather");
 }
 
 static int KYTY_SYSV_ABI AprCommandBufferReadFileScatter(void* command_buffer, uint64_t, uint64_t,
@@ -2177,7 +2216,7 @@ static int KYTY_SYSV_ABI AprCommandBufferReadFileScatter(void* command_buffer, u
 
 	return AppendReadFileRecord(command_buffer_addr, 0x19, state.gather_scatter_file_id,
 	                            destination_addr, size, state.gather_scatter_file_offset,
-	                            READ_SCATTER_RECORD_SIZE);
+	                            READ_SCATTER_RECORD_SIZE, "AprReadFileScatter");
 }
 
 static int KYTY_SYSV_ABI AprCommandBufferReadFileGatherScatter(void* command_buffer, uint64_t,
@@ -2203,7 +2242,8 @@ static int KYTY_SYSV_ABI AprCommandBufferReadFileGatherScatter(void* command_buf
 
 	return AppendReadFileRecord(command_buffer_addr, 0x1a, state.gather_scatter_file_id,
 	                            destination_addr, size, file_offset,
-	                            AprReadGatherScatterRecordSize(file_offset));
+	                            AprReadGatherScatterRecordSize(file_offset),
+	                            "AprReadFileGatherScatter");
 }
 
 static int KYTY_SYSV_ABI AprCommandBufferResetGatherScatterState(void* command_buffer, uint64_t,
@@ -2307,7 +2347,7 @@ static int KYTY_SYSV_ABI AmmCommandBufferMap(void* command_buffer, uint64_t va, 
 	command.prot = prot;
 
 	return AppendCommandRecord(reinterpret_cast<uint64_t>(command_buffer), command,
-	                           AMM_MAP_RECORD_SIZE)
+	                           AMM_MAP_RECORD_SIZE, "AmmMap")
 	           ? OK
 	           : LibKernel::KERNEL_ERROR_EBUSY;
 }
@@ -2330,7 +2370,7 @@ static int KYTY_SYSV_ABI AmmCommandBufferMapWithGpuMaskId(void* command_buffer, 
 	command.gpu_mask_id = gpu_mask_id;
 
 	return AppendCommandRecord(reinterpret_cast<uint64_t>(command_buffer), command,
-	                           AMM_MAP_RECORD_SIZE)
+	                           AMM_MAP_RECORD_SIZE, "AmmMapWithGpuMaskId")
 	           ? OK
 	           : LibKernel::KERNEL_ERROR_EBUSY;
 }
@@ -2354,7 +2394,7 @@ static int KYTY_SYSV_ABI AmmCommandBufferMapDirect(void* command_buffer, uint64_
 	command.prot        = prot;
 
 	return AppendCommandRecord(reinterpret_cast<uint64_t>(command_buffer), command,
-	                           AMM_MAP_DIRECT_RECORD_SIZE)
+	                           AMM_MAP_DIRECT_RECORD_SIZE, "AmmMapDirect")
 	           ? OK
 	           : LibKernel::KERNEL_ERROR_EBUSY;
 }
@@ -2380,7 +2420,7 @@ static int KYTY_SYSV_ABI AmmCommandBufferMapDirectWithGpuMaskId(void* command_bu
 	command.gpu_mask_id = gpu_mask_id;
 
 	return AppendCommandRecord(reinterpret_cast<uint64_t>(command_buffer), command,
-	                           AMM_MAP_DIRECT_RECORD_SIZE)
+	                           AMM_MAP_DIRECT_RECORD_SIZE, "AmmMapDirectWithGpuMaskId")
 	           ? OK
 	           : LibKernel::KERNEL_ERROR_EBUSY;
 }
@@ -2399,7 +2439,7 @@ static int KYTY_SYSV_ABI AmmCommandBufferMapAsPrt(void* command_buffer, uint64_t
 	command.size = size;
 
 	return AppendCommandRecord(reinterpret_cast<uint64_t>(command_buffer), command,
-	                           AMM_MAP_AS_PRT_RECORD_SIZE)
+	                           AMM_MAP_AS_PRT_RECORD_SIZE, "AmmMapAsPrt")
 	           ? OK
 	           : LibKernel::KERNEL_ERROR_EBUSY;
 }
@@ -2423,7 +2463,7 @@ static int KYTY_SYSV_ABI AmmCommandBufferAllocatePaForPrt(void* command_buffer, 
 	               ~(PROT_AMPR_READ | PROT_AMPR_WRITE | PROT_ACP_READ | PROT_ACP_WRITE);
 
 	return AppendCommandRecord(reinterpret_cast<uint64_t>(command_buffer), command,
-	                           AMM_MAP_RECORD_SIZE)
+	                           AMM_MAP_RECORD_SIZE, "AmmAllocatePaForPrt")
 	           ? OK
 	           : LibKernel::KERNEL_ERROR_EBUSY;
 }
@@ -2447,7 +2487,7 @@ static int KYTY_SYSV_ABI AmmCommandBufferRemapIntoPrt(void* command_buffer, uint
 	command.prot   = prot;
 
 	auto* record = AppendCommandRecord(reinterpret_cast<uint64_t>(command_buffer), command,
-	                                   AMM_REMAP_RECORD_SIZE);
+	                                   AMM_REMAP_RECORD_SIZE, "AmmRemapIntoPrt");
 	if (record == nullptr) {
 		return LibKernel::KERNEL_ERROR_EBUSY;
 	}
@@ -2471,7 +2511,7 @@ static int KYTY_SYSV_ABI AmmCommandBufferUnmapToPrt(void* command_buffer, uint64
 	command.size = size;
 
 	auto* record = AppendCommandRecord(reinterpret_cast<uint64_t>(command_buffer), command,
-	                                   AMM_MAP_AS_PRT_RECORD_SIZE);
+	                                   AMM_MAP_AS_PRT_RECORD_SIZE, "AmmUnmapToPrt");
 	if (record == nullptr) {
 		return LibKernel::KERNEL_ERROR_EBUSY;
 	}
@@ -2491,7 +2531,7 @@ static int KYTY_SYSV_ABI AmmCommandBufferUnmap(void* command_buffer, uint64_t va
 	command.size = size;
 
 	return AppendCommandRecord(reinterpret_cast<uint64_t>(command_buffer), command,
-	                           AMM_UNMAP_RECORD_SIZE)
+	                           AMM_UNMAP_RECORD_SIZE, "AmmUnmap")
 	           ? OK
 	           : LibKernel::KERNEL_ERROR_EBUSY;
 }
