@@ -42,6 +42,7 @@ public:
 	void                                    InitializeGpu(VideoOut::VideoOutDriver* video_out);
 	void                                    ShutdownGpu();
 	[[nodiscard]] GuestGpu&                 GetGpu() const;
+	[[nodiscard]] uint64_t                  CurrentFrameNum() const noexcept;
 	[[nodiscard]] VideoOut::VideoOutDriver& GetVideoOut() const;
 
 	Common::Mutex&      GetMutex() { return m_mutex; }

@@ -29,11 +29,13 @@ void CommandBuffer::Begin() {
 	auto result = buffer.begin(&begin_info);
 
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
+	m_graphics.breadcrumbs.BeginSubmit(m_graphics, buffer, m_context.CurrentFrameNum());
 }
 
 void CommandBuffer::End() const {
 	EndRendering();
 	auto buffer = Handle();
+	m_graphics.breadcrumbs.EndSubmitRecording(m_graphics, buffer);
 
 	auto result = buffer.end();
 

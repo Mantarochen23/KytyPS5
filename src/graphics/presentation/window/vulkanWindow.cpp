@@ -403,13 +403,18 @@ static vk::Device VulkanCreateDevice(GraphicContext&          graphics,
 	                   vk::PhysicalDeviceAccelerationStructureFeaturesKHR,
 	                   vk::PhysicalDeviceRayQueryFeaturesKHR,
 	                   vk::PhysicalDeviceCooperativeMatrixFeaturesKHR,
-	                   vk::PhysicalDeviceShaderFloat8FeaturesEXT>
+	                   vk::PhysicalDeviceShaderFloat8FeaturesEXT,
+	                   vk::PhysicalDeviceFaultFeaturesEXT>
 	    supported;
 	auto& [supported2, supported12, supported13, robustness2, workgroup_layout, mesh,
 	       feedback_layout, feedback_dynamic, provoking_vertex, maintenance8, shader_clock,
 	       image_atomic_int64, conditional_rendering, barycentric, compute_derivatives,
-	       acceleration_structure, ray_query, cooperative_matrix, float8] = supported;
+	       acceleration_structure, ray_query, cooperative_matrix, float8, device_fault] = supported;
 	graphics.memory_budget_ext_enabled = add(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
+	graphics.buffer_marker_amd_enabled = add(VK_AMD_BUFFER_MARKER_EXTENSION_NAME);
+	if (!add(VK_EXT_DEVICE_FAULT_EXTENSION_NAME)) {
+		supported.unlink<vk::PhysicalDeviceFaultFeaturesEXT>();
+	}
 	add(VK_EXT_DEPTH_RANGE_UNRESTRICTED_EXTENSION_NAME);
 	const bool extended_dynamic_state = add(VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME);
 	if (!add(VK_KHR_WORKGROUP_MEMORY_EXPLICIT_LAYOUT_EXTENSION_NAME)) {
@@ -482,6 +487,9 @@ static vk::Device VulkanCreateDevice(GraphicContext&          graphics,
 	}
 	graphics.shader_image_int64_atomics_enabled = image_atomic_int64.shaderImageInt64Atomics;
 	graphics.sampler_filter_minmax_enabled      = supported12.samplerFilterMinmax;
+	graphics.device_fault_ext_enabled           = device_fault.deviceFault == VK_TRUE;
+	graphics.device_fault_vendor_binary_enabled =
+	    graphics.device_fault_ext_enabled && device_fault.deviceFaultVendorBinary == VK_TRUE;
 
 	auto features12                     = WindowContext::RequiredVulkan12Features();
 	features12.shaderSharedInt64Atomics = supported12.shaderSharedInt64Atomics;
@@ -554,6 +562,10 @@ static vk::Device VulkanCreateDevice(GraphicContext&          graphics,
 	     graphics.maintenance8_enabled ? "true" : "false");
 	LOGF("Vulkan depth feedback support: %s\n",
 	     graphics.attachment_feedback_loop_enabled ? "true" : "false");
+	LOGF("Vulkan device fault support: %s (vendor_binary=%s), AMD buffer marker: %s\n",
+	     graphics.device_fault_ext_enabled ? "true" : "false",
+	     graphics.device_fault_vendor_binary_enabled ? "true" : "false",
+	     graphics.buffer_marker_amd_enabled ? "true" : "false");
 	if (graphics.mesh_shader_enabled) {
 		LOGF("Vulkan MeshEXT: invocations=%u vertices=%u primitives=%u shared=%u\n",
 		     graphics.mesh_shader_properties.maxMeshWorkGroupInvocations,
@@ -653,6 +665,7 @@ static vk::Device VulkanCreateDevice(GraphicContext&          graphics,
 	    shader_clock, conditional_rendering, compute_derivatives,
 	    vk::PhysicalDeviceAccelerationStructureFeaturesKHR {.accelerationStructure = VK_TRUE},
 	    vk::PhysicalDeviceRayQueryFeaturesKHR {.rayQuery = VK_TRUE}, cooperative_matrix, float8,
+	    device_fault,
 	    // The renderer only uses the Vulkan 1.3 core dynamic states, but RADV (Mesa 26.3) creates
 	    // its PS epilog cache only when this EXT feature is enabled and crashes in vkCmdDraw when
 	    // a depth- or stencil-writing fragment shader needs an epilog.
@@ -697,6 +710,9 @@ static vk::Device VulkanCreateDevice(GraphicContext&          graphics,
 		create.unlink<vk::PhysicalDeviceCooperativeMatrixFeaturesKHR>();
 	}
 	if (!float8.shaderFloat8) create.unlink<vk::PhysicalDeviceShaderFloat8FeaturesEXT>();
+	if (!graphics.device_fault_ext_enabled) {
+		create.unlink<vk::PhysicalDeviceFaultFeaturesEXT>();
+	}
 	if (!ray_query_enabled) {
 		create.unlink<vk::PhysicalDeviceAccelerationStructureFeaturesKHR>();
 		create.unlink<vk::PhysicalDeviceRayQueryFeaturesKHR>();
@@ -886,6 +902,8 @@ void WindowContext::CreateVulkan() {
 
 	VulkanExtensions r;
 	VulkanGetExtensions(r);
+	graphic_ctx.debug_utils_ext_enabled =
+	    HasExtension(r.required_extensions, VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
 	Vr::OpenXrAppendExtensions(r.required_extensions, r.available_extensions, false);
 	Dlss::AppendExtensions(r.required_extensions, r.available_extensions, false);
 	VulkanCheckInstanceVersion();
@@ -1051,7 +1069,8 @@ WindowContext::~WindowContext() {
 	Fsr::Shutdown();
 
 	if (graphic_ctx.device != nullptr) {
-		RequireVulkanSuccess(graphic_ctx.device.waitIdle(), "wait for Vulkan device shutdown");
+		RequireVulkanSuccess(graphic_ctx, graphic_ctx.device.waitIdle(),
+		                     "wait for Vulkan device shutdown");
 		graphic_ctx.DestroyAllocator();
 		graphic_ctx.device.destroy(nullptr);
 		graphic_ctx.device = nullptr;

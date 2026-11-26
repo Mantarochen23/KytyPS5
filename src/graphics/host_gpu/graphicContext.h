@@ -4,6 +4,7 @@
 #include "common/abi.h"
 #include "common/common.h"
 #include "common/threads.h"
+#include "graphics/host_gpu/deviceFault.h"
 #include "graphics/host_gpu/vulkanCommon.h" // IWYU pragma: export
 
 #include <map>
@@ -28,6 +29,10 @@ struct GraphicContext {
 	vk::Device                         device                                = nullptr;
 	VmaAllocator                       allocator                             = nullptr;
 	bool                               memory_budget_ext_enabled             = false;
+	bool                               device_fault_ext_enabled              = false;
+	bool                               device_fault_vendor_binary_enabled    = false;
+	bool                               buffer_marker_amd_enabled             = false;
+	bool                               debug_utils_ext_enabled               = false;
 	bool                               compute_subgroup_size_control_enabled = false;
 	bool                               shader_image_int64_atomics_enabled    = false;
 	bool                               attachment_feedback_loop_enabled      = false;
@@ -54,6 +59,7 @@ struct GraphicContext {
 	Common::Mutex                      queue_mutex;
 	uint32_t                           queue_family = static_cast<uint32_t>(-1);
 	vk::Queue                          queue        = nullptr;
+	GpuBreadcrumbTracker               breadcrumbs;
 
 	[[nodiscard]] const vk::PhysicalDeviceProperties& GetPhysicalDeviceProperties() const {
 		return physical_device_properties;

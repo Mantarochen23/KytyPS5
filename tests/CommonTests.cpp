@@ -23,6 +23,7 @@
 #include <string_view>
 #include <thread>
 #include <tuple>
+#include <vector>
 
 #ifdef __linux__
 #include <sched.h>
@@ -354,6 +355,7 @@ TEST(Thread, ReservesTheFastestCoreAndRestoresTheProcessAffinity) {
 }
 #endif
 
+<<<<<<< HEAD
 TEST(Config, ParseTraceCallsOptionHandlesBareAndFiltered) {
 	Config::ConfigOptions options;
 	EXPECT_TRUE(Config::ParseTraceCallsOption("--trace-calls", options));
@@ -407,6 +409,38 @@ TEST(Libs, CallRingWrapsAroundAndIteratesOldestFirst) {
 		seen++;
 	});
 	EXPECT_EQ(seen, Libs::kCallRingSize);
+}
+
+TEST(Config, ParseShaderHashListAndSkipLookup) {
+	std::vector<uint64_t> hashes;
+	EXPECT_TRUE(Config::ParseShaderHashList("", hashes));
+	EXPECT_TRUE(hashes.empty());
+
+	EXPECT_TRUE(Config::ParseShaderHashList(
+	    "0x0123456789abcdef, FEDCBA9876543210; 42 # trailing comment\n0Xdeadbeef\n", hashes));
+	ASSERT_EQ(hashes.size(), 4u);
+	EXPECT_EQ(hashes[0], 0x0123456789abcdefull);
+	EXPECT_EQ(hashes[1], 0xfedcba9876543210ull);
+	EXPECT_EQ(hashes[2], 0x42ull);
+	EXPECT_EQ(hashes[3], 0xdeadbeefull);
+
+	const size_t before_invalid = hashes.size();
+	EXPECT_FALSE(Config::ParseShaderHashList("0x1234,not_hex", hashes));
+	EXPECT_FALSE(Config::ParseShaderHashList("0x1234567890abcdef0", hashes));
+	EXPECT_FALSE(Config::ParseShaderHashList("0x", hashes));
+	EXPECT_EQ(hashes.size(), before_invalid);
+
+	Config::Initialize();
+	Config::ConfigOptions opts;
+	opts.skip_shader_hashes = {0xdeadbeefull, 0x0123456789abcdefull, 0xdeadbeefull};
+	Config::Load(opts);
+	if (const char* env = std::getenv("KYTY_SKIP_SHADERS"); env == nullptr || env[0] == '\0') {
+		EXPECT_EQ(Config::GetSkipShaderHashes().size(), 2u);
+	}
+	EXPECT_TRUE(Config::ShouldSkipShader(0xdeadbeefull));
+	EXPECT_TRUE(Config::ShouldSkipShader(0x0123456789abcdefull));
+	EXPECT_FALSE(Config::ShouldSkipShader(0x1111ull));
+	Config::Shutdown();
 }
 
 } // namespace

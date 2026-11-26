@@ -54,6 +54,19 @@ The script refuses to start while another sandboxed run holds the GPU.
   thrown away.
 - Fatal errors outside such a scope print `--- Host backtrace ---` (resolve with
   `addr2line -Cfe kyty_emulator <offset>`); `KYTY_FATAL_ABORT=1` leaves a core dump.
+- GPU hang / `VK_ERROR_DEVICE_LOST` triage: `VK_EXT_device_fault` and `VK_AMD_buffer_marker` are
+  enabled automatically when supported. Every submit records draw/dispatch breadcrumbs with shader
+  hashes (plus `VK_EXT_debug_utils` command labels when `RADV_DEBUG` or `--graphics-debug-dump` is
+  active). On `VK_ERROR_DEVICE_LOST` (`vkQueueSubmit`, `vkQueuePresentKHR`, `vkAcquireNextImageKHR`,
+  `vkWaitSemaphores`, `vkGetSemaphoreCounterValue`, or `waitIdle`), the emulator queries
+  `VK_EXT_device_fault` and prints `=== GPU DEVICE LOST TRIAGE ===` with fault addresses/vendor
+  codes, GPU marker progress, recent/in-flight submits, suspect ops, shader hashes, and a
+  `bisect_hint` line. `RADV_DEBUG=hang tools/bringup/run.sh <label>` also preserves RADV's
+  `radv_dumps_*` folder in `<run>/radv/`.
+- `--skip-shaders <hashes|@file>` / `KYTY_SKIP_SHADERS=<comma-separated hex hashes>`: skip draws
+  and dispatches matching any listed shader hash (with or without `--keep-going`) to bisect a
+  hanging shader in a few runs. Skipped uses are logged as `!!! SHADER SKIP (skip-shaders)` and
+  summarized by `triage.py`.
 - Existing upstream switches worth knowing: `--shader-log-direction File`, `--graphics-debug-dump`
   (dumps every shader and IR), `--vulkan-validation`, `--gpu-assisted-validation`,
   `--command-buffer-dump`, `--rd` (RenderDoc), `--profile` (Tracy), `--perf-overlay`.

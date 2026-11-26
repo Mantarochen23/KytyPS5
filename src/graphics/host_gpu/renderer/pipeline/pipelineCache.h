@@ -271,6 +271,7 @@ private:
 	                                   ShaderRecompiler::IR::PushData::Window& push_data);
 	void RecordShaderFailure(const ShaderParams& params, std::string_view reason, const char* file,
 	                         int line);
+	void NoteBisectSkippedShader(uint64_t hash, ShaderType stage);
 	void NoteSkippedUse(uint64_t hash);
 	bool                                   m_lookup_key_ready = false;
 	std::unordered_map<uint64_t, uint64_t> m_skipped_uses; // By shader hash.

@@ -331,11 +331,15 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 		submit_info.signalSemaphoreCount = submit.num_signal_semaphores;
 		submit_info.pSignalSemaphores    = submit.signal_semaphores.data();
 
+		graphics.breadcrumbs.MarkSubmitted(tick, m_master.KnownGpuTick());
 		result = graphics.queue.submit(1, &submit_info, nullptr);
 	}
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::QueueSubmits);
 
 	if (result != vk::Result::eSuccess) {
+		if (result == vk::Result::eErrorDeviceLost) {
+			ReportDeviceLost(graphics, "vkQueueSubmit", result, tick, m_master.KnownGpuTick());
+		}
 		EXIT("vkQueueSubmit failed: %s, tick=%" PRIu64 "\n", vk::to_string(result).c_str(), tick);
 	}
 

@@ -288,6 +288,16 @@ ShaderModule& PipelineCache::CompileModule(Program& program, const ProgramKey& k
 	return module;
 }
 
+void PipelineCache::NoteBisectSkippedShader(uint64_t hash, ShaderType stage) {
+	if (m_skipped_uses.contains(hash)) {
+		NoteSkippedUse(hash);
+		return;
+	}
+	m_skipped_uses[hash] = 1;
+	PipelineCacheLog("!!! SHADER SKIP (skip-shaders) shader=0x{:016x} stage={}: user skip list",
+	                 hash, ShaderRecompiler::StageName(stage));
+}
+
 void PipelineCache::NoteSkippedUse(uint64_t hash) {
 	// Powers of two only: enough to rank skipped shaders by use without flooding the log.
 	const auto count = ++m_skipped_uses[hash];
@@ -329,6 +339,16 @@ void PipelineCache::RecordShaderFailure(const ShaderParams& params, std::string_
 template <typename InputInfo>
 const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputInfo& input_info,
                                               ShaderRecompiler::IR::PushData::Window& push_data) {
+	if (Config::ShouldSkipShader(params.hash)) {
+		ShaderType stage = ShaderType::Compute;
+		if constexpr (std::is_same_v<InputInfo, ShaderVertexInputInfo>) {
+			stage = input_info.logical_stage;
+		} else if constexpr (std::is_same_v<InputInfo, ShaderPixelInputInfo>) {
+			stage = ShaderType::Pixel;
+		}
+		NoteBisectSkippedShader(params.hash, stage);
+		return nullptr;
+	}
 	if (!Config::KeepGoingEnabled()) {
 		return GetProgramImpl(params, input_info, push_data);
 	}
@@ -487,6 +507,9 @@ PipelineCache::PipelineCache(GraphicContext&                         graphics,
     : m_graphics(graphics), m_image_heap(image_heap),
       m_next_driver_cache_save(std::chrono::steady_clock::now() + DriverCacheSaveInterval) {
 	EXIT_NOT_IMPLEMENTED(!Common::Thread::IsMainThread());
+	if (const auto& skipped = Config::GetSkipShaderHashes(); !skipped.empty()) {
+		PipelineCacheLog("Shader skip list active: {} hash(es)", skipped.size());
+	}
 	InitializeDriverCache();
 	WarmUp(shader_store);
 }

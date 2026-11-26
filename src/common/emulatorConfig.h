@@ -3,8 +3,9 @@
 
 #include "common/common.h"
 
-#include <cstddef>
 #include <array>
+#include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <limits>
 #include <optional>
@@ -90,6 +91,7 @@ struct ConfigOptions {
 	bool                   trace_calls_enabled         = false;
 	std::vector<std::string> trace_calls_filter;
 	int32_t                auto_cross_seconds          = 0;
+	std::vector<uint64_t>  skip_shader_hashes;
 	bool                   shader_cache_enabled        = false;
 	LogDirection           shader_log_direction        = LogDirection::Silent;
 	std::filesystem::path  shader_log_folder           = "_Shaders";
@@ -171,6 +173,9 @@ bool                   KeepGoingEnabled();
 bool                   TraceCallsEnabled();
 const std::vector<std::string>& TraceCallsFilter();
 int32_t                AutoCrossSeconds();
+bool                   ParseShaderHashList(std::string_view text, std::vector<uint64_t>& out);
+bool                   ShouldSkipShader(uint64_t hash);
+const std::vector<uint64_t>& GetSkipShaderHashes();
 bool                   ShaderCacheEnabled();
 LogDirection           GetShaderLogDirection();
 std::filesystem::path  GetShaderLogFolder();

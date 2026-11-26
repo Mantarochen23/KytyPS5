@@ -506,7 +506,7 @@ void Swapchain::Destroy() {
 
 	{
 		Common::LockGuard queue_lock(graphics.queue_mutex);
-		RequireVulkanSuccess(graphics.queue.waitIdle(), "wait for swapchain queue");
+		RequireVulkanSuccess(graphics, graphics.queue.waitIdle(), "wait for swapchain queue");
 	}
 	if (m_system_overlay != nullptr) {
 		m_system_overlay->ReleaseVulkan();
@@ -594,6 +594,9 @@ Swapchain::Status Swapchain::AcquireNextImage(CommandScheduler& scheduler) {
 		case vk::Result::eErrorSurfaceLostKHR:
 			LOGF("vkAcquireNextImageKHR returned vk::Result::eErrorSurfaceLostKHR\n");
 			return Status::SurfaceLost;
+		case vk::Result::eErrorDeviceLost:
+			ReportDeviceLost(m_window.graphic_ctx, "vkAcquireNextImageKHR", result);
+			EXIT("vkAcquireNextImageKHR failed: %s\n", vk::to_string(result).c_str());
 		default: EXIT("vkAcquireNextImageKHR failed: %s\n", vk::to_string(result).c_str());
 	}
 	return Status::Success;
@@ -924,6 +927,9 @@ Swapchain::Status Swapchain::Present() {
 		case vk::Result::eErrorSurfaceLostKHR:
 			LOGF("vkQueuePresentKHR returned vk::Result::eErrorSurfaceLostKHR\n");
 			return Status::SurfaceLost;
+		case vk::Result::eErrorDeviceLost:
+			ReportDeviceLost(m_window.graphic_ctx, "vkQueuePresentKHR", result);
+			EXIT("vkQueuePresentKHR failed: %s\n", vk::to_string(result).c_str());
 		default: EXIT("vkQueuePresentKHR failed: %s\n", vk::to_string(result).c_str());
 	}
 	m_frame_index = (m_frame_index + 1u) % static_cast<uint32_t>(m_images.size());

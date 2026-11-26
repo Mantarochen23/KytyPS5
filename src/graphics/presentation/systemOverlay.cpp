@@ -1042,7 +1042,7 @@ struct SystemOverlay::Impl {
 		g_splash_active.store(false, std::memory_order_release);
 		if (splash_dds[0] || splash_dds[1]) {
 			Common::LockGuard lock(graphics.queue_mutex);
-			RequireVulkanSuccess(graphics.queue.waitIdle(), "retire splash images");
+			RequireVulkanSuccess(graphics, graphics.queue.waitIdle(), "retire splash images");
 			splash_dds = {};
 		}
 	}

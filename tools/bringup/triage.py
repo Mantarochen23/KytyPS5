@@ -6,7 +6,7 @@ path = sys.argv[1]
 ts_re = re.compile(rb'time = ([0-9.]+)')
 hash_re = re.compile(rb'hash=(0x[0-9a-f]{16})')
 stage_re = re.compile(rb'ShaderRecompiler (\w\w) phase end: hash=(0x[0-9a-f]{16}) (.+?) (?:blocks=|elapsed)')
-skip_re = re.compile(rb'!!! SHADER (?:\w+ )?SKIP \(([^)]*)\) shader=(0x[0-9a-f]{16})(?: stage=(\w+) at (\S+?):)?(?:[^:]*: (.*))?')
+skip_re = re.compile(rb'!!! SHADER (?:\w+ )?SKIP \(([^)]*)\) shader=(0x[0-9a-f]{16})(?: stage=(\w+)(?: at (\S+?):)?)?(?:[^:]*: (.*))?')
 uses_re = re.compile(rb'!!! SHADER SKIP USES shader=(0x[0-9a-f]{16}) count=(\d+)')
 clock_re = re.compile(rb'^\[\d+\]\[(\d\d):(\d\d):(\d\d)\.(\d+)\]')
 norm = lambda b: re.sub(rb'0x[0-9a-fA-F]+', b'0xN', re.sub(rb'\b\d+\b', b'N', b))
@@ -19,12 +19,21 @@ skips = collections.OrderedDict()
 bang = collections.Counter(); unresolved_called = collections.Counter()
 flips = timedout = lines = 0
 flip_t = collections.Counter(); shader_t = collections.Counter()
-fatal = []; tail = collections.deque(maxlen=40); first_fatal_line = None
+fatal = []; device_lost = []; in_device_lost = False; tail = collections.deque(maxlen=40); first_fatal_line = None
 with open(path, 'rb') as f:
     for line in f:
         lines += 1
         m = ts_re.search(line)
         if m and line.startswith(b'Controller'):
+            continue
+        if line.startswith(b'=== GPU DEVICE LOST TRIAGE ==='):
+            in_device_lost = True
+            device_lost.append(line.rstrip().decode(errors='replace'))
+            continue
+        if in_device_lost:
+            device_lost.append(line.rstrip().decode(errors='replace')[:600])
+            if line.startswith(b'=== END GPU DEVICE LOST TRIAGE ==='):
+                in_device_lost = False
             continue
         if line.startswith(b'Controller'): continue
         if line.startswith(b'@@T '):
@@ -80,7 +89,7 @@ out = dict(log=path, lines=lines, run_seconds=round(t, 1), shaders_seen=len(comp
            last_phase_histogram=dict(phases.most_common(12)),
            new_shaders_per_10s=dict(sorted(shader_t.items())), flip_waits=flips, flip_wait_timeouts=timedout,
            flip_waits_per_10s=dict(sorted(flip_t.items())), skipped=skips, other_bang_lines=dict(bang.most_common(25)),
-           unresolved_stubs_called=dict(unresolved_called), fatal=fatal)
+           unresolved_stubs_called=dict(unresolved_called), device_lost=device_lost, fatal=fatal)
 if '--json' in sys.argv: json.dump(out, open(sys.argv[sys.argv.index('--json') + 1], 'w'), indent=1)
 print(f"log {path}: {lines} lines, ~{out['run_seconds']} s of wall time")
 print(f"shaders seen: {len(compiled)}  by stage: {dict(stages)}")
@@ -109,4 +118,7 @@ if calls:
         fs = {k.split('::')[-1]: v[0] for k, v in calls.items() if k.startswith(lib + '::')}
         print(f"  {lib}: {fs if fs else 'never called'}")
 print("unresolved stubs called:", dict(unresolved_called))
+if device_lost:
+    print("GPU DEVICE LOST TRIAGE:")
+    [print("  " + x) for x in device_lost]
 print("FATAL:" if fatal else "no fatal block"); [print("  " + x) for x in fatal]

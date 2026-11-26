@@ -433,9 +433,17 @@ bool CopyToSwapchain(const VulkanImage& staging) {
 			Common::LockGuard queue_lock(g.graphics->queue_mutex);
 			result = g.graphics->queue.submit(1, &submit, g.fence);
 		}
-		copied = result == vk::Result::eSuccess &&
-		         g.graphics->device.waitForFences(1, &g.fence, VK_TRUE, UINT64_MAX) ==
-		             vk::Result::eSuccess;
+		if (result == vk::Result::eErrorDeviceLost) {
+			ReportDeviceLost(*g.graphics, "vkQueueSubmit(OpenXR)", result);
+		}
+		vk::Result wait_result = vk::Result::eSuccess;
+		if (result == vk::Result::eSuccess) {
+			wait_result = g.graphics->device.waitForFences(1, &g.fence, VK_TRUE, UINT64_MAX);
+			if (wait_result == vk::Result::eErrorDeviceLost) {
+				ReportDeviceLost(*g.graphics, "vkWaitForFences(OpenXR)", wait_result);
+			}
+		}
+		copied = result == vk::Result::eSuccess && wait_result == vk::Result::eSuccess;
 	}
 	XrSwapchainImageReleaseInfo release {XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
 	Common::LockGuard           queue_lock(g.graphics->queue_mutex);

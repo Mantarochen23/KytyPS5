@@ -4,6 +4,8 @@
 #include "common/debugCounters.h"
 
 #include <algorithm>
+#include <charconv>
+#include <cstdlib>
 #include <memory>
 
 namespace Config {
@@ -29,6 +31,15 @@ void Load(const ConfigOptions& cfg) {
 	EXIT_IF(cfg.keyboard_player > static_cast<uint32_t>(MAX_PLAYERS));
 
 	*g_config = cfg;
+	if (const char* env_skip = std::getenv("KYTY_SKIP_SHADERS");
+	    env_skip != nullptr && env_skip[0] != '\0') {
+		if (!ParseShaderHashList(env_skip, g_config->skip_shader_hashes)) {
+			EXIT("invalid KYTY_SKIP_SHADERS value: %s\n", env_skip);
+		}
+	}
+	auto& skip = g_config->skip_shader_hashes;
+	std::ranges::sort(skip);
+	skip.erase(std::unique(skip.begin(), skip.end()), skip.end());
 	Common::DebugCounters::SetEnabled(cfg.perf_overlay_enabled);
 }
 
@@ -223,6 +234,66 @@ bool TraceCallsEnabled() {
 
 const std::vector<std::string>& TraceCallsFilter() {
 	return g_config->trace_calls_filter;
+}
+
+bool ParseShaderHashList(std::string_view text, std::vector<uint64_t>& out) {
+	std::vector<uint64_t> parsed;
+	size_t                pos = 0;
+	while (pos < text.size()) {
+		while (pos < text.size()) {
+			const char c = text[pos];
+			if (c == ',' || c == ';' || c == ' ' || c == '\t' || c == '\r' || c == '\n') {
+				++pos;
+				continue;
+			}
+			break;
+		}
+		if (pos >= text.size()) {
+			break;
+		}
+		if (text[pos] == '#') {
+			while (pos < text.size() && text[pos] != '\n') {
+				++pos;
+			}
+			continue;
+		}
+		const size_t start = pos;
+		while (pos < text.size()) {
+			const char c = text[pos];
+			if (c == ',' || c == ';' || c == ' ' || c == '\t' || c == '\r' || c == '\n' ||
+			    c == '#') {
+				break;
+			}
+			++pos;
+		}
+		std::string_view token = text.substr(start, pos - start);
+		if (token.starts_with("0x") || token.starts_with("0X")) {
+			token.remove_prefix(2);
+		}
+		if (token.empty() || token.size() > 16) {
+			return false;
+		}
+		uint64_t value = 0;
+		auto [end, ec] = std::from_chars(token.data(), token.data() + token.size(), value, 16);
+		if (ec != std::errc {} || end != token.data() + token.size()) {
+			return false;
+		}
+		parsed.push_back(value);
+	}
+	out.insert(out.end(), parsed.begin(), parsed.end());
+	return true;
+}
+
+bool ShouldSkipShader(uint64_t hash) {
+	if (g_config == nullptr) {
+		return false;
+	}
+	const auto& hashes = g_config->skip_shader_hashes;
+	return !hashes.empty() && std::ranges::binary_search(hashes, hash);
+}
+
+const std::vector<uint64_t>& GetSkipShaderHashes() {
+	return g_config->skip_shader_hashes;
 }
 
 bool ShaderCacheEnabled() {

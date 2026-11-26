@@ -49,6 +49,7 @@ bool GraphicContext::CreateAllocator() {
 		LOGF("vmaCreateAllocator failed: %s\n", vk::to_string(result).c_str());
 		return false;
 	}
+	breadcrumbs.Init(*this);
 	return true;
 }
 
@@ -56,6 +57,7 @@ void GraphicContext::DestroyAllocator() {
 	if (allocator == nullptr) {
 		return;
 	}
+	breadcrumbs.Shutdown(*this);
 	vmaDestroyAllocator(allocator);
 	allocator = nullptr;
 }

@@ -10,6 +10,8 @@
 #include <charconv>
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
+#include <sstream>
 #include <string_view>
 #include <vector>
 #include <magic_enum.hpp>
@@ -78,6 +80,9 @@ static void PrintUsage() {
 	         "                                       of two; with <lib[,lib]>, log every call with args/result).\n");
 	::printf("  --keep-going                         Debug: skip draws and dispatches whose shader fails to\n"
 	         "                                       compile, record them in _ShaderFailures/, keep running.\n");
+	::printf("  --skip-shaders <hashes|@file>        Debug: skip draws and dispatches matching any comma-\n"
+	         "                                       separated hex shader hash (or @path). Repeatable; also\n"
+	         "                                       reads KYTY_SKIP_SHADERS.\n");
 	::printf("  --shader-cache                       Keep compiled shaders and pipelines between boots.\n");
 	::printf("  --tessellation                      Draw tessellation patches; skipped by default.\n");
 	::printf("  --occlusion-queries                  Count occlusion query samples on the GPU.\n");
@@ -367,6 +372,26 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				return false;
 			}
 			options.config.auto_cross_seconds = seconds;
+		} else if (arg == "--skip-shaders") {
+			std::string text;
+			if (value.starts_with("@")) {
+				const auto path =
+				    Common::PathFromUtf8(Common::FixFilenameSlash(value.substr(1)));
+				std::ifstream file(path);
+				if (!file.is_open()) {
+					::printf("could not open --skip-shaders file: %s\n", value.c_str() + 1);
+					return false;
+				}
+				std::ostringstream ss;
+				ss << file.rdbuf();
+				text = ss.str();
+			} else {
+				text = value;
+			}
+			if (!Config::ParseShaderHashList(text, options.config.skip_shader_hashes)) {
+				::printf("invalid shader hash list for --skip-shaders: %s\n", value.c_str());
+				return false;
+			}
 		} else if (arg == "--user-id") {
 			if (!ParseUserId(value, options.config.user_id)) {
 				::printf("invalid user ID: %s\n", value.c_str());
