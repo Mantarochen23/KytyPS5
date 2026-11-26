@@ -39,7 +39,7 @@ struct Frame {
 
 // Explicit store format version. Bump manually only when recompiler output, SPIR-V profile, or
 // store record layout changes so rebuilds across branches keep reusing compatible warm stores.
-constexpr uint64_t kShaderStoreFormatVersion = 2;
+constexpr uint64_t kShaderStoreFormatVersion = 3;
 
 // What every record depends on besides its own fields.
 std::vector<uint8_t> StoreHeader(const GraphicContext& graphics) {

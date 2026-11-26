@@ -1375,6 +1375,21 @@ void DefineGetBdaPointer(EmitterState& state) {
 	    address);
 	const auto page64        = Binary(state, spv::OpShiftRightLogical, type, packed,
 	                                  ConstantU32(state, BufferCache::CACHING_PAGEBITS));
+	// A guest address outside both mapped windows has no table entry. Its page index must not
+	// reach the table load: the 32-bit byte offset wraps and reads outside the table buffer.
+	const auto mapped = Select(
+	    state, TypeBool(state), extended,
+	    Binary(state, spv::OpULessThan, TypeBool(state), page64,
+	           ConstantU64(state, BufferCache::CACHING_NUMPAGES)),
+	    Binary(state, spv::OpULessThan, TypeBool(state), address,
+	           ConstantU64(state, LOWER_ADDRESS_SIZE)));
+	const auto unmapped_label = state.builder.AllocateId();
+	const auto mapped_label   = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpSelectionMerge, mapped_label, spv::SelectionControlMaskNone);
+	state.builder.AddFunction(spv::OpBranchConditional, mapped, mapped_label, unmapped_label);
+	EmitLabel(state, unmapped_label);
+	state.builder.AddFunction(spv::OpReturnValue, ConstantU64(state, 0));
+	EmitLabel(state, mapped_label);
 	const auto page          = Unary(state, spv::OpUConvert, TypeU32(state), page64);
 	const auto entry_pointer = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpAccessChain, TypeStorageBufferElementPointer(state, 64),
