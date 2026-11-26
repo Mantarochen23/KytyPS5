@@ -28,6 +28,8 @@
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 repo=$(cd "$here/../.." && pwd)
+# Machine-local settings (KYTY_GAME and friends) live outside the repository.
+[ -f "$repo/../bringup-local.env" ] && . "$repo/../bringup-local.env"
 label=run
 if [ $# -gt 0 ] && [ "$1" != "--" ]; then label=$1; shift; fi
 [ "${1:-}" = "--" ] && shift
