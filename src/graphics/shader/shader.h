@@ -347,6 +347,9 @@ struct ShaderMappedData {
 	uint32_t        num_input_semantics = 0;
 	uint32_t        code_size_bytes     = 0;
 	uint32_t        scratch_size_dwords = 0;
+	bool            registration_compute_input_known = false;
+	uint32_t        registration_user_data_count      = 0;
+	ShaderComputeInputInfo registration_compute_input;
 };
 
 void ShaderInit();

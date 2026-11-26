@@ -150,7 +150,21 @@ void ShaderMapUserData(uint64_t addr, const ShaderMappedData& data) {
 	                                  : 0u,
 	     .srt_size_dwords       = data.user_data != nullptr
 	                                  ? static_cast<uint32_t>(data.user_data->srt_size_dw)
-	                                  : 0u},
+	                                  : 0u,
+	     .compute_input_known   = data.registration_compute_input_known,
+	     .user_data_count       = data.registration_user_data_count,
+	     .threads_num           = {data.registration_compute_input.threads_num[0],
+	                               data.registration_compute_input.threads_num[1],
+	                               data.registration_compute_input.threads_num[2]},
+	     .lds_size_dwords       = data.registration_compute_input.lds_size_dwords,
+	     .wave_size             = data.registration_compute_input.wave_size,
+	     .float_mode            = data.registration_compute_input.float_mode,
+	     .group_id              = {data.registration_compute_input.group_id[0],
+	                               data.registration_compute_input.group_id[1],
+	                               data.registration_compute_input.group_id[2]},
+	     .thread_ids_num        = static_cast<uint32_t>(
+	         std::max(data.registration_compute_input.thread_ids_num, 0)),
+	     .tg_size_en            = data.registration_compute_input.tg_size_en},
 	    code_copy);
 	mapped.vertex_error =
 	    ShaderReadVertexMetadata(data, HW::UserSgprInfo::SGPRS_MAX, mapped.vertex);

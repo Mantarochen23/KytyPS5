@@ -34,6 +34,15 @@ struct DumpRegistrationInfo {
 	uint32_t         sharp_resources       = 0;
 	uint32_t         eud_size_dwords       = 0;
 	uint32_t         srt_size_dwords       = 0;
+	bool             compute_input_known   = false;
+	uint32_t         user_data_count       = 0;
+	uint32_t         threads_num[3]        = {};
+	uint32_t         lds_size_dwords       = 0;
+	uint32_t         wave_size             = 64;
+	uint32_t         float_mode            = 0xc0;
+	bool             group_id[3]           = {};
+	uint32_t         thread_ids_num        = 0;
+	bool             tg_size_en            = false;
 };
 // The shared immutable copy is the same one retained by the shader map. The enqueue path never
 // waits for queue space or the writer lock; a contended/full queue drops the dump and counts it.
