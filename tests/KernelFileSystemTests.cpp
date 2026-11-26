@@ -1834,6 +1834,8 @@ void CheckAmprOrdering(Loader::SymbolDatabase &symbols, uint32_t file_id) {
   const auto construct_amm = reinterpret_cast<Unary>(find("EDq5bqCqYpA"));
   const auto destroy = reinterpret_cast<Unary>(find("GuchCTefuZw"));
   const auto set_buffer = reinterpret_cast<SetBuffer>(find("N-FSPA4S3nI"));
+  const auto clear_buffer = reinterpret_cast<void *(KYTY_SYSV_ABI *)(void *)>(find("ULvXMDz56po"));
+  const auto reset_buffer = reinterpret_cast<int (KYTY_SYSV_ABI *)(void *)>(find("baQO9ez2gL4"));
   const auto offset = reinterpret_cast<Offset>(find("GnxKOHEawhk"));
   const auto wait_address = reinterpret_cast<WaitAddress>(find("DLfoNxTFNVk"));
   const auto wait_counter = reinterpret_cast<WaitCounter>(find("cQb8Zr8Q0Y0"));
@@ -2080,6 +2082,35 @@ void CheckAmprOrdering(Loader::SymbolDatabase &symbols, uint32_t file_id) {
   std::atomic_ref(cpu_fence).store(1, std::memory_order_release);
   Check(wait_amm(ids[0]) == OK && amm_done == 1,
         "AMM observes an external CPU fence store without a submission notification");
+  {
+    reset(0, 16);
+    auto *cb = buffers[0].header.data();
+    uint64_t reuse_fence = 0;
+    uint32_t sub_id = 0;
+    Check(write_address(cb, &reuse_fence, 1) == OK &&
+              write_address(cb, &reuse_fence, 2) == OK &&
+              offset(cb) == 16 &&
+              write_address(cb, &reuse_fence, 3) == Libs::LibKernel::KERNEL_ERROR_EBUSY &&
+              submit_amm(buffers[0].data.data(), 16, 0, &sub_id) == OK &&
+              wait_amm(sub_id) == OK && reuse_fence == 2 && offset(cb) == 16,
+          "AMM buffer fills to EBUSY and submit preserves offset until reset");
+    Check(reset_buffer(cb) == OK && offset(cb) == 0 &&
+              write_address(cb, &reuse_fence, 3) == OK &&
+              offset(cb) == 8 &&
+              submit_amm(buffers[0].data.data(), 8, 0, &sub_id) == OK &&
+              wait_amm(sub_id) == OK && reuse_fence == 3,
+          "CommandBufferReset clears offset so the same buffer can be appended and resubmitted");
+    std::array<uint32_t, 4> alt_data {};
+    Check(set_buffer(cb, alt_data.data(), sizeof(alt_data)) ==
+                  Libs::LibKernel::KERNEL_ERROR_EBUSY &&
+              clear_buffer(cb) == buffers[0].data.data() &&
+              set_buffer(cb, alt_data.data(), sizeof(alt_data)) == OK &&
+              offset(cb) == 0 &&
+              write_address(cb, &reuse_fence, 4) == OK &&
+              submit_amm(alt_data.data(), 8, 0, &sub_id) == OK &&
+              wait_amm(sub_id) == OK && reuse_fence == 4,
+          "CommandBufferSetBuffer rejects attached buffers with EBUSY until CommandBufferClearBuffer");
+  }
   for (auto &buffer : buffers) {
     destroy(buffer.header.data());
   }

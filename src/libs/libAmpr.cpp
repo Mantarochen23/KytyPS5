@@ -788,13 +788,19 @@ static uint64_t AprReadGatherScatterRecordSize(uint64_t file_offset) {
 	return (file_offset >> 32u) != 0 ? READ_GATHER_SCATTER_SIZE_EXT : READ_GATHER_SCATTER_SIZE;
 }
 
-static bool UpdateCommandBufferTypeFlags(uint64_t command_buffer, uint32_t set_bits,
-                                         uint32_t clear_bits) {
+static bool UpdateCommandBufferTypeFlagsLocked(uint64_t command_buffer, uint32_t set_bits,
+                                               uint32_t clear_bits) {
 	if (!ValidateCommandBufferHeader(command_buffer)) {
 		return false;
 	}
 	UpdateCommandBufferTypeFlagsUnchecked(command_buffer, set_bits, clear_bits);
 	return true;
+}
+
+static bool UpdateCommandBufferTypeFlags(uint64_t command_buffer, uint32_t set_bits,
+                                         uint32_t clear_bits) {
+	std::scoped_lock lock(g_command_buffer_mutex);
+	return UpdateCommandBufferTypeFlagsLocked(command_buffer, set_bits, clear_bits);
 }
 
 static bool WriteVisibleCommandBufferPointers(uint64_t command_buffer, uint64_t buffer,
@@ -810,8 +816,8 @@ static bool WriteVisibleCommandBufferPointers(uint64_t command_buffer, uint64_t 
 	return true;
 }
 
-static bool WriteCommandBufferPointers(uint64_t command_buffer, uint64_t buffer, uint64_t size,
-                                       uint64_t write_offset = 0) {
+static bool WriteCommandBufferPointersLocked(uint64_t command_buffer, uint64_t buffer,
+                                             uint64_t size, uint64_t write_offset = 0) {
 	if (write_offset > std::numeric_limits<uint32_t>::max() ||
 	    size > std::numeric_limits<uint32_t>::max() ||
 	    !ValidateCommandBufferHeader(command_buffer)) {
@@ -823,12 +829,12 @@ static bool WriteCommandBufferPointers(uint64_t command_buffer, uint64_t buffer,
 	                            static_cast<uint32_t>(size));
 	WriteCommandBufferUnchecked(command_buffer + COMMAND_BUFFER_OFFSET_OFFSET,
 	                            static_cast<uint32_t>(write_offset));
+	WriteCommandBufferUnchecked(command_buffer + COMMAND_BUFFER_NUM_OFFSET, int32_t {0});
 
-	std::scoped_lock lock(g_command_buffer_mutex);
-	auto&            state = g_command_buffers[command_buffer];
-	state.buffer           = buffer;
-	state.size             = size;
-	state.write_offset     = write_offset;
+	auto& state                      = g_command_buffers[command_buffer];
+	state.buffer                     = buffer;
+	state.size                       = size;
+	state.write_offset               = write_offset;
 	state.commands.clear();
 	state.gather_scatter_valid       = false;
 	state.gather_scatter_file_id     = 0;
@@ -843,15 +849,14 @@ static bool TryGetCommandBufferState(uint64_t command_buffer, CommandBufferState
 		return false;
 	}
 
-	{
-		std::scoped_lock lock(g_command_buffer_mutex);
-		const auto       alias = g_command_buffer_aliases.find(command_buffer);
-		const auto       it    = g_command_buffers.find(
-		    alias != g_command_buffer_aliases.end() ? alias->second : command_buffer);
-		if (it != g_command_buffers.end()) {
-			*out = it->second;
-			return true;
-		}
+	std::scoped_lock lock(g_command_buffer_mutex);
+	const auto       alias = g_command_buffer_aliases.find(command_buffer);
+	const auto       key =
+	    alias != g_command_buffer_aliases.end() ? alias->second : command_buffer;
+	auto it = g_command_buffers.find(key);
+	if (it != g_command_buffers.end()) {
+		*out = it->second;
+		return true;
 	}
 
 	CommandBufferState state {};
@@ -859,7 +864,6 @@ static bool TryGetCommandBufferState(uint64_t command_buffer, CommandBufferState
 		return false;
 	}
 
-	std::scoped_lock lock(g_command_buffer_mutex);
 	g_command_buffers[command_buffer] = state;
 	*out                              = state;
 	return true;
@@ -870,9 +874,8 @@ static bool InitializeBaseCommandBuffer(uint64_t command_buffer) {
 		return false;
 	}
 
-	std::memset(reinterpret_cast<void*>(command_buffer), 0, COMMAND_BUFFER_SIZE);
-
 	std::scoped_lock lock(g_command_buffer_mutex);
+	std::memset(reinterpret_cast<void*>(command_buffer), 0, COMMAND_BUFFER_SIZE);
 	EraseCommandBufferStateLocked(command_buffer);
 	return true;
 }
@@ -1408,18 +1411,18 @@ static int KYTY_SYSV_ABI CommandBufferSetBuffer(void* command_buffer, void* buff
 		return LibKernel::KERNEL_ERROR_EINVAL;
 	}
 
-	const auto old_buffer =
+	std::scoped_lock lock(g_command_buffer_mutex);
+	const auto       old_buffer =
 	    ReadCommandBufferUnchecked<uint64_t>(command_buffer_addr + COMMAND_BUFFER_DATA_OFFSET);
 	if (old_buffer != 0) {
 		return LibKernel::KERNEL_ERROR_EBUSY;
 	}
 
-	if (!WriteCommandBufferPointers(command_buffer_addr, reinterpret_cast<uint64_t>(buffer),
-	                                size)) {
+	if (!WriteCommandBufferPointersLocked(command_buffer_addr, reinterpret_cast<uint64_t>(buffer),
+	                                      size)) {
 		return LibKernel::KERNEL_ERROR_EFAULT;
 	}
 
-	WriteCommandBufferUnchecked(command_buffer_addr + COMMAND_BUFFER_NUM_OFFSET, int32_t {0});
 	return OK;
 }
 
@@ -1430,20 +1433,21 @@ static int KYTY_SYSV_ABI CommandBufferReset(void* command_buffer) {
 		return LibKernel::KERNEL_ERROR_EPERM;
 	}
 
-	const auto         command_buffer_addr = reinterpret_cast<uint64_t>(command_buffer);
-	CommandBufferState state {};
-	if (!TryGetCommandBufferState(command_buffer_addr, &state)) {
+	const auto            command_buffer_addr = reinterpret_cast<uint64_t>(command_buffer);
+	std::scoped_lock      lock(g_command_buffer_mutex);
+	CommandBufferIterator it;
+	if (!GetOrCreateCommandBufferStateLocked(command_buffer_addr, &it)) {
 		return LibKernel::KERNEL_ERROR_EFAULT;
 	}
-	if (state.buffer == 0) {
+	if (it->second.buffer == 0) {
 		return LibKernel::KERNEL_ERROR_EPERM;
 	}
 
-	if (!WriteCommandBufferPointers(command_buffer_addr, state.buffer, state.size)) {
+	if (!WriteCommandBufferPointersLocked(command_buffer_addr, it->second.buffer,
+	                                      it->second.size)) {
 		return LibKernel::KERNEL_ERROR_EFAULT;
 	}
 
-	WriteCommandBufferUnchecked(command_buffer_addr + COMMAND_BUFFER_NUM_OFFSET, int32_t {0});
 	return OK;
 }
 
@@ -1458,7 +1462,9 @@ static void* KYTY_SYSV_ABI CommandBufferClearBuffer(void* command_buffer) {
 	if (!ValidateCommandBufferHeader(command_buffer_addr)) {
 		return nullptr;
 	}
-	const auto buffer =
+
+	std::scoped_lock lock(g_command_buffer_mutex);
+	const auto       buffer =
 	    ReadCommandBufferUnchecked<uint64_t>(command_buffer_addr + COMMAND_BUFFER_DATA_OFFSET);
 	const auto size =
 	    ReadCommandBufferUnchecked<uint32_t>(command_buffer_addr + COMMAND_BUFFER_SIZE_OFFSET);
@@ -1470,7 +1476,6 @@ static void* KYTY_SYSV_ABI CommandBufferClearBuffer(void* command_buffer) {
 		return nullptr;
 	}
 
-	std::scoped_lock lock(g_command_buffer_mutex);
 	EraseCommandBufferStateLocked(command_buffer_addr);
 	return reinterpret_cast<void*>(buffer);
 }
@@ -2053,7 +2058,7 @@ static int KYTY_SYSV_ABI AprCommandBufferResetGatherScatterState(void* command_b
 		it->second.gather_scatter_destination = 0;
 		it->second.gather_scatter_file_offset = 0;
 	}
-	UpdateCommandBufferTypeFlags(command_buffer_addr, 0, APR_TYPE_GATHER_SCATTER_VALID);
+	UpdateCommandBufferTypeFlagsLocked(command_buffer_addr, 0, APR_TYPE_GATHER_SCATTER_VALID);
 	return OK;
 }
 
