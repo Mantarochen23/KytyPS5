@@ -530,4 +530,9 @@ uint32_t GuestClockHoldMs() {
 	return g_config != nullptr ? g_config->guest_clock_hold_ms : 0u;
 }
 
+const std::filesystem::path& GetRegisteredShaderDumpFolder() {
+	static const std::filesystem::path none;
+	return g_config != nullptr ? g_config->dump_registered_shaders_folder : none;
+}
+
 } // namespace Config

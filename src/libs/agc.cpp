@@ -650,6 +650,40 @@ int KYTY_SYSV_ABI AgcCreateShader(Shader** dst, void* header, const volatile voi
 	map.code_size_bytes     = h->shader_size;
 	map.scratch_size_dwords = h->scratch_size_dw_per_thread;
 
+	HW::CsStageRegisters registration_cs_regs {};
+	bool                 registration_compute = false;
+	bool                 dispatch_thread_dimensions = false;
+	if (map.type == Prospero::ShaderBinaryType::kCs && h->sh_registers != nullptr) {
+		registration_compute = true;
+		for (uint32_t i = 0; i < h->num_sh_registers; i++) {
+			ApplyComputeShRegister(registration_cs_regs, h->sh_registers[i].offset,
+			                       h->sh_registers[i].value);
+		}
+		if (h->specials != nullptr) {
+			registration_cs_regs.wave_size = Pm4::ComputeWaveSize(h->specials->dispatch_modifier);
+			dispatch_thread_dimensions =
+			    (h->specials->dispatch_modifier &
+			     Pm4::COMPUTE_DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS) != 0;
+		}
+		auto& input                    = map.registration_compute_input;
+		input.threads_num[0]           = registration_cs_regs.num_thread_x;
+		input.threads_num[1]           = registration_cs_regs.num_thread_y;
+		input.threads_num[2]           = registration_cs_regs.num_thread_z;
+		input.lds_size_dwords          = static_cast<uint32_t>(registration_cs_regs.lds_size) * 128u;
+		input.scratch_size_dwords      = map.scratch_size_dwords;
+		input.float_mode               = registration_cs_regs.float_mode;
+		input.group_id[0]              = registration_cs_regs.tgid_x_en;
+		input.group_id[1]              = registration_cs_regs.tgid_y_en;
+		input.group_id[2]              = registration_cs_regs.tgid_z_en;
+		input.wave_size                = registration_cs_regs.wave_size;
+		input.thread_ids_num           = registration_cs_regs.tidig_comp_cnt + 1;
+		input.tg_size_en               = registration_cs_regs.tg_size_en;
+		input.dispatch_thread_dimensions = dispatch_thread_dimensions;
+		input.workgroup_register       = registration_cs_regs.user_sgpr;
+		map.registration_compute_input_known = true;
+		map.registration_user_data_count      = registration_cs_regs.user_sgpr;
+	}
+
 	ShaderMapUserData(base, map);
 
 	EXIT_NOT_IMPLEMENTED((base & 0xFFFF0000000000FFull) != 0);
@@ -660,21 +694,9 @@ int KYTY_SYSV_ABI AgcCreateShader(Shader** dst, void* header, const volatile voi
 		return patch_result;
 	}
 
-	if (static_cast<Prospero::ShaderBinaryType>(h->type) == Prospero::ShaderBinaryType::kCs &&
-	    h->sh_registers != nullptr) {
-		HW::CsStageRegisters cs_regs {};
-		for (uint32_t i = 0; i < h->num_sh_registers; i++) {
-			ApplyComputeShRegister(cs_regs, h->sh_registers[i].offset, h->sh_registers[i].value);
-		}
-		bool dispatch_thread_dimensions = false;
-		if (h->specials != nullptr) {
-			cs_regs.wave_size = Pm4::ComputeWaveSize(h->specials->dispatch_modifier);
-			dispatch_thread_dimensions =
-			    (h->specials->dispatch_modifier &
-			     Pm4::COMPUTE_DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS) != 0;
-		}
-		if (cs_regs.data_addr != 0) {
-			ShaderQueueComputePrefetch(cs_regs, dispatch_thread_dimensions);
+	if (registration_compute) {
+		if (registration_cs_regs.data_addr != 0) {
+			ShaderQueueComputePrefetch(registration_cs_regs, dispatch_thread_dimensions);
 		}
 	}
 

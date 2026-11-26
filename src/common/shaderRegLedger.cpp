@@ -1,5 +1,6 @@
 #include "common/shaderRegLedger.h"
 
+#include "common/emulatorConfig.h"
 #include "common/logging/log.h"
 
 #include <algorithm>
@@ -7,10 +8,17 @@
 #include <atomic>
 #include <chrono>
 #include <cstddef>
+#include <condition_variable>
+#include <deque>
+#include <filesystem>
 #include <fmt/format.h>
+#include <fstream>
 #include <iterator>
+#include <memory>
 #include <mutex>
+#include <nlohmann/json.hpp>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -46,6 +54,26 @@ std::unordered_map<uint64_t, HashRecord>  g_records;
 std::atomic<uint64_t>                     g_create_calls {0};
 std::atomic_flag                          g_printed; // Clear by default in C++20.
 
+constexpr size_t DumpQueueCapacity = 512;
+
+struct DumpEntry {
+	uint64_t                                     hash = 0;
+	std::string                                  stage;
+	DumpRegistrationInfo                        info;
+	std::shared_ptr<const std::vector<uint32_t>> code;
+};
+
+std::filesystem::path             g_dump_dir;
+std::mutex                        g_dump_mutex;
+std::condition_variable           g_dump_ready;
+std::deque<DumpEntry>             g_dump_queue;
+std::unordered_set<std::string>   g_dump_seen;
+std::thread                       g_dump_thread;
+bool                              g_dump_stop = false;
+std::atomic<uint64_t>             g_dump_written {0};
+std::atomic<uint64_t>             g_dump_dropped {0};
+std::atomic<uint64_t>             g_dump_high_water {0};
+
 int64_t NowMs() {
 	return std::chrono::duration_cast<std::chrono::milliseconds>(
 	           std::chrono::steady_clock::now() - Start)
@@ -68,10 +96,120 @@ std::string Counts(const std::array<uint64_t, StageCount>& values) {
 	return text;
 }
 
+std::vector<std::string> MissingInputs(const DumpEntry& entry) {
+	if (entry.stage == "cs") {
+		std::vector<std::string> missing {"user_data_values"};
+		if (!entry.info.compute_input_known) missing.push_back("compute_stage_input");
+		return missing;
+	}
+	if (entry.stage == "ps") return {"user_data_values", "pixel_stage_input"};
+	if (entry.stage == "gs-front" || entry.stage == "gs-back" || entry.stage == "hs-front" ||
+	    entry.stage == "hs-back") {
+		return {"user_data_values", "graphics_stage_input", "paired_stage_code",
+		        "vertex_fetch_state"};
+	}
+	return {"user_data_values", "graphics_stage_input", "vertex_fetch_state"};
+}
+
+void WriteDumpEntry(const DumpEntry& entry, std::ofstream& index) {
+	const auto name = fmt::format("{}_{:016x}.bin", entry.stage, entry.hash);
+	const auto path = g_dump_dir / name;
+	std::ofstream binary(path, std::ios::binary | std::ios::trunc);
+	if (!binary || entry.code == nullptr) {
+		g_dump_dropped.fetch_add(1, std::memory_order_relaxed);
+		return;
+	}
+	binary.write(reinterpret_cast<const char*>(entry.code->data()),
+	             static_cast<std::streamsize>(entry.code->size() * sizeof(uint32_t)));
+	binary.flush();
+	if (!binary) {
+		g_dump_dropped.fetch_add(1, std::memory_order_relaxed);
+		return;
+	}
+	binary.close();
+
+	nlohmann::ordered_json record {
+	    {"hash", fmt::format("0x{:016x}", entry.hash)},
+	    {"stage", entry.stage},
+	    {"file", name},
+	    {"registered_size_bytes", entry.info.registered_size_bytes},
+	    {"translated_size_bytes", entry.info.translated_size_bytes},
+	    {"words", entry.code->size()},
+	    {"user_data_count", entry.info.compute_input_known
+	                            ? nlohmann::ordered_json(entry.info.user_data_count)
+	                            : nlohmann::ordered_json(nullptr)},
+	    {"user_data_layout",
+	     {{"direct_resources", entry.info.direct_resources},
+	      {"sharp_resources", entry.info.sharp_resources},
+	      {"eud_size_dwords", entry.info.eud_size_dwords},
+	      {"srt_size_dwords", entry.info.srt_size_dwords}}},
+	    {"stage_input_info",
+	     {{"known", entry.info.compute_input_known},
+	      {"scratch_size_dwords", entry.info.scratch_size_dwords},
+	      {"input_semantics", entry.info.input_semantics},
+	      {"threads_num", std::array {entry.info.threads_num[0], entry.info.threads_num[1],
+	                                   entry.info.threads_num[2]}},
+	      {"lds_size_dwords", entry.info.lds_size_dwords},
+	      {"wave_size", entry.info.wave_size},
+	      {"float_mode", entry.info.float_mode},
+	      {"group_id", std::array {entry.info.group_id[0], entry.info.group_id[1],
+	                                entry.info.group_id[2]}},
+	      {"thread_ids_num", entry.info.thread_ids_num},
+	      {"tg_size_en", entry.info.tg_size_en}}},
+	    {"missing_inputs", MissingInputs(entry)}};
+	index << record.dump() << '\n';
+	index.flush();
+	if (index) g_dump_written.fetch_add(1, std::memory_order_relaxed);
+	else g_dump_dropped.fetch_add(1, std::memory_order_relaxed);
+}
+
+void DumpWorker() {
+	std::ofstream index(g_dump_dir / "index.jsonl", std::ios::app);
+	if (!index) {
+		g_dump_dropped.fetch_add(1, std::memory_order_relaxed);
+		return;
+	}
+	for (;;) {
+		DumpEntry entry;
+		{
+			std::unique_lock lock(g_dump_mutex);
+			g_dump_ready.wait(lock, [] { return g_dump_stop || !g_dump_queue.empty(); });
+			if (g_dump_queue.empty() && g_dump_stop) return;
+			entry = std::move(g_dump_queue.front());
+			g_dump_queue.pop_front();
+		}
+		WriteDumpEntry(entry, index);
+	}
+}
+
 } // namespace
 
 void Initialize() {
-	// The clock starts at load, so no setup is needed here.
+	g_dump_dir = Config::GetRegisteredShaderDumpFolder();
+	if (g_dump_dir.empty()) return;
+	std::error_code error;
+	std::filesystem::create_directories(g_dump_dir, error);
+	if (error) {
+		Log::WriteToConsoleAndLog(fmt::format(
+		    "Could not create registered shader dump directory {}: {}\n", g_dump_dir.string(),
+		    error.message()));
+		g_dump_dir.clear();
+		return;
+	}
+	g_dump_stop = false;
+	g_dump_thread = std::thread(DumpWorker);
+}
+
+void Shutdown() {
+	if (g_dump_thread.joinable()) {
+		{
+			std::lock_guard lock(g_dump_mutex);
+			g_dump_stop = true;
+		}
+		g_dump_ready.notify_one();
+		g_dump_thread.join();
+	}
+	PrintSummary();
 }
 
 void NoteCreateCall() {
@@ -87,6 +225,30 @@ void NoteRegistration(uint64_t hash, Stage stage) {
 	auto&   entry  = record.stages[index];
 	if (entry.first_registration_ms < 0) entry.first_registration_ms = now;
 	++entry.registrations;
+}
+
+void DumpRegistration(uint64_t hash, const DumpRegistrationInfo& info,
+                      std::shared_ptr<const std::vector<uint32_t>> code) {
+	if (g_dump_dir.empty() || code == nullptr) return;
+	std::unique_lock lock(g_dump_mutex, std::try_to_lock);
+	if (!lock.owns_lock() || g_dump_queue.size() >= DumpQueueCapacity) {
+		g_dump_dropped.fetch_add(1, std::memory_order_relaxed);
+		return;
+	}
+	const auto key = fmt::format("{}:{:016x}", info.binary_stage, hash);
+	if (!g_dump_seen.insert(key).second) return;
+	DumpEntry entry {.hash = hash, .stage = std::string(info.binary_stage), .info = info,
+	                 .code = std::move(code)};
+	// string_view in the queued metadata referred to the caller's static stage string. Keep no view
+	// in the asynchronous record even though the current callers use static storage.
+	entry.info.binary_stage = {};
+	g_dump_queue.push_back(std::move(entry));
+	const auto size = static_cast<uint64_t>(g_dump_queue.size());
+	auto high = g_dump_high_water.load(std::memory_order_relaxed);
+	while (size > high && !g_dump_high_water.compare_exchange_weak(
+	                          high, size, std::memory_order_relaxed)) {}
+	lock.unlock();
+	g_dump_ready.notify_one();
 }
 
 void NoteUse(uint64_t hash, Stage stage, uint64_t variant_key) {
@@ -159,6 +321,12 @@ void PrintSummary() {
 	}
 	AppendLine(text, "variants per hash: 1={} 2={} 3-4={} 5+={} (hashes with uses={})",
 	           histogram[0], histogram[1], histogram[2], histogram[3], hashes_with_variants);
+	if (!g_dump_dir.empty()) {
+		AppendLine(text, "registration dump: written={} dropped={} queue_high_water={}/{}",
+		           g_dump_written.load(std::memory_order_relaxed),
+		           g_dump_dropped.load(std::memory_order_relaxed),
+		           g_dump_high_water.load(std::memory_order_relaxed), DumpQueueCapacity);
+	}
 	text += "[shader-reg] === end shader registration ledger ===\n";
 
 	Log::WriteToConsoleAndLog(text);

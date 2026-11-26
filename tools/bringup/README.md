@@ -82,3 +82,28 @@ The script refuses to start while another sandboxed run holds the GPU.
 
 Known gap: the GPU test harness needs `robustStorageBufferAccessSizeAlignment == 1`, which RADV
 does not report, so the shader test cases cannot run on Bosie yet.
+
+## Offline shader corpus
+
+Add `--dump-registered-shaders <dir>` to one emulator run to copy every distinct registration into
+`<dir>/<stage>_<hash>.bin` and append its metadata to `<dir>/index.jsonl`. The option is off by
+default. Registration only hands immutable copies to a bounded queue: a full or contended queue is
+counted as dropped in the shutdown ledger instead of stalling the registering thread.
+
+Build and translate the dump without starting the program:
+
+    cmake --build _Build/linux-debug --target shader_corpus_tool --parallel 12
+    _Build/linux-debug/shader_corpus_tool --dir <dump> --out <report> --jobs 12
+
+Optional filters are `--only <stage>`, `--limit <n>`, and `--timeout-ms <n>` (20 seconds by
+default). `--emit-spirv` also writes emitted modules under `<report>/spirv/`. Each shader runs in a
+separate child process; the parent bounds concurrency and kills only the timed-out child, so one
+crash or timeout cannot end the corpus run.
+
+`results.jsonl` is sorted by hash and contains the phase/pass timings, CFG size, wave size, SPIR-V
+size, and one of `emitted`, `needs-runtime:<input>`, `rejected:<class>`, `crashed`, or `timeout`.
+`summary.md` groups outcomes by stage, ranks rejection shapes with examples, lists the 30 slowest
+translations and their slowest passes, totals pass time, and counts compute shaders which need no
+runtime input. Graphics registrations normally need later pipeline state; fused stages also need
+their paired bytecode. Compute registrations include their creation-time stage registers, but a
+shader whose resource plan reads user-data values remains runtime-dependent.

@@ -165,7 +165,9 @@ static void PrintUsage() {
 	         "  --guest-clock-hold-on-stall <ms>     Debug: the guest clock (time stamp counter, process time,\n"
 	         "                                       clock_gettime, gettimeofday) stands still while no frame\n"
 	         "                                       was recorded for more than <ms> and the render side is\n"
-	         "                                       busy with shaders. 0 = off. Default: 0.\n");
+	         "                                       busy with shaders. 0 = off. Default: 0.\n"
+	         "  --dump-registered-shaders <dir>      Write each distinct registered shader and index.jsonl\n"
+	         "                                       through a bounded background queue. Default: off.\n");
 }
 
 static bool NextArg(int argc, char* argv[], int& index, std::string& out) {
@@ -606,6 +608,12 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				::printf("invalid guest clock hold value: %s\n", value.c_str());
 				return false;
 			}
+		} else if (arg == "--dump-registered-shaders") {
+			if (value.empty()) {
+				::printf("invalid registered shader dump directory\n");
+				return false;
+			}
+			options.config.dump_registered_shaders_folder = Common::PathFromUtf8(value);
 		} else {
 			::printf("unknown option: %s\n", arg.c_str());
 			return false;

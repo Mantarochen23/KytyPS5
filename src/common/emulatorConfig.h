@@ -165,6 +165,9 @@ struct ConfigOptions {
 	// --guest-clock-hold-on-stall <ms>: the guest clock stands still while no frame was recorded for
 	// more than this long and the render side is busy with shaders. 0 = off.
 	uint32_t                 guest_clock_hold_ms        = 0;
+	// --dump-registered-shaders: copy each distinct registered shader and an index record here.
+	// Empty = off.
+	std::filesystem::path    dump_registered_shaders_folder;
 };
 
 void Load(const ConfigOptions& cfg);
@@ -275,6 +278,7 @@ uint32_t AsyncIrBudgetMb();
 bool     GuestFaultParkEnabled();
 bool     GuestFaultReportOnlyEnabled();
 uint32_t GuestClockHoldMs();
+const std::filesystem::path& GetRegisteredShaderDumpFolder();
 
 } // namespace Config
 
