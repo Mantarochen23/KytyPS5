@@ -173,8 +173,9 @@ thread_local const Xbyak::CodeGenerator* t_running_walker = nullptr;
 class RuntimeValidator {
 public:
 	explicit RuntimeValidator(const ResourcePlan& program, RuntimeValueType type,
-	                          bool wave_uniform = false)
-	    : m_program(program), m_type(type), m_wave_uniform(wave_uniform) {}
+	                          bool wave_uniform = false, bool allow_dynamic_srt = false)
+	    : m_program(program), m_type(type), m_wave_uniform(wave_uniform),
+	      m_allow_dynamic_srt(allow_dynamic_srt) {}
 
 	bool Run(Value value) { return Validate(value); }
 
@@ -241,7 +242,7 @@ private:
 				// A GPU-selected SRT slot is emitted as an access chain into the flattened
 				// SRT storage buffer, so the read is bounds-safe without a host-side slot
 				// to enumerate. It cannot serve as an immutable integer proof.
-				if (m_type == RuntimeValueType::ImmutableInteger ||
+				if (!m_allow_dynamic_srt || m_type == RuntimeValueType::ImmutableInteger ||
 				    !ValidateArguments(*inst, require_uniform)) return finish(false);
 				return finish(true);
 			}
@@ -370,6 +371,7 @@ private:
 	const ResourcePlan&             m_program;
 	RuntimeValueType                m_type;
 	bool                            m_wave_uniform;
+	bool                            m_allow_dynamic_srt;
 	Value                           m_active_mask;
 	std::unordered_set<const Inst*> m_visiting;
 	std::unordered_set<const Inst*> m_validated_dependencies;
@@ -1523,8 +1525,9 @@ bool WalkedImageActive(const ResourcePlan& plan, uint32_t image) {
 	return Scratch(plan)[ActiveOffset(plan) + plan.descriptor_sources.size() + image] != 0u;
 }
 
-bool ValidateRuntimeValue(const ResourcePlan& program, Value value, RuntimeValueType type) {
-	return RuntimeValidator(program, type).Run(value);
+bool ValidateRuntimeValue(const ResourcePlan& program, Value value, RuntimeValueType type,
+                          bool allow_dynamic_srt) {
+	return RuntimeValidator(program, type, false, allow_dynamic_srt).Run(value);
 }
 
 bool ValidateWaveUniformValue(const ResourcePlan& program, Value value) {
