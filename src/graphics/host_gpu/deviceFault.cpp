@@ -120,7 +120,7 @@ void QueryDeviceFaultExt(const GraphicContext& graphics, std::string& report) {
 	}
 
 	vk::DeviceFaultCountsEXT counts {};
-	const auto               count_result = graphics.device.getDeviceFaultInfoEXT(&counts, nullptr);
+	const auto               count_result = graphics.device.getFaultInfoEXT(&counts, nullptr);
 	if (count_result != vk::Result::eSuccess && count_result != vk::Result::eIncomplete) {
 		report += fmt::format("VK_EXT_device_fault: count query failed ({})\n",
 		                      vk::to_string(count_result));
@@ -144,7 +144,7 @@ void QueryDeviceFaultExt(const GraphicContext& graphics, std::string& report) {
 	info.pVendorInfos      = vendors.empty() ? nullptr : vendors.data();
 	info.pVendorBinaryData = nullptr;
 
-	const auto info_result = graphics.device.getDeviceFaultInfoEXT(&counts, &info);
+	const auto info_result = graphics.device.getFaultInfoEXT(&counts, &info);
 	if (info_result != vk::Result::eSuccess && info_result != vk::Result::eIncomplete) {
 		report += fmt::format("VK_EXT_device_fault: info query failed ({})\n",
 		                      vk::to_string(info_result));
