@@ -355,7 +355,6 @@ TEST(Thread, ReservesTheFastestCoreAndRestoresTheProcessAffinity) {
 }
 #endif
 
-<<<<<<< HEAD
 TEST(Config, ParseTraceCallsOptionHandlesBareAndFiltered) {
 	Config::ConfigOptions options;
 	EXPECT_TRUE(Config::ParseTraceCallsOption("--trace-calls", options));
