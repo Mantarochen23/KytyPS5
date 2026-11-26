@@ -454,6 +454,8 @@ function(configure_macos_guest_address_space target)
 endfunction()
 
 add_kyty_full_emulator_test(shader_cfg_tests "${KYTY_TESTS_DIR}/shaderCfgTests.cpp")
+add_kyty_full_emulator_test(shader_store_tests "${KYTY_TESTS_DIR}/ShaderStoreTests.cpp")
+add_kyty_full_emulator_test(shader_corpus_tool "${KYTY_TESTS_DIR}/shaderCorpusTool.cpp")
 
 add_executable(scalar_provenance_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/ScalarProvenanceTests.cpp"
@@ -527,6 +529,21 @@ add_executable(shader_workers_tests EXCLUDE_FROM_ALL
 )
 target_link_libraries(shader_workers_tests common)
 target_include_directories(shader_workers_tests PRIVATE ${inc_headers})
+
+add_executable(async_plan_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/AsyncPlanTests.cpp"
+)
+target_include_directories(async_plan_tests PRIVATE ${inc_headers})
+
+add_executable(wait_diagnostics_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/WaitDiagnosticsTests.cpp"
+)
+target_include_directories(wait_diagnostics_tests PRIVATE ${inc_headers})
+
+add_executable(clock_hold_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/ClockHoldTests.cpp"
+)
+target_include_directories(clock_hold_tests PRIVATE ${inc_headers})
 
 add_executable(lru_cache_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/LruCacheTests.cpp"
@@ -833,6 +850,8 @@ if(BUILD_TESTING)
 	set_tests_properties(emulator_skip_shaders_invalid PROPERTIES WILL_FAIL TRUE)
 	add_test(NAME ime_dialog COMMAND $<TARGET_FILE:ime_dialog_tests>)
 	add_test(NAME shader_cfg COMMAND $<TARGET_FILE:shader_cfg_tests>)
+	add_test(NAME shader_store COMMAND $<TARGET_FILE:shader_store_tests>)
+	add_test(NAME shader_corpus COMMAND $<TARGET_FILE:shader_corpus_tool> --self-test)
 	add_test(NAME scalar_provenance COMMAND $<TARGET_FILE:scalar_provenance_tests>)
 	add_test(NAME image_page_table COMMAND $<TARGET_FILE:image_page_table_tests>)
 	add_test(NAME memory_tracker COMMAND $<TARGET_FILE:memory_tracker_tests>)
@@ -955,6 +974,8 @@ if(BUILD_TESTING)
 	add_custom_target(kyty_tests DEPENDS
 		ime_dialog_tests
 		shader_cfg_tests
+		shader_store_tests
+		shader_corpus_tool
 		scalar_provenance_tests
 		image_page_table_tests
 		memory_tracker_tests

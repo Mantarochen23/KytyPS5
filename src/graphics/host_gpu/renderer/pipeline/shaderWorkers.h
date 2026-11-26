@@ -47,6 +47,8 @@ public:
 		Priority                     priority = Priority::Normal;
 		uint64_t                     sequence = 0;
 		std::atomic<uint64_t>        asked {0};
+		// A draw or dispatch is blocked on this job right now; it runs before every job that is not.
+		std::atomic<bool>            waited {false};
 
 		void Touch() noexcept { asked.store(AskClockMs(), std::memory_order_relaxed); }
 	};
@@ -63,7 +65,11 @@ public:
 	KYTY_CLASS_NO_COPY(ShaderWorkers);
 
 	// Null once stopped.
-	JobPtr Post(Common::UniqueFunction<void>&& job, Priority priority = Priority::Normal);
+	JobPtr Post(Common::UniqueFunction<void>&& job, Priority priority = Priority::Normal,
+	            bool waited = false);
+	// Marks a queued job as one a draw or dispatch waits for. Waited jobs run before the others,
+	// oldest first; the rest keep the order described above.
+	void MarkWaited(const JobPtr& job);
 	// Moves a queued normal-priority job to the urgent queue and refreshes its ask timestamp.
 	void Promote(const JobPtr& job);
 	// The jobs that have not started.
@@ -94,6 +100,15 @@ private:
 	std::vector<std::jthread> m_threads;
 };
 
+
+// Worker threads for the shader jobs: the hardware threads minus four for the game, at least two.
+// `configured` != 0 overrides it.
+[[nodiscard]] constexpr uint32_t ShaderWorkerCount(uint32_t hardware_threads, uint32_t configured = 0) {
+	if (configured != 0) {
+		return configured;
+	}
+	return hardware_threads > 6 ? hardware_threads - 4 : 2;
+}
 
 // Applies the front of `pending` (calling each element) until `budget_us` microseconds have passed
 // on `now_us`, but always at least one so a backlog drains. Budget 0 applies everything. Returns

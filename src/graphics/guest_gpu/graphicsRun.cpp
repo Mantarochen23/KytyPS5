@@ -2,15 +2,18 @@
 
 #include "common/assert.h"
 #include "common/debugCounters.h"
+#include "common/emulatorConfig.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
 #include "common/stringUtils.h"
 #include "common/threads.h"
 #include "graphics/guest_gpu/command_processor/commandProcessor.h"
 #include "graphics/guest_gpu/command_processor/pm4Dispatch.h"
+#include "graphics/guest_gpu/command_processor/waitDiagnostics.h"
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/guest_gpu/pm4.h"
 #include "graphics/host_gpu/renderer/debug.h"
+#include "graphics/host_gpu/renderer/pipeline/renderActivity.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/renderer/sync.h"
@@ -37,6 +40,8 @@ namespace Libs::Graphics {
 
 static thread_local Pm4Execution* g_current_execution = nullptr;
 static thread_local GuestGpu*     g_gpu_state         = nullptr;
+// Prints what the command thread is doing when no frame was recorded for a while.
+static std::unique_ptr<RenderStallReporter> g_stall_reporter;
 
 GuestGpu::GuestGpu(RenderContext& renderer): m_renderer(renderer) {
 	EXIT_NOT_IMPLEMENTED(!Common::Thread::IsMainThread());
@@ -52,6 +57,9 @@ GuestGpu::GuestGpu(RenderContext& renderer): m_renderer(renderer) {
 		m_work_available.Signal();
 	});
 	m_thread = std::jthread(ThreadRun, this);
+	g_stall_reporter = std::make_unique<RenderStallReporter>(
+	    Config::RenderStallReportSeconds(), Config::GuestClockHoldMs(),
+	    Config::GuestFaultParkEnabled());
 }
 
 GuestGpu::~GuestGpu() {
@@ -63,6 +71,7 @@ void GuestGpu::Shutdown() {
 	if (m_shutdown_complete) {
 		return;
 	}
+	g_stall_reporter.reset();
 	{
 		Common::LockGuard lock(m_queue_mutex);
 		m_accepting        = false;
@@ -277,9 +286,51 @@ void CommandProcessor::WaitRegMem(uint32_t func, const T* addr, T ref, T mask, u
 		EXIT("unsupported wait_reg_mem operation: 0x%08" PRIx32 "\n", wait_op);
 	}
 
-	if (!TestWaitRegMemValue(*addr, ref, mask, func)) {
+	const T value = *addr;
+	if (!TestWaitRegMemValue(value, ref, mask, func)) {
+		NoteWaitPoll(addr, sizeof(T) == sizeof(uint64_t), func, ref, mask, value);
 		SuspendPm4();
 	}
+}
+
+uint32_t CommandProcessor::DiagnosticsSlot() const {
+	return m_interrupt_event_id >= 0x20 ? static_cast<uint32_t>(m_interrupt_event_id - 0x20) + 1u
+	                                    : 0u;
+}
+
+// For the stall reporter: which packet this queue polls and what it read. The buffer cache is asked
+// about the range on the first poll and about once a second after (it is the same thread).
+void CommandProcessor::NoteWaitPoll(const void* address, bool is64, uint32_t func, uint64_t ref,
+                                    uint64_t mask, uint64_t value) {
+	WaitDiag::WaitPacket packet;
+	packet.is64      = is64;
+	packet.func      = func;
+	packet.address   = reinterpret_cast<uint64_t>(address);
+	packet.mask      = mask;
+	packet.reference = ref;
+	packet.value     = value;
+	if (g_current_execution != nullptr && !g_current_execution->m_buffer_stack.empty()) {
+		const auto& cursor = g_current_execution->m_buffer_stack.back();
+		packet.buffer      = reinterpret_cast<uint64_t>(cursor.commands.data());
+		packet.offset_dw   = cursor.offset_dw;
+	}
+	const auto now   = WaitDiag::NowMs();
+	auto&      diag  = WaitDiag::Global();
+	const auto polls = diag.NotePoll(DiagnosticsSlot(), packet, now);
+	if (polls == 1 || polls % 8192u == 0) {
+		const auto size = is64 ? sizeof(uint64_t) : sizeof(uint32_t);
+		if (GuestRange {packet.address, size}.Valid()) {
+			auto& buffers          = m_renderer.GetBufferCache();
+			packet.gpu_modified    = buffers.IsRegionGpuModified(packet.address, size) ? 1 : 0;
+			packet.gpu_dirty       = buffers.HasGpuDirtyBytes(packet.address, size) ? 1 : 0;
+			diag.NotePoll(DiagnosticsSlot(), packet, now);
+		}
+	}
+}
+
+void CommandProcessor::NoteLabelWrite(const void* address, uint64_t value, uint32_t size) {
+	WaitDiag::Global().NoteLabel(reinterpret_cast<uint64_t>(address), value, size,
+	                             DiagnosticsSlot(), WaitDiag::NowMs());
 }
 
 template void CommandProcessor::WaitRegMem<uint32_t>(uint32_t, const uint32_t*, uint32_t, uint32_t,
@@ -322,6 +373,9 @@ void CommandProcessor::WriteData(uint64_t dst, const uint32_t* src, uint32_t dw_
 	// Completion labels can be reused immediately; memcpy may write a destination twice.
 	auto* output = reinterpret_cast<volatile uint32_t*>(dst);
 	for (uint32_t i = 0; i < dw_num; i++) {
+		if (dw_num <= 4u) {
+			NoteLabelWrite(const_cast<const uint32_t*>(output), src[i], sizeof(uint32_t));
+		}
 		*output = src[i];
 		output += !write_one_address;
 	}
@@ -460,6 +514,7 @@ void GuestGpu::ThreadRun(void* data) {
 			       !gpu->m_prefetch_pending && !gpu->m_stopping) {
 				gpu->m_processing = false;
 				gpu->m_idle.Signal();
+				RenderActivity::Note("cp-no-work", 0, "-", "nothing submitted");
 				gpu->m_work_available.Wait(&gpu->m_queue_mutex);
 			}
 			if (gpu->m_stopping && gpu->m_commands.empty() && gpu->m_submission_count == 0) {
@@ -523,6 +578,10 @@ void GuestGpu::ThreadRun(void* data) {
 						// m_work_available (with a 50 ms safety fallback). Guest memory WaitRegMem
 						// polls keep 100 us.
 						const uint32_t wait_us = all_waiting_on_shaders ? 50000u : 100u;
+						RenderActivity::Note("cp-blocked", 0, "-",
+						                     all_waiting_on_shaders
+						                         ? "every queue waits for a shader or pipeline"
+						                         : "a queue waits on guest memory or a flip");
 						if (!gpu->m_async_ready && !gpu->m_prefetch_pending) {
 							gpu->m_work_available.WaitFor(&gpu->m_queue_mutex, wait_us);
 						}
@@ -550,6 +609,7 @@ void GuestGpu::ThreadRun(void* data) {
 			return;
 		}
 		if (run_prefetch) {
+			RenderActivity::Note("cp-prefetch-drain", 0, "-", "queueing compute prefetches");
 			gpu->DrainComputePrefetches();
 			Common::LockGuard lock(gpu->m_queue_mutex);
 			gpu->m_processing = false;
@@ -559,6 +619,7 @@ void GuestGpu::ThreadRun(void* data) {
 			continue;
 		}
 		if (!pending_prefetches.empty()) {
+			RenderActivity::Note("cp-prefetch-scan", 0, "-", "scanning submitted commands");
 			for (const auto& [queue_id, cmds]: pending_prefetches) {
 				gpu->GetProcessor(queue_id).PrefetchComputeShaders(cmds);
 			}
@@ -568,6 +629,7 @@ void GuestGpu::ThreadRun(void* data) {
 		}
 
 		if (command) {
+			RenderActivity::Note("cp-command", 0, "-", "host command");
 			{
 				Common::DebugCounters::ScopedTimer busy(
 				    Common::DebugCounters::Counter::GpuThreadBusyNs);
@@ -582,12 +644,24 @@ void GuestGpu::ThreadRun(void* data) {
 			continue;
 		}
 
+		RenderActivity::Note("cp-process", 0, "-", "submission");
+		WaitDiag::Global().NoteRunning(submission.queue_id, WaitDiag::NowMs());
 		const bool complete = [&] {
 			Common::DebugCounters::ScopedTimer busy(
 			    Common::DebugCounters::Counter::GpuThreadBusyNs);
 			return gpu->Process(submission);
 		}();
 
+		if (submission.type == SubmissionType::Commands) {
+			using State = WaitDiag::QueueState;
+			const bool for_shader = !complete && submission.execution.SuspendedForShader();
+			WaitDiag::Global().NoteQueue(submission.queue_id,
+			                             complete ? State::Idle
+			                                      : (for_shader ? State::SuspendedForShader
+			                                                    : State::WaitingMemory),
+			                             for_shader ? RenderActivity::Read().hash : 0,
+			                             WaitDiag::NowMs());
+		}
 		Common::LockGuard lock(gpu->m_queue_mutex);
 		if (!complete) {
 			submission.blocked = true;
@@ -857,6 +931,7 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 		if (g_gpu_state != nullptr) {
 			g_gpu_state->ProcessCommands();
 		}
+		RenderActivity::Note("pm4", 0, "-", "packets");
 		auto& cursor = execution.m_buffer_stack.back();
 		if (cursor.offset_dw == cursor.commands.size()) {
 			execution.m_buffer_stack.pop_back();
@@ -868,6 +943,7 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 		const auto        remaining_dw  = total_dw - cursor.offset_dw;
 		const auto        packet_header = packet[0];
 		const auto        opcode        = (packet_header >> 8u) & 0xffu;
+		RenderActivity::NotePacket(opcode);
 
 		if (packet_header == 0x80000000u || Pm4::PacketSizeDw(packet_header) == 1u) {
 			cursor.offset_dw++;
@@ -1237,6 +1313,9 @@ void CommandProcessor::ReleaseMem(uint32_t data_sel, uint32_t interrupt_selector
 	// downloads GPU-written bytes under the label before the store.
 	const auto write_label = [this, address](const void* value, uint64_t size) {
 		const auto vaddr   = reinterpret_cast<uint64_t>(address);
+		uint64_t   noted   = 0;
+		std::memcpy(&noted, value, size);
+		NoteLabelWrite(address, noted, static_cast<uint32_t>(size));
 		auto&      buffers = m_renderer.GetBufferCache();
 		if (!GuestRange {vaddr, size}.Valid() || !buffers.IsRegionGpuModified(vaddr, size) ||
 		    buffers.HasGpuDirtyBytes(vaddr, size) ||

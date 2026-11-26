@@ -144,7 +144,30 @@ static void PrintUsage() {
 	::printf("  --shader-key-index                   Persist a shader hash -> ProgramKey index in the\n"
 	         "                                       shader store for next-boot lookup. Default: off.\n");
 	::printf("  --async-pump-budget-ms <ms>          Render-thread time per frame step spent applying finished\n"
-	         "                                       async shader jobs; 0 = unlimited. Default: 2.\n");
+	         "                                       async shader jobs; 0 = unlimited. Default: 2.\n"
+	         "  --async-workers <n>                  Shader worker threads. 0 = hardware threads minus 4, at\n"
+	         "                                       least 2. Default: 0.\n"
+	         "  --async-speculative-modules <0|1>    Build the module of a finished compute translation on\n"
+	         "                                       the worker when its resources need no guest memory, so it\n"
+	         "                                       is stored at once. Default: 1.\n"
+	         "  --render-stall-report-s <n>          When no frame was recorded for n seconds, print one line\n"
+	         "                                       with what the render thread is doing, then every n\n"
+	         "                                       seconds. 0 = off. Default: 5.\n"
+	         "  --async-ir-budget-mb <n>             Memory finished shader translations that no draw has\n"
+	         "                                       asked for yet may hold; over it the least recently\n"
+	         "                                       requested are dropped. 0 = no limit. Default: 2048.\n"
+	         "  --guest-fault-park                   Debug: a guest thread that takes a fault nobody resolves\n"
+	         "                                       prints the fault report once per pc and parks forever\n"
+	         "                                       instead of ending the process.\n"
+	         "  --guest-fault-report-only            Debug: on that fault also write fault-code-<n>.txt (hex of\n"
+	         "                                       0x400 guest code bytes around the pc and each return\n"
+	         "                                       address) into $KYTY_RUN_OUT, or the current folder.\n"
+	         "  --guest-clock-hold-on-stall <ms>     Debug: the guest clock (time stamp counter, process time,\n"
+	         "                                       clock_gettime, gettimeofday) stands still while no frame\n"
+	         "                                       was recorded for more than <ms> and the render side is\n"
+	         "                                       busy with shaders. 0 = off. Default: 0.\n"
+	         "  --dump-registered-shaders <dir>      Write each distinct registered shader and index.jsonl\n"
+	         "                                       through a bounded background queue. Default: off.\n");
 }
 
 static bool NextArg(int argc, char* argv[], int& index, std::string& out) {
@@ -278,6 +301,8 @@ static constexpr Flag FLAGS[] = {
 #endif
     {"--bda-table-validate", &ConfigOptions::bda_table_validate_enabled},
     {"--shader-key-index", &ConfigOptions::shader_key_index_enabled},
+    {"--guest-fault-park", &ConfigOptions::guest_fault_park},
+    {"--guest-fault-report-only", &ConfigOptions::guest_fault_report_only},
 };
 
 static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_help) {
@@ -558,6 +583,37 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				::printf("invalid async pump budget: %s\n", value.c_str());
 				return false;
 			}
+		} else if (arg == "--async-workers") {
+			if (!ParseUint32(value, options.config.async_workers)) {
+				::printf("invalid async worker count: %s\n", value.c_str());
+				return false;
+			}
+		} else if (arg == "--async-speculative-modules") {
+			if (!ParseUint32(value, options.config.async_speculative_modules)) {
+				::printf("invalid async speculative modules value: %s\n", value.c_str());
+				return false;
+			}
+		} else if (arg == "--render-stall-report-s") {
+			if (!ParseUint32(value, options.config.render_stall_report_s)) {
+				::printf("invalid render stall report value: %s\n", value.c_str());
+				return false;
+			}
+		} else if (arg == "--async-ir-budget-mb") {
+			if (!ParseUint32(value, options.config.async_ir_budget_mb)) {
+				::printf("invalid async IR budget value: %s\n", value.c_str());
+				return false;
+			}
+		} else if (arg == "--guest-clock-hold-on-stall") {
+			if (!ParseUint32(value, options.config.guest_clock_hold_ms)) {
+				::printf("invalid guest clock hold value: %s\n", value.c_str());
+				return false;
+			}
+		} else if (arg == "--dump-registered-shaders") {
+			if (value.empty()) {
+				::printf("invalid registered shader dump directory\n");
+				return false;
+			}
+			options.config.dump_registered_shaders_folder = Common::PathFromUtf8(value);
 		} else {
 			::printf("unknown option: %s\n", arg.c_str());
 			return false;

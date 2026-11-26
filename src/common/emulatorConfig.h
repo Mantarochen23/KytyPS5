@@ -145,6 +145,29 @@ struct ConfigOptions {
 	// --async-pump-budget-ms: render-thread time per PumpAsync call for applying finished
 	// shader jobs; 0 = unlimited.
 	uint32_t                 async_pump_budget_ms       = 2;
+	// --async-workers: shader worker threads; 0 = hardware threads minus four, at least two.
+	uint32_t                 async_workers              = 0;
+	// --async-speculative-modules: a finished compute translation whose resources need no guest
+	// memory also gets its module on the worker (and so into the shader store). 0 = off.
+	uint32_t                 async_speculative_modules  = 1;
+	// --render-stall-report-s: when no frame was recorded for this many seconds, print one line
+	// with what the render thread is doing, then again every that many seconds. 0 = off.
+	uint32_t                 render_stall_report_s      = 5;
+	// --async-ir-budget-mb: the memory finished shader translations that no draw has asked for
+	// yet may hold before the least recently requested are dropped. 0 = no limit.
+	uint32_t                 async_ir_budget_mb         = 2048;
+	// --guest-fault-park: a guest thread that takes a fault nobody resolves is reported and parked
+	// instead of ending the process.
+	bool                     guest_fault_park           = false;
+	// --guest-fault-report-only: on that fault, also dump guest code around the pc and the return
+	// addresses into the run's log folder.
+	bool                     guest_fault_report_only    = false;
+	// --guest-clock-hold-on-stall <ms>: the guest clock stands still while no frame was recorded for
+	// more than this long and the render side is busy with shaders. 0 = off.
+	uint32_t                 guest_clock_hold_ms        = 0;
+	// --dump-registered-shaders: copy each distinct registered shader and an index record here.
+	// Empty = off.
+	std::filesystem::path    dump_registered_shaders_folder;
 };
 
 void Load(const ConfigOptions& cfg);
@@ -248,6 +271,14 @@ const std::vector<uint64_t>& BufferProbeHashes();
 uint32_t LoopGuardLimit();
 bool ShaderKeyIndexEnabled();
 uint32_t AsyncPumpBudgetMs();
+uint32_t AsyncWorkers();
+bool     AsyncSpeculativeModules();
+uint32_t RenderStallReportSeconds();
+uint32_t AsyncIrBudgetMb();
+bool     GuestFaultParkEnabled();
+bool     GuestFaultReportOnlyEnabled();
+uint32_t GuestClockHoldMs();
+const std::filesystem::path& GetRegisteredShaderDumpFolder();
 
 } // namespace Config
 

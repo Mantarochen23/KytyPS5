@@ -1,0 +1,137 @@
+#ifndef EMULATOR_SRC_GRAPHICS_HOST_GPU_RENDERER_PIPELINE_ASYNCPLAN_H_
+#define EMULATOR_SRC_GRAPHICS_HOST_GPU_RENDERER_PIPELINE_ASYNCPLAN_H_
+
+#include <algorithm>
+#include <cstdint>
+#include <vector>
+
+// The decisions of --async-shader-compile that need no Vulkan, so that they can be tested: what a
+// request for a stage does, whether a translation may also build its module, and which waiting
+// translations are dropped for the memory budget. pipelineAsync.cpp applies them.
+namespace Libs::Graphics::AsyncPlan {
+
+// What a draw or dispatch that found no module for its resources does for a stage.
+enum class Action : uint8_t {
+	// A module job for these resources is running; mark it waited-for.
+	JoinModuleJob,
+	// A translation is waiting for these resources; post the module job from it.
+	PostModuleJob,
+	// The translation job is running; mark it waited-for.
+	JoinTranslation,
+	// Nothing exists for the stage: post a translation job.
+	PostTranslation,
+	// Prefetch only and the program is already known; do nothing.
+	Nothing,
+};
+
+struct RequestState {
+	// The cache has a program for the stage, from an earlier translation or from the shader store.
+	bool has_program = false;
+	// Only a prefetch asks (no draw or dispatch waits for it).
+	bool prefetch_only = false;
+	// A finished translation waits in the translation table.
+	bool translation_ready = false;
+	// A module job for exactly these resources and push window is in flight.
+	bool module_job_in_flight = false;
+	// The translation job for the stage is in flight.
+	bool translation_in_flight = false;
+};
+
+[[nodiscard]] constexpr Action Decide(const RequestState& state) {
+	if (state.has_program) {
+		if (state.prefetch_only) {
+			return Action::Nothing;
+		}
+		// The module job took the translation, so a running one is joined whether or not a
+		// translation is still waiting: asking for a new translation then would redo the work.
+		if (state.module_job_in_flight) {
+			return Action::JoinModuleJob;
+		}
+		if (state.translation_ready) {
+			return Action::PostModuleJob;
+		}
+	}
+	return state.translation_in_flight ? Action::JoinTranslation : Action::PostTranslation;
+}
+
+[[nodiscard]] constexpr const char* Name(Action action) {
+	switch (action) {
+		case Action::JoinModuleJob: return "module job running";
+		case Action::PostModuleJob: return "module job posted";
+		case Action::JoinTranslation: return "translation running";
+		case Action::PostTranslation: return "translation posted";
+		case Action::Nothing: return "known program, prefetch";
+	}
+	return "";
+}
+
+// Whether a translation job may also build the stage's module before any draw has named its
+// resources. Only the first request for a stage may: when the cache already has the program, either
+// it came from the shader store or an earlier speculative module did not serve the dispatch that
+// came back, and building the same module again would repeat for ever.
+[[nodiscard]] constexpr bool MaySpeculate(bool enabled, bool compute, bool has_program) {
+	return enabled && compute && !has_program;
+}
+
+// The memory the finished translations that no draw has asked for yet may hold, as the sum of their
+// estimated IR sizes. A translation is kept while its shader is registered, so a draw that comes
+// back after a minute or an hour still finds it; only when the translations hold more than this
+// are the least recently requested ones dropped, and a request for a dropped stage translates it
+// again. 0 = no limit.
+inline constexpr uint64_t DefaultIrBudgetBytes = uint64_t {2048} << 20;
+
+// When a translation was last wanted: the later of its finish and the last request for it.
+template <typename Entry> [[nodiscard]] constexpr uint64_t LastRequested(const Entry& entry) {
+	return std::max(entry.since, entry.asked);
+}
+
+// What dropping for the budget took.
+struct Dropped {
+	size_t   count = 0;
+	uint64_t bytes = 0;
+	// How long ago the most recently requested of the dropped entries was requested.
+	uint64_t newest_age_ms = 0;
+	// What the table holds afterwards.
+	size_t   kept       = 0;
+	uint64_t kept_bytes = 0;
+};
+
+// Moves entries of `table` (key -> {since, asked, bytes, ...}) into `dropped`, least recently
+// requested first, until the table holds at most `budget_bytes`; the caller frees them where it
+// chooses. Nothing is dropped while the table is within the budget or the budget is 0.
+template <typename Table, typename Out>
+Dropped TakeOverBudget(Table& table, uint64_t now, uint64_t budget_bytes, Out& dropped) {
+	Dropped result;
+	uint64_t total = 0;
+	for (const auto& entry: table) {
+		total += entry.second.bytes;
+	}
+	if (budget_bytes != 0 && total > budget_bytes) {
+		std::vector<typename Table::iterator> order;
+		order.reserve(table.size());
+		for (auto it = table.begin(); it != table.end(); ++it) {
+			order.push_back(it);
+		}
+		std::sort(order.begin(), order.end(), [](const auto& a, const auto& b) {
+			return LastRequested(a->second) < LastRequested(b->second);
+		});
+		for (const auto& it: order) {
+			if (total <= budget_bytes) {
+				break;
+			}
+			total -= it->second.bytes;
+			result.bytes += it->second.bytes;
+			result.count++;
+			result.newest_age_ms = now - LastRequested(it->second);
+			dropped.push_back(std::move(it->second));
+			table.erase(it);
+		}
+	}
+	result.kept       = table.size();
+	result.kept_bytes = total;
+	return result;
+}
+
+} // namespace Libs::Graphics::AsyncPlan
+
+#endif // EMULATOR_SRC_GRAPHICS_HOST_GPU_RENDERER_PIPELINE_ASYNCPLAN_H_

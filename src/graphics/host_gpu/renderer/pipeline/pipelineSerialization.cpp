@@ -1,5 +1,6 @@
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderStoreCapability.h"
+#include "graphics/host_gpu/renderer/pipeline/shaderStoreFile.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderStoreIdentity.h"
 
 #include "common/emulatorConfig.h"
@@ -12,6 +13,7 @@
 #include "graphics/shader/recompiler/ir/Serialize.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstring>
@@ -31,13 +33,6 @@ using ShaderRecompiler::IR::Reader;
 using ShaderRecompiler::IR::Writer;
 
 enum class Record : uint8_t { Module, GraphicsPipeline, TessellationLayout, FailedProgram, KeyIndex };
-
-// Precedes each record's zstd frame.
-struct Frame {
-	uint32_t compressed_size = 0;
-	uint32_t raw_size        = 0;
-	uint64_t checksum        = 0; // XXH3 of the compressed bytes.
-};
 
 // Explicit store format version. Bump manually only when recompiler output, SPIR-V profile, or
 // store record layout changes so rebuilds across branches keep reusing compatible warm stores.
@@ -94,18 +89,33 @@ ShaderStoreWriter::ShaderStoreWriter() {
 }
 
 void ShaderStoreWriter::Append(std::vector<uint8_t>&& record) {
+	m_appended.fetch_add(1, std::memory_order_relaxed);
 	Post([this, record = std::move(record)] {
-		std::vector<uint8_t> bytes(sizeof(Frame) + ZSTD_compressBound(record.size()));
-		const auto size = ZSTD_compress(bytes.data() + sizeof(Frame), bytes.size() - sizeof(Frame),
-		                                record.data(), record.size(), 3);
-		EXIT_IF(ZSTD_isError(size));
-		const Frame frame {.compressed_size = static_cast<uint32_t>(size),
-		                   .raw_size        = static_cast<uint32_t>(record.size()),
-		                   .checksum        = XXH3_64bits(bytes.data() + sizeof(Frame), size)};
-		std::memcpy(bytes.data(), &frame, sizeof(frame));
+		const auto bytes = ShaderStoreFile::Encode(record);
 		// A failed write leaves a partial record; the next run drops it and everything after it.
-		m_file.Write(bytes.data(), static_cast<uint32_t>(sizeof(Frame) + size));
+		const auto total   = static_cast<uint32_t>(bytes.size());
+		uint32_t   written = 0;
+		m_file.Write(bytes.data(), total, &written);
+		(written == total ? m_written : m_failed).fetch_add(1, std::memory_order_relaxed);
+		// A run that ends by an abort must lose nothing it had finished: the data is forced to the
+		// disk as soon as the queue is empty, and at least every FlushIntervalMs while it is not.
+		const auto now = std::chrono::steady_clock::now();
+		if (QueueEmpty() || now - m_last_flush >= std::chrono::milliseconds(FlushIntervalMs)) {
+			Flush();
+		}
 	});
+}
+
+void ShaderStoreWriter::Flush() {
+	if (m_file.Flush()) {
+		m_flushed.store(m_written.load(std::memory_order_relaxed), std::memory_order_relaxed);
+	}
+	m_last_flush = std::chrono::steady_clock::now();
+}
+
+bool ShaderStoreWriter::QueueEmpty() {
+	std::scoped_lock lock(m_mutex);
+	return m_jobs.empty();
 }
 
 void ShaderStoreWriter::Post(Common::UniqueFunction<void>&& job) {
@@ -234,6 +244,33 @@ void PipelineCache::WarmUp(const std::filesystem::path& path) {
 		Log::WriteToConsoleAndLog(fmt::format(
 		    "Shader cache: indexed {} keys for {} hashes\n", indexed_keys, m_key_index.size()));
 	}
+	{
+		// Per stage: programs with at least one module, and programs recorded as failed.
+		constexpr size_t stages = static_cast<size_t>(ShaderType::TessellationEvaluation) + 1;
+		std::array<size_t, stages> with_modules {};
+		std::array<size_t, stages> failed {};
+		for (const auto& [key, program]: m_program_cache) {
+			const auto stage = static_cast<size_t>(key.stage);
+			if (stage >= stages) {
+				continue;
+			}
+			with_modules[stage] += program.modules.empty() ? 0u : 1u;
+			failed[stage] += program.skip_dispatch ? 1u : 0u;
+		}
+		const auto text = [&](const auto& counts) {
+			return fmt::format("vs={} ps={} cs={} gs={} ls={} hs={} tes={}",
+			                   counts[static_cast<size_t>(ShaderType::Vertex)],
+			                   counts[static_cast<size_t>(ShaderType::Pixel)],
+			                   counts[static_cast<size_t>(ShaderType::Compute)],
+			                   counts[static_cast<size_t>(ShaderType::Mesh)],
+			                   counts[static_cast<size_t>(ShaderType::Local)],
+			                   counts[static_cast<size_t>(ShaderType::TessellationControl)],
+			                   counts[static_cast<size_t>(ShaderType::TessellationEvaluation)]);
+		};
+		Log::WriteToConsoleAndLog(fmt::format(
+		    "Shader cache: loaded per stage: programs with modules {}; failed programs {}\n",
+		    text(with_modules), text(failed)));
+	}
 	Log::WriteToConsoleAndLog(fmt::format(
 	    "Shader cache: loaded {} programs, {} modules, {} pipelines in {} ms\n",
 	    m_program_cache.size(), modules.size() - 1,
@@ -245,26 +282,12 @@ void PipelineCache::WarmUp(const std::filesystem::path& path) {
 
 PipelineCache::LoadRecordStatus PipelineCache::LoadRecord(std::span<const uint8_t>& records,
                                                           bool keep_on_error) {
-	Frame frame;
-	if (records.size() < sizeof(frame)) {
-		return LoadRecordStatus::EndOfStream;
-	}
-	std::memcpy(&frame, records.data(), sizeof(frame));
-	if (records.size() - sizeof(frame) < frame.compressed_size) {
-		return LoadRecordStatus::EndOfStream;
-	}
-	const auto compressed = records.subspan(sizeof(frame), frame.compressed_size);
-	const auto advance    = [&] { records = records.subspan(sizeof(frame) + compressed.size()); };
-	if (keep_on_error) {
-		advance();
-	}
-	if (XXH3_64bits(compressed.data(), compressed.size()) != frame.checksum ||
-	    ZSTD_getFrameContentSize(compressed.data(), compressed.size()) != frame.raw_size) {
-		return LoadRecordStatus::Failed;
-	}
-	std::vector<uint8_t> raw(frame.raw_size);
-	if (ZSTD_decompress(raw.data(), raw.size(), compressed.data(), compressed.size()) != raw.size()) {
-		return LoadRecordStatus::Failed;
+	std::vector<uint8_t> raw;
+	size_t               frame_bytes = 0;
+	switch (ShaderStoreFile::Decode(records, keep_on_error, raw, frame_bytes)) {
+		case ShaderStoreFile::Status::EndOfStream: return LoadRecordStatus::EndOfStream;
+		case ShaderStoreFile::Status::Failed: return LoadRecordStatus::Failed;
+		case ShaderStoreFile::Status::Loaded: break;
 	}
 	Reader     reader {raw};
 	auto       type     = Record::Module;
@@ -364,7 +387,7 @@ PipelineCache::LoadRecordStatus PipelineCache::LoadRecord(std::span<const uint8_
 		default: return LoadRecordStatus::Failed;
 	}
 	if (!keep_on_error) {
-		advance();
+		records = records.subspan(frame_bytes);
 	}
 	return LoadRecordStatus::Loaded;
 }

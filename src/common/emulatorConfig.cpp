@@ -502,4 +502,37 @@ uint32_t AsyncPumpBudgetMs() {
 	return g_config != nullptr ? g_config->async_pump_budget_ms : 2u;
 }
 
+uint32_t AsyncWorkers() {
+	return g_config != nullptr ? g_config->async_workers : 0u;
+}
+
+bool AsyncSpeculativeModules() {
+	return g_config == nullptr || g_config->async_speculative_modules != 0u;
+}
+
+uint32_t RenderStallReportSeconds() {
+	return g_config != nullptr ? g_config->render_stall_report_s : 5u;
+}
+
+uint32_t AsyncIrBudgetMb() {
+	return g_config != nullptr ? g_config->async_ir_budget_mb : 2048u;
+}
+
+bool GuestFaultParkEnabled() {
+	return g_config != nullptr && g_config->guest_fault_park;
+}
+
+bool GuestFaultReportOnlyEnabled() {
+	return g_config != nullptr && g_config->guest_fault_report_only;
+}
+
+uint32_t GuestClockHoldMs() {
+	return g_config != nullptr ? g_config->guest_clock_hold_ms : 0u;
+}
+
+const std::filesystem::path& GetRegisteredShaderDumpFolder() {
+	static const std::filesystem::path none;
+	return g_config != nullptr ? g_config->dump_registered_shaders_folder : none;
+}
+
 } // namespace Config

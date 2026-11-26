@@ -45,6 +45,29 @@ ShaderWorkers::JobPtr ShaderWorkers::Pick(uint32_t index) {
 	const auto fresh = [now](const JobPtr& job) {
 		return now - job->asked.load(std::memory_order_relaxed) < StaleAfterMs;
 	};
+	// Level one: jobs a draw or dispatch is blocked on, oldest first.
+	{
+		std::vector<JobPtr>* best_pool = nullptr;
+		std::vector<JobPtr>::iterator best;
+		for (auto* pool: {&m_urgent_jobs, &m_jobs}) {
+			for (auto it = pool->begin(); it != pool->end(); ++it) {
+				if (!(*it)->waited.load(std::memory_order_relaxed)) {
+					continue;
+				}
+				if (best_pool == nullptr || (*it)->sequence < (*best)->sequence) {
+					best_pool = pool;
+					best      = it;
+				}
+			}
+		}
+		if (best_pool != nullptr) {
+			auto job = std::move(*best);
+			*best    = std::move(best_pool->back());
+			best_pool->pop_back();
+			return job;
+		}
+	}
+	// Level two: urgent before normal, then by the draws' interest.
 	for (auto* pool: {&m_urgent_jobs, &m_jobs}) {
 		auto best = pool->end();
 		for (auto it = pool->begin(); it != pool->end(); ++it) {
@@ -75,8 +98,10 @@ ShaderWorkers::JobPtr ShaderWorkers::Pick(uint32_t index) {
 	return nullptr;
 }
 
-ShaderWorkers::JobPtr ShaderWorkers::Post(Common::UniqueFunction<void>&& run, Priority priority) {
+ShaderWorkers::JobPtr ShaderWorkers::Post(Common::UniqueFunction<void>&& run, Priority priority,
+                                          bool waited) {
 	auto job      = std::make_shared<Job>();
+	job->waited.store(waited, std::memory_order_relaxed);
 	job->run      = std::move(run);
 	job->priority = priority;
 	job->Touch();
@@ -93,11 +118,18 @@ ShaderWorkers::JobPtr ShaderWorkers::Post(Common::UniqueFunction<void>&& run, Pr
 	return job;
 }
 
+void ShaderWorkers::MarkWaited(const JobPtr& job) {
+	if (job) {
+		job->Touch();
+		job->waited.store(true, std::memory_order_relaxed);
+	}
+}
+
 void ShaderWorkers::Promote(const JobPtr& job) {
 	if (!job) {
 		return;
 	}
-	job->Touch();
+	MarkWaited(job);
 	bool promoted = false;
 	{
 		std::scoped_lock lock(m_mutex);
