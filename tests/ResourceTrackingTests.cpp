@@ -9682,10 +9682,31 @@ void TestSrtRootedBufferStore() {
       f.AddMemory({.kind = ResourceKind::Buffer, .idxen = true}, 0x1a0u));
   f.PlanAndTrack();
 
-  const auto plan = ExtractResourcePlan(f.program);
-  Check(std::ranges::any_of(plan.descriptor_sources,
-            [](const auto &source) { return source.indirect_descriptor.has_value(); }),
-        "SRT-rooted store descriptor was not planned");
+  Check(f.program.resource_tracking_complete,
+        "SRT-rooted store descriptor did not finish translation");
+}
+
+// The table V# is fetched from a dynamically indexed SRT slot: the exact reported shape
+// GetBufferResource->ReadConstBuffer->GetBufferResource->ReadConst->GetSrtResource.
+void TestSrtDynamicSlotDescriptor() {
+  Fixture f;
+  const auto srt = f.Emit(ValueOpcode::GetSrtResource);
+  const auto srt_read = f.Emit(ValueOpcode::ReadConst, {srt, f.UserData(5u)});
+  const auto table = f.Buffer({srt_read, Value(0u), Value(64u), Value(0u)}, 0x104u);
+  const auto key = f.UserData(4u);
+  std::array<Value, 4> words{};
+  for (uint32_t word = 0; word < 4u; ++word) {
+    words[word] = f.Emit(ValueOpcode::ReadConstBuffer,
+        {table, f.Emit(ValueOpcode::IMul32, {key, Value(16u)})},
+        f.AddMemory({.kind = ResourceKind::ScalarBuffer, .offset = word * 4u}, 0x180u));
+  }
+  const auto handle = f.Buffer(words, 0x190u);
+  f.Emit(ValueOpcode::StoreBufferU32,
+      {handle, Value(0u), Value(0u), Value(0u), Value(7u), Value(true)},
+      f.AddMemory({.kind = ResourceKind::Buffer, .idxen = true}, 0x1a0u));
+  f.PlanAndTrack();
+  Check(f.program.resource_tracking_complete,
+        "dynamic-SRT-rooted pointer descriptor did not finish translation");
 }
 
 // Independent per-DWORD offsets can wrap to different table rows, so a bounded scalar scan
@@ -9843,6 +9864,7 @@ int main(int argc, char **argv) {
     Run("malformed memory kinds", TestMalformedMemoryKindsRejected);
     Run("srt-descriptor", TestSrtRootedBufferDescriptor);
     Run("srt-store", TestSrtRootedBufferStore);
+    Run("srt-dynamic", TestSrtDynamicSlotDescriptor);
     Run("srt-reject", TestSrtRootedStoreRejected);
     Run("translator capability version", TestTranslatorCapabilityVersion);
   } catch (const std::exception &exception) {
