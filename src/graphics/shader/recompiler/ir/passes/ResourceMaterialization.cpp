@@ -1789,10 +1789,11 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 					        program, base.source, i, 4u, 4u, observed, snapshot, snapshot.buffers,
 					        specialization.buffers,
 					        [&](DescriptorValue& value) {
-						        return NormalizeIndirectBuffer(
-						            value, source->indirect_descriptor->indexed, base);
+						        return !source->indirect_descriptor->sources.empty() ||
+						               NormalizeIndirectBuffer(
+						                   value, source->indirect_descriptor->indexed, base);
 					        },
-					        true))
+					        true)
 						return resource_failed("buffer", i, base.source, snapshot.buffers.size());
 				}
 			} else if (!evaluate(base.source, snapshot.buffers[i])) {
