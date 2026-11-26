@@ -17,6 +17,8 @@
 #   KYTY_AUTO_CROSS=<s>  no controller needed: Cross is pressed every 2 s for the first <s> seconds
 #   KYTY_PROFILE_AT=<s>|stall  perf-record the emulator for KYTY_PROFILE_SECONDS (20) from that second;
 #                      writes perf.data, perf.txt (hot functions), perf-threads.txt
+#   KYTY_SHADER_CACHE=0  do not keep translated shaders between runs (default: kept in the state
+#                      folder and compiled at boot on all cores, so every run starts further)
 #   KYTY_TRACE=0       run without --trace-calls
 #   KYTY_FORCE=1   start although another sandboxed run holds the GPU
 #
@@ -54,6 +56,7 @@ run=$(cd "$run" && pwd); state=$(cd "$state" && pwd)
 opts=(--game "$game" --printf-direction Console)
 [ "${KYTY_KEEP_GOING:-1}" = 1 ] && opts+=(--keep-going)
 [ "${KYTY_TRACE:-1}" = 1 ] && opts+=(--trace-calls)
+[ "${KYTY_SHADER_CACHE:-1}" = 1 ] && opts+=(--shader-cache)
 [ "${KYTY_AUTO_CROSS:-0}" != 0 ] && opts+=(--auto-cross "$KYTY_AUTO_CROSS")
 opts+=("$@")
 
