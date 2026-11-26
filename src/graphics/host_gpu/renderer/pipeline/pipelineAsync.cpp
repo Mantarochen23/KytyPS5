@@ -6,6 +6,8 @@
 #include "common/logging/log.h"
 #include "common/recoverable.h"
 #include "common/threads.h"
+#include "graphics/host_gpu/renderer/pipeline/asyncPlan.h"
+#include "graphics/host_gpu/renderer/pipeline/renderActivity.h"
 #include "graphics/host_gpu/renderer/pipeline/skippedDraws.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/shader/recompiler/frontend/decode/ShaderDecoder.h"
@@ -97,20 +99,33 @@ void PipelineCache::RequestAsync(const ProgramKey& key, Program* program,
 	auto*      async       = m_async.get();
 	const auto translating = FlightId(key, {UINT32_MAX, UINT32_MAX}, nullptr);
 
-	if (program != nullptr) {
-		if (mode == AsyncMode::PrefetchOnly) {
-			return;
-		}
-		// The program is known; a draw's resources decide which module it needs. If a translation
-		// is waiting, compile it for them.
-		if (const auto found = async->translations.find(key); found != async->translations.end()) {
-			const auto compiling = FlightId(key, push_data, &program->specialization);
-			if (const auto flying = async->in_flight.find(compiling);
-			    flying != async->in_flight.end()) {
-				// A draw wants it again: it is the scene on screen.
-				async->Want(compiling, flying->second.job);
-				return;
-			}
+	const bool has_program = program != nullptr;
+	const auto found       = has_program ? async->translations.find(key) : async->translations.end();
+	const auto compiling =
+	    has_program ? FlightId(key, push_data, &program->specialization) : uint64_t {0};
+	const auto compiling_flight = has_program ? async->in_flight.find(compiling) : async->in_flight.end();
+	const auto action           = AsyncPlan::Decide({
+	              .has_program           = has_program,
+	              .prefetch_only         = mode == AsyncMode::PrefetchOnly,
+	              .translation_ready     = found != async->translations.end(),
+	              .module_job_in_flight  = compiling_flight != async->in_flight.end(),
+	              .translation_in_flight = async->in_flight.contains(translating),
+	          });
+	if (mode != AsyncMode::PrefetchOnly) {
+		// What the stall reporter says the render thread waits for.
+		RenderActivity::NoteDetail(AsyncPlan::Name(action));
+	}
+	if (action == AsyncPlan::Action::Nothing) {
+		return;
+	}
+	if (action == AsyncPlan::Action::JoinModuleJob) {
+		// A draw wants it again: it is the scene on screen.
+		async->Want(compiling, compiling_flight->second.job);
+		return;
+	}
+	if (action == AsyncPlan::Action::PostModuleJob) {
+		{
+			// A translation is waiting: compile it for the draw's resources.
 			found->second.asked = AskClockMs();
 			auto translation = async->translations.extract(found);
 			auto inputs      = std::move(translation.mapped().inputs);
@@ -225,8 +240,9 @@ void PipelineCache::RequestAsync(const ProgramKey& key, Program* program,
 	}
 
 	async->counters.requested++;
-	const bool speculate = Config::AsyncSpeculativeModules() &&
-	                       std::is_same_v<InputInfo, ShaderComputeInputInfo>;
+	const bool speculate = AsyncPlan::MaySpeculate(
+	    Config::AsyncSpeculativeModules(), std::is_same_v<InputInfo, ShaderComputeInputInfo>,
+	    has_program);
 	auto job = async->workers.Post([this, async, inputs, translating, speculate,
 	                                device = m_graphics.device] {
 		std::optional<Common::RecoverableScope> scope;
@@ -431,6 +447,7 @@ void PipelineCache::PumpAsync() {
 	if (m_async == nullptr) {
 		return;
 	}
+	RenderActivity::Scope activity("pump-async");
 	const auto begin = std::chrono::steady_clock::now();
 	m_async->TakeFinished();
 	m_async->PrioritizeBacklog();
@@ -466,6 +483,7 @@ void PipelineCache::WaitForAsync() {
 	if (m_async == nullptr) {
 		return;
 	}
+	RenderActivity::Scope activity("wait-async", 0, "-", "waiting for a worker job");
 	if (m_async->backlog.empty()) {
 		std::unique_lock lock(m_async->done_mutex);
 		m_async->done_cv.wait(lock, [this] {
@@ -529,9 +547,15 @@ void PipelineCache::Async::ReportStatus() {
 	last_report_ms = now;
 	// A translation no draw has come back for in a minute belongs to something no longer on
 	// screen; a later draw translates it again.
-	counters.expired += std::erase_if(translations, [now](const auto& entry) {
-		return now - std::max(entry.second.since, entry.second.asked) > 60000;
-	});
+	// The IR of a thousand translations takes the render thread seconds to free, so the expired
+	// ones are freed by a worker.
+	std::vector<Translation> dropped;
+	counters.expired += AsyncPlan::TakeExpired(translations, now, dropped);
+	if (!dropped.empty()) {
+		RenderActivity::Scope activity("expire-translations");
+		// If the workers are stopped the lambda, and with it the vector, is freed here.
+		(void)workers.Post([dropped = std::move(dropped)]() mutable { dropped.clear(); });
+	}
 	size_t translating = 0;
 	for (const auto& [id, flight]: in_flight) {
 		translating += flight.translating ? 1u : 0u;
@@ -685,6 +709,7 @@ bool PipelineCache::EnsureComputePipeline(const ShaderComputeInputInfo& input_in
 		return true;
 	}
 	const auto& module        = *input_info.stage.module;
+	RenderActivity::Note("dispatch-pipeline", module.info.shader_hash, "cs", "pipeline known");
 	auto [iter, inserted]     = m_compute_pipelines.try_emplace(module.id);
 	auto& pipeline            = iter->second;
 	if (inserted) {
@@ -732,6 +757,7 @@ bool PipelineCache::EnsureComputePipeline(const ShaderComputeInputInfo& input_in
 	}
 	if (pipeline.pending) {
 		pending = true;
+		RenderActivity::NoteDetail("pipeline compiling");
 		return false;
 	}
 	return true;

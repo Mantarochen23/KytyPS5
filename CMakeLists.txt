@@ -528,6 +528,11 @@ add_executable(shader_workers_tests EXCLUDE_FROM_ALL
 target_link_libraries(shader_workers_tests common)
 target_include_directories(shader_workers_tests PRIVATE ${inc_headers})
 
+add_executable(async_plan_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/AsyncPlanTests.cpp"
+)
+target_include_directories(async_plan_tests PRIVATE ${inc_headers})
+
 add_executable(lru_cache_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/LruCacheTests.cpp"
 )
