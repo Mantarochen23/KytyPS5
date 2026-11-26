@@ -1,3 +1,4 @@
+#include "common/alignment.h"
 #include "common/assert.h"
 #include "common/common.h"
 #include "common/debugCounters.h"
@@ -15,6 +16,7 @@
 #include "graphics/host_gpu/renderer/image/imageInfo.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
+#include "graphics/host_gpu/renderer/pipeline/bufferProbe.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
@@ -400,6 +402,220 @@ static void CaptureComputeBufferBreadcrumbs(RenderContext&               context
 	}
 }
 
+// --buffer-probe: for dispatches of the listed shaders, compares the guest memory of every bound
+// storage buffer with the bytes the GPU reads.
+//
+// Ordering: the probe runs on the GPU thread after the dispatch's bindings are final (the cache has
+// uploaded every CPU-dirty range it was going to) and records, in the dispatch's own command
+// buffer right before the dispatch, one barrier, a copy of each bound range into a host-visible
+// buffer and a second barrier. The barrier makes every earlier command of the stream (cache
+// uploads, earlier dispatches and draws) visible to the copy, so the copy sees exactly what the
+// dispatch will start with. The guest bytes are read at record time. The comparison runs once the
+// command buffer has completed, so a guest write after recording shows up as a difference.
+// The cache state is sampled BEFORE the binding step, so "synced" on a differing range means the
+// cache believed the range was up to date.
+namespace {
+
+struct BufferProbeBinding {
+	uint32_t                  index         = 0;
+	uint64_t                  guest         = 0;
+	uint64_t                  size          = 0;
+	uint64_t                  compared      = 0;
+	uint64_t                  staging_offset = 0;
+	bool                      written       = false;
+	bool                      guest_ok      = false;
+	BufferProbe::CacheState   state         = BufferProbe::CacheState::Synced;
+	std::vector<uint8_t>      guest_bytes;
+};
+
+class BufferProbeRunner {
+public:
+	static constexpr uint64_t MaxBytesPerBuffer   = 16ull * 1024 * 1024;
+	static constexpr uint64_t MaxBytesPerDispatch = 64ull * 1024 * 1024;
+
+	// Before the cache binds the buffers: remember what it believes about every bound range.
+	static std::vector<BufferProbe::CacheState> SampleCacheState(RenderContext&          context,
+	                                                             const PreparedBindings& bindings) {
+		auto&                                     cache = context.GetBufferCache();
+		std::vector<BufferProbe::CacheState> result(bindings.buffer_sources.size(),
+		                                            BufferProbe::CacheState::Synced);
+		for (size_t i = 0; i < bindings.buffer_sources.size(); i++) {
+			const auto& source = bindings.buffer_sources[i];
+			if (source.address == 0 || source.size == 0 ||
+			    !GuestRange {source.address, source.size}.Valid()) {
+				continue;
+			}
+			result[i] = BufferProbe::ClassifyCacheState(
+			    cache.IsRegionCpuModified(source.address, source.size),
+			    cache.IsRegionGpuModified(source.address, source.size));
+		}
+		return result;
+	}
+
+	void Record(RenderContext& context, CommandBuffer& command, uint64_t hash,
+	            const PreparedBindings&                     bindings,
+	            const std::vector<BufferProbe::CacheState>& states) {
+		const auto& program = bindings.runtime->module->info;
+		auto&       cache   = context.GetBufferCache();
+		const auto  stream  = cache.GetUtilityBuffer(MemoryUsage::Stream).Handle();
+
+		std::vector<BufferProbeBinding> probed;
+		std::vector<vk::BufferCopy>     copies;
+		std::vector<vk::Buffer>         sources;
+		std::vector<uint64_t>           host_start(bindings.buffer_sources.size(), 0);
+		std::vector<bool>               host_stream(bindings.buffer_sources.size(), false);
+		uint64_t                        total = 0;
+		for (const auto& resource: program.info.buffers) {
+			const auto index = resource.descriptor_index;
+			if (index == UINT32_MAX || index >= bindings.buffer_sources.size() ||
+			    index >= bindings.buffers.size()) {
+				continue;
+			}
+			const auto& source = bindings.buffer_sources[index];
+			const auto& info   = bindings.buffers[index];
+			if (source.address == 0 || source.size == 0 || !info.buffer) continue;
+			// The memory-offset adjustment the binding step packed next to the shader data.
+			const auto& layout    = program.bindings;
+			const auto dword      = layout.memory_offset_dword + index / 4u;
+			const auto adjustment = dword < bindings.shader_data.size()
+			                            ? (bindings.shader_data[dword] >> ((index % 4u) * 8u)) & 0xffu
+			                            : 0u;
+			host_start[index]  = info.offset + adjustment;
+			host_stream[index] = info.buffer == stream;
+
+			BufferProbeBinding entry;
+			entry.index   = index;
+			entry.guest   = source.address;
+			entry.size    = source.size;
+			entry.written = resource.written;
+			entry.state   = index < states.size() ? states[index] : BufferProbe::CacheState::Synced;
+			entry.compared = std::min({source.size, MaxBytesPerBuffer, MaxBytesPerDispatch - total});
+			if (entry.compared == 0) continue;
+			entry.guest_bytes.resize(static_cast<size_t>(entry.compared));
+			entry.guest_ok = LibKernel::Memory::TryReadSparseBacking(
+			    entry.guest, entry.guest_bytes.data(), entry.compared);
+			entry.staging_offset = total;
+			copies.emplace_back(host_start[index], total, entry.compared);
+			sources.push_back(info.buffer);
+			total += Common::AlignUp(entry.compared, 16);
+			probed.push_back(std::move(entry));
+		}
+		if (probed.empty()) return;
+
+		auto staging = std::make_unique<Buffer>(context.GetGraphics(), context.GetCommandScheduler(),
+		                                        MemoryUsage::Download, 0,
+		                                        vk::BufferUsageFlagBits::eTransferDst, total);
+		const auto native = command.Handle();
+		vk::MemoryBarrier before {};
+		before.srcAccessMask = vk::AccessFlagBits::eMemoryWrite | vk::AccessFlagBits::eShaderWrite |
+		                       vk::AccessFlagBits::eTransferWrite;
+		before.dstAccessMask = vk::AccessFlagBits::eTransferRead;
+		native.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
+		                       vk::PipelineStageFlagBits::eTransfer, {}, 1, &before, 0, nullptr, 0,
+		                       nullptr);
+		for (size_t i = 0; i < copies.size(); i++) {
+			native.copyBuffer(sources[i], staging->Handle(), 1, &copies[i]);
+		}
+		vk::MemoryBarrier after {};
+		after.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
+		after.dstAccessMask = vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite;
+		native.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
+		                       vk::PipelineStageFlagBits::eAllCommands, {}, 1, &after, 0, nullptr,
+		                       0, nullptr);
+		// A host write-back of the copy is also needed for non-coherent memory.
+		const uint32_t dispatch = m_dispatch++;
+		std::vector<std::string> alias_lines =
+		    FindSplitAliases(hash, dispatch, probed, host_start, sources);
+		context.GetCommandScheduler().DeferOperation(
+		    [this, hash, dispatch, total, host_stream = std::move(host_stream),
+		     probed = std::move(probed), alias_lines = std::move(alias_lines),
+		     staging = std::move(staging)]() mutable {
+			    Report(hash, dispatch, total, host_stream, probed, alias_lines, *staging);
+		    });
+	}
+
+private:
+	// Two bindings of one dispatch whose guest ranges overlap must see the same bytes, so they
+	// must be views of one host range: same buffer and the same offset-from-guest-address.
+	static std::vector<std::string>
+	FindSplitAliases(uint64_t hash, uint32_t dispatch, const std::vector<BufferProbeBinding>& probed,
+	                 const std::vector<uint64_t>& host_start, const std::vector<vk::Buffer>& sources) {
+		std::vector<std::string> lines;
+		for (size_t a = 0; a < probed.size(); a++) {
+			for (size_t b = a + 1; b < probed.size(); b++) {
+				const auto& x = probed[a];
+				const auto& y = probed[b];
+				if (x.guest >= y.guest + y.size || y.guest >= x.guest + x.size) continue;
+				const bool same_buffer = sources[a] == sources[b];
+				const int64_t delta_x = static_cast<int64_t>(host_start[x.index]) -
+				                        static_cast<int64_t>(x.guest);
+				const int64_t delta_y = static_cast<int64_t>(host_start[y.index]) -
+				                        static_cast<int64_t>(y.guest);
+				if (same_buffer && delta_x == delta_y) continue;
+				char text[320];
+				std::snprintf(text, sizeof(text),
+				              "[buffer-probe] SPLIT-ALIAS shader=0x%016" PRIx64
+				              " dispatch=%u buf=%u (guest=0x%012" PRIx64 " size=0x%" PRIx64
+				              " written=%d) and buf=%u (guest=0x%012" PRIx64 " size=0x%" PRIx64
+				              " written=%d) overlap in guest memory but are bound to different host "
+				              "ranges (%s): the shader's views of the shared bytes diverge",
+				              hash, dispatch, x.index, x.guest, x.size, x.written ? 1 : 0, y.index,
+				              y.guest, y.size, y.written ? 1 : 0,
+				              same_buffer ? "same host buffer, different offsets"
+				                          : "different host buffers");
+				lines.emplace_back(text);
+			}
+		}
+		return lines;
+	}
+
+	void Report(uint64_t hash, uint32_t dispatch, uint64_t total,
+	            const std::vector<bool>& host_stream, std::vector<BufferProbeBinding>& probed,
+	            const std::vector<std::string>& alias_lines, Buffer& staging) {
+		if (!staging.IsCoherent()) staging.Invalidate(0, total);
+		const auto mapped = staging.Mapped();
+		std::lock_guard lock(m_mutex);
+		bool            mismatch   = false;
+		bool            unexpected = false;
+		std::vector<std::string> lines;
+		for (const auto& entry: probed) {
+			if (mapped.empty()) continue;
+			BufferProbe::Comparison comparison;
+			if (entry.guest_ok) {
+				comparison = BufferProbe::Compare(
+				    entry.guest_bytes.data(), mapped.data() + entry.staging_offset, entry.compared);
+			}
+			mismatch   = mismatch || comparison.Differs();
+			unexpected = unexpected || BufferProbe::IsUnexpectedDifference(comparison, entry.state);
+			auto line = BufferProbe::FormatLine(hash, dispatch, entry.index, entry.guest,
+			                                    entry.size, entry.written, entry.state, entry.guest_ok,
+			                                    comparison);
+			if (entry.index < host_stream.size() && host_stream[entry.index]) line += " src=stream";
+			if (entry.compared < entry.size) line += " TRUNCATED";
+			lines.push_back(std::move(line));
+		}
+		const bool aliased = !alias_lines.empty();
+		if (m_limiter.OnDispatch(mismatch || aliased, unexpected || aliased)) {
+			for (const auto& line: alias_lines) Log::WriteToConsoleAndLog((line + "\n").c_str());
+			for (const auto& line: lines) Log::WriteToConsoleAndLog((line + "\n").c_str());
+		}
+		if (m_limiter.SummaryDue()) {
+			Log::WriteToConsoleAndLog((m_limiter.Summary() + "\n").c_str());
+		}
+	}
+
+	std::mutex            m_mutex;
+	BufferProbe::Limiter  m_limiter;
+	uint32_t              m_dispatch = 0;
+};
+
+BufferProbeRunner& GetBufferProbe() {
+	static BufferProbeRunner runner;
+	return runner;
+}
+
+} // namespace
+
 static bool HasStorageWrites(const ShaderComputeInputInfo& input_info,
                              const PreparedBindings&       bindings) {
 	const auto& images = input_info.stage.module->info.info.images;
@@ -513,6 +729,9 @@ bool RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 	PreparedBindings* descriptor_stage = &bindings;
 	CacheDmaBases(m_context, input_info.stage);
 	FindBuffers(std::span {&descriptor_stage, 1u});
+	const bool buffer_probe = Config::BufferProbeShader(program.shader_hash);
+	std::vector<BufferProbe::CacheState> probe_states;
+	if (buffer_probe) probe_states = BufferProbeRunner::SampleCacheState(m_context, bindings);
 	if (program.info.uses_dma) {
 		m_context.PrepareBda();
 	}
@@ -595,6 +814,9 @@ bool RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 	}
 
 	vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.pipeline);
+	if (buffer_probe) {
+		GetBufferProbe().Record(m_context, buffer, program.shader_hash, bindings, probe_states);
+	}
 	OpBreadcrumb dispatch_op {};
 	dispatch_op.kind        = BreadcrumbOpKind::Dispatch;
 	dispatch_op.dim_x       = thread_group_x;
@@ -672,6 +894,9 @@ bool RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 	CacheDmaBases(m_context, input_info.stage);
 	FindBuffers(std::span {&descriptor_stage, 1u});
 	const auto& program = input_info.stage.module->info;
+	const bool buffer_probe = Config::BufferProbeShader(program.shader_hash);
+	std::vector<BufferProbe::CacheState> probe_states;
+	if (buffer_probe) probe_states = BufferProbeRunner::SampleCacheState(m_context, bindings);
 	if (program.info.uses_dma) {
 		m_context.PrepareBda();
 	}
@@ -693,6 +918,9 @@ bool RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 		ShaderWriteHazardBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
 	}
 	vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.pipeline);
+	if (buffer_probe) {
+		GetBufferProbe().Record(m_context, buffer, program.shader_hash, bindings, probe_states);
+	}
 	OpBreadcrumb dispatch_op {};
 	dispatch_op.kind        = BreadcrumbOpKind::DispatchIndirect;
 	dispatch_op.stage_count = 1;
