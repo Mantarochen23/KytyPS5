@@ -58,9 +58,9 @@ void TestLabelsNearTheWaitedAddress() {
 	Registry r;
 	r.NoteQueue(0, QueueState::WaitingMemory, 0, 0);
 	r.NotePoll(0, Packet(0x20000, 7, 0), 100);
-	r.NoteLabel(0x20800, 5, 4, 0x21, 500);  // near
-	r.NoteLabel(0x30000, 6, 4, 0x21, 600);  // far
-	r.NoteLabel(0x20000, 4, 4, 0x21, 700);  // the address itself
+	r.NoteLabel(0x20800, 5, 4, 1, 500);  // near
+	r.NoteLabel(0x30000, 6, 4, 1, 600);  // far
+	r.NoteLabel(0x20000, 4, 4, 1, 700);  // the address itself
 	r.NoteReadback(0x1f000, 0x2000, 800);
 	const auto lines = r.Report(1000);
 	Check(Has(lines, "0x0000000000020800 <- 0x5"), "near label shown");
