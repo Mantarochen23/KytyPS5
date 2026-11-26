@@ -177,6 +177,14 @@ bool KeepGoingEnabled() {
 	return g_config->keep_going_enabled;
 }
 
+int32_t AutoCrossSeconds() {
+	return g_config->auto_cross_seconds;
+}
+
+bool TraceCallsEnabled() {
+	return g_config->trace_calls_enabled;
+}
+
 bool ShaderCacheEnabled() {
 	return g_config->shader_cache_enabled;
 }

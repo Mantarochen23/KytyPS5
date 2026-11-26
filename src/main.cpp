@@ -72,6 +72,10 @@ static void PrintUsage() {
 	::printf("  --gpu-assisted-validation            Bounds-check shader accesses on the GPU.\n"
 	         "                                       Implies --vulkan-validation; very slow.\n");
 	::printf("  --shader-validation                  Enable shader validation.\n");
+	::printf("  --auto-cross <seconds>               Debug: for unattended runs, report Cross pressed for 0.15 s\n"
+	         "                                       every 2 s during the first <seconds> of the run.\n");
+	::printf("  --trace-calls                        Debug: log each system library function on its 1st-4th\n"
+	         "                                       call and every power of two after, with the count.\n");
 	::printf("  --keep-going                         Debug: skip draws and dispatches whose shader fails to\n"
 	         "                                       compile, record them in _ShaderFailures/, keep running.\n");
 	::printf("  --shader-cache                       Keep compiled shaders and pipelines between boots.\n");
@@ -212,6 +216,7 @@ static constexpr Flag FLAGS[] = {
     {"--gpu-assisted-validation", &ConfigOptions::gpu_assisted_validation_enabled},
     {"--shader-validation", &ConfigOptions::shader_validation_enabled},
     {"--keep-going", &ConfigOptions::keep_going_enabled},
+    {"--trace-calls", &ConfigOptions::trace_calls_enabled},
     {"--shader-cache", &ConfigOptions::shader_cache_enabled},
     {"--tessellation", &ConfigOptions::tessellation_enabled},
     {"--occlusion-queries", &ConfigOptions::occlusion_queries_enabled},
@@ -352,6 +357,13 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				return false;
 			}
 			options.config.launch_activity = value;
+		} else if (arg == "--auto-cross") {
+			int32_t seconds   = 0;
+			auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), seconds);
+			if (error != std::errc() || end != value.data() + value.size() || seconds < 0) {
+				return false;
+			}
+			options.config.auto_cross_seconds = seconds;
 		} else if (arg == "--user-id") {
 			if (!ParseUserId(value, options.config.user_id)) {
 				::printf("invalid user ID: %s\n", value.c_str());

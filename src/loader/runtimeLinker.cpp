@@ -686,13 +686,42 @@ bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exception_
 			}
 			std::printf("\n");
 		}
-		if (IsReadableRange(info->rsp, 32 * sizeof(uint64_t))) {
-			const auto* stack = reinterpret_cast<const uint64_t*>(info->rsp);
-			std::printf("stack:");
-			for (int i = 0; i < 32; i++) {
-				std::printf("%s %016" PRIx64, (i % 4 == 0) ? "\n " : "", stack[i]);
+		// Module and offset for every code address: pc, the frame-pointer chain, and each stack
+		// word that points into a loaded module (finds callers when a frame has no frame pointer).
+		auto* rt       = Common::Singleton<RuntimeLinker>::Instance();
+		auto  describe = [rt](const char* what, uint64_t vaddr) {
+			if (auto* p = rt->FindProgramByAddr(vaddr); p != nullptr) {
+				std::printf(" %s %016" PRIx64 " = %s+0x%" PRIx64 "\n", what, vaddr,
+				            Common::FilenameWithoutDirectory(Common::PathToGenericString(p->file_name))
+				                .c_str(),
+				            vaddr - p->base_vaddr);
+				return true;
 			}
-			std::printf("\n");
+			return false;
+		};
+		std::printf("guest code addresses:\n");
+		if (!describe("pc      ", info->exception_address)) {
+			std::printf(" pc       %016" PRIx64 " = not in a loaded module\n",
+			            info->exception_address);
+		}
+		void*      frames[32];
+		const auto depth = WalkGuestStack(info->rbp, info->rsp, frames, 32);
+		for (int i = 0; i < depth; i++) {
+			describe("frame   ", reinterpret_cast<uint64_t>(frames[i]));
+		}
+		std::printf("stack words (rsp upward; code addresses are named):\n");
+		for (int i = 0; i < 192; i++) {
+			const auto addr = info->rsp + static_cast<uint64_t>(i) * sizeof(uint64_t);
+			if (!IsReadableRange(addr, sizeof(uint64_t))) {
+				std::printf(" rsp+0x%03x: end of readable stack\n", i * 8);
+				break;
+			}
+			const auto value = *reinterpret_cast<const uint64_t*>(addr);
+			char       what[16];
+			std::snprintf(what, sizeof(what), "rsp+0x%03x", i * 8);
+			if (!describe(what, value) && i < 24) {
+				std::printf(" %s %016" PRIx64 "\n", what, value);
+			}
 		}
 		std::fflush(stdout);
 	}

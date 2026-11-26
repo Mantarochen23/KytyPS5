@@ -86,6 +86,8 @@ struct ConfigOptions {
 	bool                   vulkan_validation_enabled   = false;
 	bool                   shader_validation_enabled   = false;
 	bool                   keep_going_enabled          = false;
+	bool                   trace_calls_enabled         = false;
+	int32_t                auto_cross_seconds          = 0;
 	bool                   shader_cache_enabled        = false;
 	LogDirection           shader_log_direction        = LogDirection::Silent;
 	std::filesystem::path  shader_log_folder           = "_Shaders";
@@ -163,6 +165,8 @@ bool     VulkanValidationEnabled();
 
 bool                   ShaderValidationEnabled();
 bool                   KeepGoingEnabled();
+bool                   TraceCallsEnabled();
+int32_t                AutoCrossSeconds();
 bool                   ShaderCacheEnabled();
 LogDirection           GetShaderLogDirection();
 std::filesystem::path  GetShaderLogFolder();

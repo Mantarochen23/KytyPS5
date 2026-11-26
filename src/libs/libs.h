@@ -7,6 +7,7 @@
 #include "common/threads.h"
 #include "loader/timer.h" // IWYU pragma: keep
 
+#include <atomic>
 #include <fmt/format.h>
 
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
@@ -35,6 +36,13 @@
 #define PRINT_NAME()                                                                               \
 	if (PRINT_NAME_ENABLED) {                                                                      \
 		Libs::PrintName(g_library, g_module, __func__);                                              \
+	} else if (Libs::g_trace_calls) {                                                              \
+		/* --trace-calls: calls 1-4 of each function, then every power of two, with the count. */   \
+		static std::atomic<uint64_t> trace_calls {0};                                                \
+		const auto trace_count = trace_calls.fetch_add(1, std::memory_order_relaxed) + 1;           \
+		if (trace_count <= 4 || (trace_count & (trace_count - 1)) == 0) {                            \
+			Libs::PrintName(g_library, g_module, __func__, trace_count);                             \
+		}                                                                                            \
 	}
 
 namespace Loader {
@@ -44,7 +52,16 @@ class SymbolDatabase;
 namespace Libs {
 
 // Keep the formatting path from inflating fiber functions' stack frames under LTO.
-[[gnu::noinline]] inline void PrintName(const char* library, const char* module, const char* function) {
+inline bool g_trace_calls = false; // Set once at start from --trace-calls.
+
+[[gnu::noinline]] inline void PrintName(const char* library, const char* module, const char* function,
+                                        uint64_t call_count = 0) {
+	if (call_count != 0) {
+		// Straight to stdout: guest logging may be silent or throttled while tracing.
+		std::printf("[%d][trace] %s::%s::%s() #%llu\n", Common::Thread::GetThreadIdUnique(), library,
+		            module, function, static_cast<unsigned long long>(call_count));
+		return;
+	}
 	if (!Log::IsSilent()) {
 		const auto elapsed_ms      = static_cast<uint64_t>(Loader::Timer::GetTimeMs());
 		const auto print_name_time = fmt::format(

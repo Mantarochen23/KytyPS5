@@ -999,6 +999,14 @@ void GameController::ReadState(ControllerState* state, bool* flag, int* count) {
 	*flag  = m_connected;
 	*count = m_connected_count;
 	*state = m_state;
+
+	// --auto-cross: unattended runs get past "press Cross" screens.
+	if (const auto seconds = Config::AutoCrossSeconds(); seconds > 0) {
+		const auto ms = static_cast<uint64_t>(Loader::Timer::GetTimeMs());
+		if (ms < static_cast<uint64_t>(seconds) * 1000u && ms % 2000u < 150u) {
+			state->buttons |= PAD_BUTTON_CROSS;
+		}
+	}
 }
 
 int GameController::ReadStates(ControllerState* states, int states_num, bool* flag, int* count) {

@@ -11,6 +11,8 @@ uses_re = re.compile(rb'!!! SHADER SKIP USES shader=(0x[0-9a-f]{16}) count=(\d+)
 clock_re = re.compile(rb'^\[\d+\]\[(\d\d):(\d\d):(\d\d)\.(\d+)\]')
 norm = lambda b: re.sub(rb'0x[0-9a-fA-F]+', b'0xN', re.sub(rb'\b\d+\b', b'N', b))
 t = 0.0
+trace_re = re.compile(rb'^\[(\d+)\]\[trace\] (\S+)\(\) #(\d+)')
+calls = {}   # function -> [count, first guest time, last guest time]
 compiled = {}            # hash -> (stage, first time seen)
 last_phase = {}          # hash -> last finished phase
 skips = collections.OrderedDict()
@@ -23,11 +25,18 @@ with open(path, 'rb') as f:
         lines += 1
         m = ts_re.search(line)
         if m and line.startswith(b'Controller'):
-            t = float(m.group(1)); continue
+            continue
         if line.startswith(b'Controller'): continue
+        if line.startswith(b'@@T '):
+            t = float(line[4:]); continue
+        if line.startswith(b'[') and b'][trace] ' in line[:24]:
+            m = trace_re.match(line)
+            if m:
+                c = calls.setdefault(m.group(2).decode(), [0, t, t]); c[0] = max(c[0], int(m.group(3))); c[2] = t
+            continue
         if line.startswith(b'['):
             m = clock_re.match(line)
-            if m: t = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + int(m.group(3)) + float(b'0.' + m.group(4))
+            if m and False: t = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + int(m.group(3)) + float(b'0.' + m.group(4))
         tail.append(line.rstrip()[:300])
         if b'ShaderRecompiler' in line:
             m = stage_re.search(line)
@@ -58,11 +67,12 @@ with open(path, 'rb') as f:
         elif line.startswith(b'--- ') and (b'Error' in line or b'Guest fault' in line or b'Build' in line):
             if first_fatal_line is None: first_fatal_line = lines
             fatal.append(line.rstrip().decode(errors='replace'))
-            for _ in range(3):
+            for _ in range(70 if b'Guest fault' in line else 3):
                 nx = f.readline()
                 if not nx: break
                 lines += 1
-                if not nx.startswith(b'Controller'): fatal.append(nx.rstrip().decode(errors='replace')[:600])
+                if nx.startswith(b'--- Host backtrace'): break
+                if not nx.startswith(b'Controller') and b'][trace]' not in nx[:24]: fatal.append(nx.rstrip().decode(errors='replace')[:600])
 stages = collections.Counter(s for s, _ in compiled.values())
 unfinished = {h: p for h, p in last_phase.items() if not p.startswith(('SPIR', 'Emit', 'Optimize'))}
 phases = collections.Counter(last_phase.values())
@@ -72,7 +82,7 @@ out = dict(log=path, lines=lines, run_seconds=round(t, 1), shaders_seen=len(comp
            flip_waits_per_10s=dict(sorted(flip_t.items())), skipped=skips, other_bang_lines=dict(bang.most_common(25)),
            unresolved_stubs_called=dict(unresolved_called), fatal=fatal)
 if '--json' in sys.argv: json.dump(out, open(sys.argv[sys.argv.index('--json') + 1], 'w'), indent=1)
-print(f"log {path}: {lines} lines, ~{out['run_seconds']} s of guest time")
+print(f"log {path}: {lines} lines, ~{out['run_seconds']} s of wall time")
 print(f"shaders seen: {len(compiled)}  by stage: {dict(stages)}")
 print("last finished phase per shader:", dict(phases.most_common(12)))
 print("new shaders per 10 s:", out['new_shaders_per_10s'])
@@ -86,5 +96,17 @@ print(f"failure classes: {len(classes)}  (one class = one fix; shaders / uses (>
 for c in out['failure_classes']: print(f"  {c['shaders']:4d} sh {c['uses']:8d} uses  {c['site']}  {c['reason'][:150]}  e.g. {c['examples'][0]}")
 if '--json' in sys.argv: json.dump(out, open(sys.argv[sys.argv.index('--json') + 1], 'w'), indent=1)
 print("other '!!!' lines:"); [print(f"  {n:6d} x {k}") for k, n in bang.most_common(25)]
+out['calls'] = {k: dict(count=v[0], first=round(v[1], 1), last=round(v[2], 1)) for k, v in calls.items()}
+if calls:
+    libs = collections.Counter()
+    for k, v in calls.items(): libs[k.split('::')[0]] += v[0]
+    print(f"system calls traced: {len(calls)} functions (counts are lower bounds: 1-4, then powers of two)")
+    print("  by library:", dict(libs.most_common(40)))
+    late = sorted((v[1], k, v[0]) for k, v in calls.items())[-25:]
+    print("  last 25 functions to appear (guest s, name, calls):")
+    for ft, k, n in late: print(f"    {ft:7.1f}  {k}  x{n}")
+    for lib in ('Pad', 'UserService', 'SystemService', 'SaveData', 'NpManager'):
+        fs = {k.split('::')[-1]: v[0] for k, v in calls.items() if k.startswith(lib + '::')}
+        print(f"  {lib}: {fs if fs else 'never called'}")
 print("unresolved stubs called:", dict(unresolved_called))
 print("FATAL:" if fatal else "no fatal block"); [print("  " + x) for x in fatal]

@@ -13,6 +13,11 @@
 #                  lines a second)
 #   KYTY_KEEP_GOING=0  run without --keep-going (first failure is fatal, as upstream)
 #   KYTY_FATAL_ABORT=1 abort() on a fatal error so systemd-coredump keeps a core (large)
+#   KYTY_AUDIO=none    no sound (default host: the PulseAudio/PipeWire socket is passed in)
+#   KYTY_AUTO_CROSS=<s>  no controller needed: Cross is pressed every 2 s for the first <s> seconds
+#   KYTY_PROFILE_AT=<s>|stall  perf-record the emulator for KYTY_PROFILE_SECONDS (20) from that second;
+#                      writes perf.data, perf.txt (hot functions), perf-threads.txt
+#   KYTY_TRACE=0       run without --trace-calls
 #   KYTY_FORCE=1   start although another sandboxed run holds the GPU
 #
 # The guest executable runs as native x86-64 code inside the emulator process, so the whole
@@ -46,6 +51,8 @@ run=$(cd "$run" && pwd); state=$(cd "$state" && pwd)
 
 opts=(--game "$game" --printf-direction Console)
 [ "${KYTY_KEEP_GOING:-1}" = 1 ] && opts+=(--keep-going)
+[ "${KYTY_TRACE:-1}" = 1 ] && opts+=(--trace-calls)
+[ "${KYTY_AUTO_CROSS:-0}" != 0 ] && opts+=(--auto-cross "$KYTY_AUTO_CROSS")
 opts+=("$@")
 
 args=(
@@ -67,12 +74,17 @@ args=(
     --setenv HOME /home/sandbox --setenv USER sandbox --setenv PATH /usr/bin
     --setenv TMPDIR /tmp --setenv LANG C.UTF-8
     --setenv XDG_RUNTIME_DIR /run --setenv WAYLAND_DISPLAY "$wl" --setenv SDL_VIDEO_DRIVER wayland
-    --setenv SDL_AUDIODRIVER dummy --setenv ALSOFT_DRIVERS null
     --setenv XDG_CACHE_HOME /data/state/cache --setenv MESA_SHADER_CACHE_DIR /data/state/cache/mesa
 )
 for f in /etc/ld.so.conf /etc/ld.so.conf.d /etc/fonts /usr/share/vulkan; do
     [ -e "$f" ] && args+=(--ro-bind "$f" "$f")
 done
+if [ "${KYTY_AUDIO:-host}" = host ] && [ -S "$xdg/pulse/native" ]; then
+    args+=(--ro-bind "$xdg/pulse/native" /run/pulse/native --setenv PULSE_SERVER unix:/run/pulse/native)
+    [ -S "$xdg/pipewire-0" ] && args+=(--ro-bind "$xdg/pipewire-0" /run/pipewire-0)
+else
+    args+=(--setenv SDL_AUDIODRIVER dummy --setenv ALSOFT_DRIVERS null)
+fi
 [ -n "${KYTY_FATAL_ABORT:-}" ] && args+=(--setenv KYTY_FATAL_ABORT "$KYTY_FATAL_ABORT")
 [ -n "${RADV_DEBUG:-}" ] && args+=(--setenv RADV_DEBUG "$RADV_DEBUG")
 if [ "${KYTY_PAD:-none}" = host ]; then
@@ -106,11 +118,32 @@ net=$(bwrap "${args[@]}" /usr/bin/cat /proc/net/dev 2>"$run/sandbox-probe.err" |
 [ "$net" = "lo " ] || { echo "run.sh: sandbox network is not isolated (sees: $net)" >&2; exit 4; }
 
 echo "run folder: $run"
+if [ -n "${KYTY_PROFILE_AT:-}" ]; then
+    # Host CPU profile of the emulator, taken from outside the sandbox.
+    ( if [ "$KYTY_PROFILE_AT" = stall ]; then
+          # Start when frames were being shown and then none is for 4 s.
+          seen=0; prev=0
+          while sleep 4; do
+              pgrep -x kyty_emulator >/dev/null || exit 0
+              now=$(grep -ac 'flip_arg  *= ' "$run/kyty.log" 2>/dev/null || true); now=${now:-0}
+              [ "$now" -gt 300 ] && seen=1
+              [ "$seen" = 1 ] && [ "$now" = "$prev" ] && break
+              prev=$now
+          done
+      else
+          sleep "$KYTY_PROFILE_AT"
+      fi
+      pid=$(pgrep -x kyty_emulator | head -1); [ -n "$pid" ] || exit 0
+      perf record -q -F 499 -g -p "$pid" -o "$run/perf.data" -- sleep "${KYTY_PROFILE_SECONDS:-20}" 2>"$run/perf.err"
+      perf report -i "$run/perf.data" --no-children --sort comm,dso,symbol --stdio 2>/dev/null | grep -v "^$" | head -400 > "$run/perf.txt"
+      perf report -i "$run/perf.data" --no-children --sort comm --stdio -g none 2>/dev/null | grep -v "^#\|^$" | head -40 > "$run/perf-threads.txt"
+    ) &
+fi
 set +e
 if [ "$seconds" -gt 0 ]; then
-    timeout --signal=TERM --kill-after=10 "$seconds" bwrap "${args[@]}" /opt/kyty/kyty_emulator "${opts[@]}" 2>&1 | grep -av "^Controller axis" > "$run/kyty.log"
+    timeout --signal=TERM --kill-after=10 "$seconds" bwrap "${args[@]}" /opt/kyty/kyty_emulator "${opts[@]}" 2>&1 | gawk 'BEGIN{s=systime()} /^Controller axis/{next} {t=systime()-s; if(t!=l){print "@@T " t; l=t} print}' > "$run/kyty.log"
 else
-    bwrap "${args[@]}" /opt/kyty/kyty_emulator "${opts[@]}" 2>&1 | grep -av "^Controller axis" > "$run/kyty.log"
+    bwrap "${args[@]}" /opt/kyty/kyty_emulator "${opts[@]}" 2>&1 | gawk 'BEGIN{s=systime()} /^Controller axis/{next} {t=systime()-s; if(t!=l){print "@@T " t; l=t} print}' > "$run/kyty.log"
 fi
 code=${PIPESTATUS[0]}
 set -e
