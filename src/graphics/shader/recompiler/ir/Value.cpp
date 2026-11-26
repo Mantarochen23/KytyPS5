@@ -122,11 +122,13 @@ Block* Inst::PhiBlock(size_t index) const {
 }
 
 void Inst::SetParent(Block* block) {
+	IrMutationEpoch()++;
 	parent = block;
 }
 
 void Inst::SetArg(size_t index, Value value) {
 	auto& arg = ArgSlot(*this, index);
+	if (!arg.IsEmpty() || !uses.empty()) IrMutationEpoch()++;
 	if (auto* old_inst = arg.TryInstruction(); old_inst != nullptr) {
 		RemoveUse(old_inst, index);
 	}
@@ -138,6 +140,7 @@ void Inst::SetArg(size_t index, Value value) {
 
 void Inst::AddPhiOperand(Block* predecessor, Value value) {
 	EXIT_IF(opcode != ValueOpcode::Phi);
+	if (!uses.empty()) IrMutationEpoch()++;
 	const auto index = phi_args.size();
 	phi_args.emplace_back(predecessor, value);
 	if (auto* value_inst = value.TryInstruction(); value_inst != nullptr) {
@@ -147,6 +150,7 @@ void Inst::AddPhiOperand(Block* predecessor, Value value) {
 
 void Inst::ReplaceUsesWith(Value replacement, bool preserve) {
 	// Detach the arguments first (a phi can use itself), then move every use over in order.
+	IrMutationEpoch()++;
 	Invalidate();
 	const auto old_uses = std::exchange(uses, {});
 	for (const auto& use: old_uses) {
@@ -179,6 +183,7 @@ void Inst::RemoveUse(Inst* used, size_t operand) {
 }
 
 void Inst::ClearArgs() {
+	IrMutationEpoch()++;
 	for (size_t index = 0; index < NumArgs(); index++) {
 		if (auto* value_inst = Arg(index).TryInstruction(); value_inst != nullptr) {
 			RemoveUse(value_inst, index);

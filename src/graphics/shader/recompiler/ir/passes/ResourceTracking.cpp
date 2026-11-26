@@ -17,6 +17,7 @@
 #include <fmt/format.h>
 #include <fmt/ranges.h>
 #include <map>
+#include <memory>
 #include <numeric>
 #include <optional>
 #include <span>
@@ -29,6 +30,7 @@
 
 namespace Libs::Graphics::ShaderRecompiler::IR {
 namespace {
+
 
 constexpr uint32_t SamplerBorderClampMask    = (1u << 2u) | (1u << 5u) | (1u << 8u);
 constexpr uint32_t SamplerDword3ReservedMask = 0x3ffff000u;
@@ -472,6 +474,14 @@ static ShaderWrites ClassifyWrites(const Program& program) {
 	}
 	return writes;
 }
+
+struct BlockPairHash {
+	size_t operator()(const std::pair<const Block*, const Block*>& pair) const noexcept {
+		const auto a = reinterpret_cast<uintptr_t>(pair.first);
+		const auto b = reinterpret_cast<uintptr_t>(pair.second);
+		return std::hash<uintptr_t> {}(a * 0x9e3779b97f4a7c15ull ^ (b + (a << 6u) + (a >> 2u)));
+	}
+};
 
 class Tracker {
 public:
@@ -1529,29 +1539,61 @@ private:
 		return edge && edge->positive ? edge->condition : Value {};
 	}
 
+	struct BlockMarks;
+	class BlockWalk {
+	public:
+		explicit BlockWalk(const Tracker& tracker): m_tracker(tracker) {
+			auto& pool = tracker.m_mark_pool;
+			if (tracker.m_mark_depth == pool.size()) pool.push_back(std::make_unique<BlockMarks>());
+			m_marks = pool[tracker.m_mark_depth++].get();
+			if (m_marks->stamp.size() != tracker.m_program.blocks.size()) {
+				m_marks->stamp.assign(tracker.m_program.blocks.size(), 0);
+				m_marks->epoch = 0;
+			}
+			if (++m_marks->epoch == 0) {
+				std::ranges::fill(m_marks->stamp, 0);
+				m_marks->epoch = 1;
+			}
+			m_marks->pending.clear();
+		}
+		~BlockWalk() { m_tracker.m_mark_depth--; }
+		BlockWalk(const BlockWalk&)            = delete;
+		BlockWalk& operator=(const BlockWalk&) = delete;
+
+		std::vector<const Block*>& Pending() { return m_marks->pending; }
+		// Queues the block unless it was queued before.
+		void Push(const Block* block) {
+			const auto idx = m_tracker.BlockIndex(block);
+			if (idx < m_marks->stamp.size()) {
+				if (m_marks->stamp[idx] == m_marks->epoch) return;
+				m_marks->stamp[idx] = m_marks->epoch;
+			} else if (std::ranges::find(m_marks->pending, block) != m_marks->pending.end()) {
+				return;
+			}
+			m_marks->pending.push_back(block);
+		}
+
+	private:
+		const Tracker& m_tracker;
+		BlockMarks*    m_marks = nullptr;
+	};
+
 	size_t BlockIndex(const Block* block) const {
 		const auto found = m_block_indices.find(block);
 		return found != m_block_indices.end() ? found->second : SIZE_MAX;
 	}
 
 	bool GuardedOnEntry(const Block* block, const auto& stops, const auto& accepts) const {
-		std::vector<const Block*> pending {block};
-		std::vector<uint8_t>      visited(m_program.blocks.size(), 0);
-		if (const auto idx = BlockIndex(block); idx < visited.size()) visited[idx] = 1;
+		BlockWalk walk(*this);
+		auto&     pending = walk.Pending();
+		walk.Push(block);
 		for (size_t i = 0; i < pending.size(); ++i) {
 			const auto* current = pending[i];
 			if (stops(current) || current->ImmPredecessors().empty()) return false;
 			for (const auto* previous: current->ImmPredecessors()) {
 				const auto edge = ConditionalEdge(previous, current);
 				if (edge && accepts(*edge)) continue;
-				const auto idx = BlockIndex(previous);
-				if (idx < visited.size()) {
-					if (visited[idx]) continue;
-					visited[idx] = 1;
-				} else if (std::ranges::find(pending, previous) != pending.end()) {
-					continue;
-				}
-				pending.push_back(previous);
+				walk.Push(previous);
 			}
 		}
 		return true;
@@ -1605,6 +1647,22 @@ private:
 	}
 
 	bool Implies(Value guard, Value required, bool allow_phi = true) const {
+		// Proofs are pure functions of the IR; IrMutationEpoch tells when it was edited.
+		const auto* guard_inst    = guard.Resolve().TryInstruction();
+		const auto* required_inst = required.Resolve().TryInstruction();
+		if (guard_inst == nullptr || required_inst == nullptr) return ImpliesUncached(guard, required, allow_phi);
+		if (m_implies_epoch != IrMutationEpoch()) {
+			m_implies_cache.clear();
+			m_implies_epoch = IrMutationEpoch();
+		}
+		const ImpliesKey key {guard_inst, required_inst, allow_phi};
+		if (const auto found = m_implies_cache.find(key); found != m_implies_cache.end()) return found->second;
+		const bool result = ImpliesUncached(guard, required, allow_phi);
+		if (m_implies_epoch == IrMutationEpoch()) m_implies_cache.emplace(key, result);
+		return result;
+	}
+
+	bool ImpliesUncached(Value guard, Value required, bool allow_phi) const {
 		required = SimplifyGuard(required);
 		if (required == Value(true)) return true;
 		const auto* test = required.TryInstruction();
@@ -2227,24 +2285,24 @@ private:
 	}
 
 	bool Reaches(const Block* from, const Block* to, const Block* stop = nullptr) const {
-		std::vector<const Block*> pending {to};
-		std::vector<uint8_t>      visited(m_program.blocks.size(), 0);
-		if (const auto idx = BlockIndex(to); idx < visited.size()) visited[idx] = 1;
+		if (stop == nullptr) {
+			const auto found = m_reach_cache.find({from, to});
+			if (found != m_reach_cache.end()) return found->second;
+		}
+		BlockWalk walk(*this);
+		auto&     pending = walk.Pending();
+		walk.Push(to);
+		bool result = false;
 		for (size_t index = 0; index < pending.size(); ++index) {
 			if (pending[index] == stop) continue;
-			if (pending[index] == from) return true;
-			for (const auto* previous: pending[index]->ImmPredecessors()) {
-				const auto idx = BlockIndex(previous);
-				if (idx < visited.size()) {
-					if (visited[idx]) continue;
-					visited[idx] = 1;
-				} else if (std::ranges::find(pending, previous) != pending.end()) {
-					continue;
-				}
-				pending.push_back(previous);
+			if (pending[index] == from) {
+				result = true;
+				break;
 			}
+			for (const auto* previous: pending[index]->ImmPredecessors()) walk.Push(previous);
 		}
-		return false;
+		if (stop == nullptr) m_reach_cache.emplace(std::pair {from, to}, result);
+		return result;
 	}
 
 	bool InCycle(const Block* block) const {
@@ -2268,13 +2326,24 @@ private:
 	}
 
 	bool Dominates(const Block* initial, const Block* use, Value witness = {}) const {
+		if (witness.IsEmpty()) {
+			const auto found = m_dominate_cache.find({initial, use});
+			if (found != m_dominate_cache.end()) return found->second;
+			const bool result = DominatesUncached(initial, use, witness);
+			m_dominate_cache.emplace(std::pair {initial, use}, result);
+			return result;
+		}
+		return DominatesUncached(initial, use, witness);
+	}
+
+	bool DominatesUncached(const Block* initial, const Block* use, Value witness) const {
 		// The proven local-zero invocation fails every all-lane bypass condition that excludes it,
 		// such as an all-inactive or an all-nonzero bypass.
 		const auto* negated = SimplifyGuard(witness).TryInstruction();
 		const bool nonzero = negated != nullptr && negated->GetOpcode() == ValueOpcode::LogicalNot;
-		std::vector<const Block*> pending {use};
-		std::vector<uint8_t>      visited(m_program.blocks.size(), 0);
-		if (const auto idx = BlockIndex(use); idx < visited.size()) visited[idx] = 1;
+		BlockWalk walk(*this);
+		auto&     pending = walk.Pending();
+		walk.Push(use);
 		for (size_t index = 0; index < pending.size(); ++index) {
 			const auto* current = pending[index];
 			if (current == initial) continue;
@@ -2286,14 +2355,7 @@ private:
 					    (edge->positive ? nonzero && Implies(edge->condition, negated->Arg(0))
 					                    : Implies(witness, edge->condition))) continue;
 				}
-				const auto idx = BlockIndex(previous);
-				if (idx < visited.size()) {
-					if (visited[idx]) continue;
-					visited[idx] = 1;
-				} else if (std::ranges::find(pending, previous) != pending.end()) {
-					continue;
-				}
-				pending.push_back(previous);
+				walk.Push(previous);
 			}
 		}
 		return true;
@@ -4878,6 +4940,33 @@ private:
 	std::vector<Program::ScalarWrite>                                             m_scalar_writes;
 	std::unordered_map<const Block*, size_t>                                      m_block_indices;
 	mutable std::vector<int8_t>                                                   m_in_cycle;
+	// Epoch-stamped block marks for the CFG walks below. Walks nest (an edge predicate can start
+	// another walk), so every nesting level owns its own array.
+	struct BlockMarks {
+		std::vector<uint32_t>     stamp;
+		uint32_t                  epoch = 0;
+		std::vector<const Block*> pending;
+	};
+	mutable std::vector<std::unique_ptr<BlockMarks>>                              m_mark_pool;
+	mutable size_t                                                                m_mark_depth = 0;
+	// Pure CFG queries (the block graph is not edited while tracking).
+	struct ImpliesKey {
+		const Inst* guard;
+		const Inst* required;
+		bool        allow_phi;
+		bool operator==(const ImpliesKey&) const = default;
+	};
+	struct ImpliesKeyHash {
+		size_t operator()(const ImpliesKey& key) const noexcept {
+			const auto a = reinterpret_cast<uintptr_t>(key.guard);
+			const auto b = reinterpret_cast<uintptr_t>(key.required);
+			return std::hash<uintptr_t> {}((a * 0x9e3779b97f4a7c15ull) ^ (b + (a << 6u) + (a >> 2u)) ^ key.allow_phi);
+		}
+	};
+	mutable std::unordered_map<ImpliesKey, bool, ImpliesKeyHash>                  m_implies_cache;
+	mutable uint64_t                                                              m_implies_epoch = UINT64_MAX;
+	mutable std::unordered_map<std::pair<const Block*, const Block*>, bool, BlockPairHash> m_reach_cache;
+	mutable std::unordered_map<std::pair<const Block*, const Block*>, bool, BlockPairHash> m_dominate_cache;
 	std::map<std::pair<uintptr_t, uint32_t>, ResolvedHandle>                      m_resolved_handles;
 	std::vector<ScalarReadStep>                                                   m_srt_walk;
 	std::unordered_set<const Inst*>                                               m_srt_visited;

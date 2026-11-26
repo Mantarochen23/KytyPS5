@@ -90,6 +90,13 @@ using U64 = TypedValue<Type::U64>;
 using F16 = TypedValue<Type::F16>;
 using F32 = TypedValue<Type::F32>;
 
+// Counts edits of existing IR. Analyses that cache facts about values compare it to drop them.
+// Creating an unused instruction does not count; every other edit does.
+inline uint64_t& IrMutationEpoch() {
+	static thread_local uint64_t epoch = 0;
+	return epoch;
+}
+
 struct Use {
 	Inst*  user    = nullptr;
 	size_t operand = 0;
@@ -147,6 +154,7 @@ public:
 	template <typename T>
 	requires(sizeof(T) <= sizeof(uint64_t) && std::is_trivially_copyable_v<T>)
 	void SetFlags(T value) {
+		IrMutationEpoch()++;
 		flags = 0;
 		std::memcpy(&flags, &value, sizeof(value));
 	}
