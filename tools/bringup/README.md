@@ -25,11 +25,12 @@ Tag `first-loading-screen-2026-11-26` = the build that first showed the loading 
 
 ## Build (Bosie)
 
-    cmake -S . -B _Build/linux-release -G Ninja -DCMAKE_BUILD_TYPE=Release \
+    cmake -S . -B _Build/linux-debug -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
       -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DKYTY_BUILD_LAUNCHER=OFF
-    cmake --build _Build/linux-release --target kyty_emulator --parallel 12
+    cmake --build _Build/linux-debug --target kyty_emulator --parallel 12
 
-Release already carries `-g -fno-omit-frame-pointer`, so backtraces and `perf` work.
+Use `RelWithDebInfo` for work: the `Release` configuration links with `--strip-all`, so its
+backtraces and profiles are bare addresses. `run.sh` defaults to `_Build/linux-debug`.
 
 ## Run
 

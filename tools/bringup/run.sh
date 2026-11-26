@@ -5,7 +5,7 @@
 #
 # Environment:
 #   KYTY_GAME      game folder                 (required: the folder with eboot.bin)
-#   KYTY_BUILD     build folder                (default <repo>/_Build/linux-release)
+#   KYTY_BUILD     build folder                (default <repo>/_Build/linux-debug, with symbols)
 #   KYTY_RUNS      where run folders are made  (default <repo>/../runs)
 #   KYTY_STATE     persistent emulator state: pipeline cache, saves (default <repo>/../state)
 #   KYTY_SECONDS   stop the run after this many seconds (default 180; 0 = until it exits)
@@ -32,7 +32,7 @@ label=run
 if [ $# -gt 0 ] && [ "$1" != "--" ]; then label=$1; shift; fi
 [ "${1:-}" = "--" ] && shift
 game=${KYTY_GAME:?set KYTY_GAME to the program folder (the one with eboot.bin)}
-build=${KYTY_BUILD:-$repo/_Build/linux-release}
+build=${KYTY_BUILD:-$repo/_Build/linux-debug}
 runs=${KYTY_RUNS:-$repo/../runs}
 state=${KYTY_STATE:-$repo/../state}
 seconds=${KYTY_SECONDS:-180}
@@ -67,7 +67,7 @@ args=(
     --ro-bind /sys/class/drm /sys/class/drm
     --ro-bind "$xdg/$wl" "/run/$wl"
     --ro-bind "$game" "$game"
-    --ro-bind "$build" /opt/kyty
+    --ro-bind "$build" "$build"
     --bind "$state" /data/state
     --bind "$run" /run/out
     --chdir /data/state
@@ -138,14 +138,15 @@ if [ -n "${KYTY_PROFILE_AT:-}" ]; then
       pid=$(pgrep -x kyty_emulator | head -1); [ -n "$pid" ] || exit 0
       perf record -q -F 499 -g -p "$pid" -o "$run/perf.data" -- sleep "${KYTY_PROFILE_SECONDS:-20}" 2>"$run/perf.err"
       perf report -i "$run/perf.data" --no-children --sort comm,dso,symbol --stdio 2>/dev/null | grep -v "^$" | head -400 > "$run/perf.txt"
-      perf report -i "$run/perf.data" --no-children --sort comm --stdio -g none 2>/dev/null | grep -v "^#\|^$" | head -40 > "$run/perf-threads.txt"
+      perf report -i "$run/perf.data" --no-children --sort tid --stdio -g none 2>/dev/null | grep -v "^#\|^$" | head -40 > "$run/perf-threads.txt"
+      perf report -i "$run/perf.data" --no-children --sort tid,dso,symbol --stdio -g none 2>/dev/null | grep -v "^#\|^$" | head -150 > "$run/perf-flat.txt"
     ) &
 fi
 set +e
 if [ "$seconds" -gt 0 ]; then
-    timeout --signal=TERM --kill-after=10 "$seconds" bwrap "${args[@]}" /opt/kyty/kyty_emulator "${opts[@]}" 2>&1 | gawk 'BEGIN{s=systime()} /^Controller axis/{next} {t=systime()-s; if(t!=l){print "@@T " t; l=t} print}' > "$run/kyty.log"
+    timeout --signal=TERM --kill-after=10 "$seconds" bwrap "${args[@]}" "$build/kyty_emulator" "${opts[@]}" 2>&1 | gawk 'BEGIN{s=systime()} /^Controller axis/{next} {t=systime()-s; if(t!=l){print "@@T " t; l=t} print}' > "$run/kyty.log"
 else
-    bwrap "${args[@]}" /opt/kyty/kyty_emulator "${opts[@]}" 2>&1 | gawk 'BEGIN{s=systime()} /^Controller axis/{next} {t=systime()-s; if(t!=l){print "@@T " t; l=t} print}' > "$run/kyty.log"
+    bwrap "${args[@]}" "$build/kyty_emulator" "${opts[@]}" 2>&1 | gawk 'BEGIN{s=systime()} /^Controller axis/{next} {t=systime()-s; if(t!=l){print "@@T " t; l=t} print}' > "$run/kyty.log"
 fi
 code=${PIPESTATUS[0]}
 set -e
