@@ -420,6 +420,7 @@ struct BufferProbeBinding {
 	uint32_t                  index         = 0;
 	uint64_t                  guest         = 0;
 	uint64_t                  size          = 0;
+	uint64_t                  descriptor_size = 0; // What the guest's descriptor declares.
 	uint64_t                  compared      = 0;
 	uint64_t                  staging_offset = 0;
 	bool                      written       = false;
@@ -465,8 +466,11 @@ public:
 		std::vector<uint64_t>           host_start(bindings.buffer_sources.size(), 0);
 		std::vector<bool>               host_stream(bindings.buffer_sources.size(), false);
 		uint64_t                        total = 0;
-		for (const auto& resource: program.info.buffers) {
-			const auto index = resource.descriptor_index;
+		const auto& snapshot = *bindings.runtime->resources;
+		for (size_t resource_index = 0; resource_index < program.info.buffers.size();
+		     resource_index++) {
+			const auto& resource = program.info.buffers[resource_index];
+			const auto  index    = resource.descriptor_index;
 			if (index == UINT32_MAX || index >= bindings.buffer_sources.size() ||
 			    index >= bindings.buffers.size()) {
 				continue;
@@ -488,6 +492,11 @@ public:
 			entry.guest   = source.address;
 			entry.size    = source.size;
 			entry.written = resource.written;
+			entry.descriptor_size =
+			    resource_index < snapshot.buffers.size()
+			        ? DecodeNativeDescriptor<ShaderBufferResource>(snapshot.buffers[resource_index])
+			              .GetSize()
+			        : 0u;
 			entry.state   = index < states.size() ? states[index] : BufferProbe::CacheState::Synced;
 			entry.compared = std::min({source.size, MaxBytesPerBuffer, MaxBytesPerDispatch - total});
 			if (entry.compared == 0) continue;
@@ -592,6 +601,11 @@ private:
 			                                    comparison);
 			if (entry.index < host_stream.size() && host_stream[entry.index]) line += " src=stream";
 			if (entry.compared < entry.size) line += " TRUNCATED";
+			char declared[48];
+			std::snprintf(declared, sizeof(declared), " descriptor_size=0x%" PRIx64 "%s",
+			              entry.descriptor_size,
+			              entry.descriptor_size != entry.size ? " CLAMPED" : "");
+			line += declared;
 			lines.push_back(std::move(line));
 		}
 		const bool aliased = !alias_lines.empty();
