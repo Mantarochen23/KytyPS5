@@ -13188,6 +13188,78 @@ void TestBdaMissBreadcrumbAndReporting() {
         "FormatNewBdaMisses dropped the truncated indicator");
 }
 
+void TestBdaTableValidator() {
+  constexpr uint64_t page = BufferCache::CACHING_PAGESIZE;
+  BufferCache::BdaTableValidator validator;
+
+  // Valid lower-window 2-page buffer write, clear, and erase.
+  const BufferId id1{1};
+  const uint64_t guest1 = 0x200000ull;
+  const vk::DeviceAddress bda1 = 0x100000000ull;
+  const std::array<vk::DeviceAddress, 2> entries1{bda1, bda1 + page};
+  const uint64_t offset1 = BufferCache::PageIndex(guest1) * sizeof(vk::DeviceAddress);
+  Check(!validator.ValidateWrite(id1, guest1, 2 * page, bda1, false, offset1, entries1).has_value(),
+        "BdaTableValidator rejected a valid lower-window write");
+  Check(validator.ActivePageCount() == 2u && validator.TrackedBufferCount() == 1u,
+        "BdaTableValidator did not track written pages");
+
+  // Erasing while entries remain live must fail.
+  Check(validator.ValidateErase(id1, true).has_value(),
+        "BdaTableValidator allowed erasing a buffer with live page-table entries");
+
+  // Overwriting a live page without clearing first must fail.
+  const BufferId id2{2};
+  const std::array<vk::DeviceAddress, 1> overlap_entries{0x200000000ull};
+  Check(validator.ValidateWrite(id2, guest1 + page, page, 0x200000000ull, false,
+                                offset1 + sizeof(vk::DeviceAddress), overlap_entries).has_value(),
+        "BdaTableValidator allowed overwriting a live page without prior clear");
+
+  // Unaligned guest start, partial last page, wrong BDA, and wrong table offset must fail.
+  const std::array<vk::DeviceAddress, 1> bad_entry{0x300000000ull};
+  Check(validator.ValidateWrite(id2, 0x300004ull, page, 0x300000000ull, false,
+                                BufferCache::PageIndex(0x300004ull) * sizeof(vk::DeviceAddress),
+                                bad_entry).has_value(),
+        "BdaTableValidator accepted an unaligned guest start");
+  Check(validator.ValidateWrite(id2, 0x300000ull, page + 64u, 0x300000000ull, false,
+                                BufferCache::PageIndex(0x300000ull) * sizeof(vk::DeviceAddress),
+                                bad_entry).has_value(),
+        "BdaTableValidator accepted a partial last page");
+  const std::array<vk::DeviceAddress, 1> wrong_bda{0x300004000ull};
+  Check(validator.ValidateWrite(id2, 0x300000ull, page, 0x300000000ull, false,
+                                BufferCache::PageIndex(0x300000ull) * sizeof(vk::DeviceAddress),
+                                wrong_bda).has_value(),
+        "BdaTableValidator accepted a mismatched device address entry");
+  Check(validator.ValidateWrite(id2, 0x300000ull, page, 0x300000000ull, false,
+                                BufferCache::PageIndex(0x300000ull) * sizeof(vk::DeviceAddress) + 8u,
+                                bad_entry).has_value(),
+        "BdaTableValidator accepted a mismatched table offset");
+
+  // Clearing with wrong owner must fail; clearing with right owner succeeds and permits erase.
+  Check(validator.ValidateClear(id2, guest1, 2 * page, bda1, offset1, 2).has_value(),
+        "BdaTableValidator allowed clearing with the wrong buffer id");
+  Check(!validator.ValidateClear(id1, guest1, 2 * page, bda1, offset1, 2).has_value(),
+        "BdaTableValidator rejected a valid clear");
+  Check(validator.ActivePageCount() == 0u && validator.TrackedBufferCount() == 0u,
+        "BdaTableValidator did not remove cleared entries");
+  Check(validator.ValidateErase(id1, false).has_value(),
+        "BdaTableValidator allowed erasing a buffer without is_deleted");
+  Check(!validator.ValidateErase(id1, true).has_value(),
+        "BdaTableValidator rejected erasing a cleared, deleted buffer");
+
+  // Extended memory window write and clear must succeed.
+  const uint64_t ext_guest = LibKernel::Memory::kExtendedMemoryBase + 4 * page;
+  const uint64_t ext_offset = BufferCache::PageIndex(ext_guest) * sizeof(vk::DeviceAddress);
+  const vk::DeviceAddress ext_bda = 0x400000000ull;
+  const std::array<vk::DeviceAddress, 2> ext_entries{ext_bda, ext_bda + page};
+  Check(!validator.ValidateWrite(id2, ext_guest, 2 * page, ext_bda, false, ext_offset,
+                                 ext_entries).has_value(),
+        "BdaTableValidator rejected a valid extended-window write");
+  Check(!validator.ValidateClear(id2, ext_guest, 2 * page, ext_bda, ext_offset, 2).has_value(),
+        "BdaTableValidator rejected a valid extended-window clear");
+  Check(!validator.ValidateErase(id2, true).has_value(),
+        "BdaTableValidator rejected erasing a cleared extended-window buffer");
+}
+
 void TestNewShaderRecompilerFlatAddressDomainsUseDma() {
   const uint32_t segmented_shader[] = {
       EncodeVop2(0x25, 0, 0, 2),
@@ -13745,10 +13817,16 @@ void TestNewShaderRecompilerSpirvSizeBaselines() {
 } // namespace
 } // namespace Libs::Graphics
 
-int main() {
+int main(int argc, char** argv) {
   using namespace Libs::Graphics;
 
   EnsureConfigInitialized();
+  if (argc == 2 && std::strcmp(argv[1], "--bda-miss-only") == 0) {
+    TestGetBdaPointerMissTelemetryShape();
+    TestBdaMissBreadcrumbAndReporting();
+    TestBdaTableValidator();
+    return 0;
+  }
   TestVop3FloatConversionDecode();
   TestRayTracingInstructions();
   TestShaderBufferResourceSize();
@@ -13962,6 +14040,7 @@ int main() {
   TestNewShaderRecompilerUnsupportedMemoryDecode();
   TestGetBdaPointerMissTelemetryShape();
   TestBdaMissBreadcrumbAndReporting();
+  TestBdaTableValidator();
 
   TestNewShaderRecompilerVop3LaneReadDestinationEncoding();
 
