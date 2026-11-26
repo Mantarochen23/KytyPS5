@@ -326,6 +326,9 @@ bool PipelineCache::CreateGraphicsPipeline(Pipeline& pipeline, const GraphicsPip
 		}
 		stages[i] = found->second;
 	}
+	if (stages[0] == nullptr) {
+		return false;
+	}
 	CreatePipelineInternal(m_graphics, pipeline, key, stages, m_driver_cache);
 	return true;
 }
