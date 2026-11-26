@@ -1331,6 +1331,46 @@ uint32_t GetBdaPointer(EmitterState& state, uint32_t address) {
 	return result;
 }
 
+void EmitLoopGuardReport(EmitterState& state) {
+	if (state.loop_guard_limit == 0 || state.fault_buffer_variable == 0) {
+		return;
+	}
+	const auto visits = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpLoad, TypeU32(state), visits, state.loop_guard_visits);
+	const auto tripped = Binary(state, spv::OpUGreaterThan, TypeBool(state), visits,
+	                            ConstantU32(state, state.loop_guard_limit));
+	EmitIfCondition(state, tripped, [&]() {
+		const auto index = state.builder.AllocateId();
+		state.builder.AddFunction(
+		    spv::OpAtomicIAdd, TypeU32(state), index,
+		    FaultElementPointer(state, ConstantU32(state, BufferCache::LOOP_GUARD_DWORD)),
+		    ConstantU32(state, spv::ScopeDevice),
+		    ConstantU32(state, spv::MemorySemanticsMaskNone), ConstantU32(state, 1));
+		const auto in_slots = Binary(state, spv::OpULessThan, TypeBool(state), index,
+		                             ConstantU32(state, LoopGuardSlotCount));
+		EmitIfCondition(state, in_slots, [&]() {
+			const auto slot_base = Binary(
+			    state, spv::OpIAdd, TypeU32(state),
+			    ConstantU32(state, BufferCache::LOOP_GUARD_DWORD + LoopGuardHeaderDwords),
+			    Binary(state, spv::OpIMul, TypeU32(state), index,
+			           ConstantU32(state, LoopGuardSlotDwords)));
+			const auto loop = state.builder.AllocateId();
+			state.builder.AddFunction(spv::OpLoad, TypeU32(state), loop, state.loop_guard_loop);
+			const uint64_t hash   = state.program.shader_hash;
+			const uint32_t values[LoopGuardSlotDwords - 1u] = {
+			    ConstantU32(state, static_cast<uint32_t>(hash)),
+			    ConstantU32(state, static_cast<uint32_t>(hash >> 32u)), loop};
+			for (uint32_t word = 0; word < LoopGuardSlotDwords - 1u; word++) {
+				state.builder.AddFunction(
+				    spv::OpStore,
+				    FaultElementPointer(state, Binary(state, spv::OpIAdd, TypeU32(state), slot_base,
+				                                      ConstantU32(state, word))),
+				    values[word]);
+			}
+		});
+	});
+}
+
 void DefineIndirectBufferLoads(ValueEmitContext& ctx) {
 	auto& state = ctx.state;
 	for (const auto* block: state.program.blocks) {

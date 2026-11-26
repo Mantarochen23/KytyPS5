@@ -843,6 +843,9 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 	const auto& layout   = program.bindings;
 
 	prepared.buffers.resize(layout.descriptor_counts[static_cast<size_t>(BindingKind::Buffers)]);
+	if (layout.descriptor_counts[static_cast<size_t>(BindingKind::FaultBuffer)] != 0) {
+		m_context.RequestFaultBufferProcess();
+	}
 	std::fill(prepared.shader_data.begin() + layout.memory_offset_dword,
 	          prepared.shader_data.end(), 0);
 	auto pack_memory_offset = [&](uint32_t index, uint32_t offset) {

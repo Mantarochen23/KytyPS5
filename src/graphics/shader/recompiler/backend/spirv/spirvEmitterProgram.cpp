@@ -1,6 +1,7 @@
 #include "graphics/shader/recompiler/backend/spirv/spirvEmitterInstructions.h"
 
 #include "common/assert.h"
+#include "graphics/host_gpu/renderer/cache/loopGuardReport.h"
 
 #include <algorithm>
 #include <bit>
@@ -82,7 +83,50 @@ void StoreDispatcherPhiEdge(ValueEmitContext& ctx, const DispatcherFunctionState
 	}
 }
 
+// Loop guard (see EmitterState::loop_guard_limit): counts one evaluation of a branch that may
+// leave a loop and returns true once the invocation has used up its budget. The first evaluation
+// over budget stores `loop_id` as the loop to report. Every lane of a guest wave takes the same
+// branches, so the counters of one wave trip together and control flow stays uniform. Nothing
+// here branches, so it is safe in a loop header's block, which must end in its loop merge.
+uint32_t LoopGuardTripped(EmitterState& state, uint32_t loop_id) {
+	const auto visits = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpLoad, TypeU32(state), visits, state.loop_guard_visits);
+	const auto next = EmitAddU32(state, visits, ConstantU32(state, 1u));
+	state.builder.AddFunction(spv::OpStore, state.loop_guard_visits, next);
+	const auto first =
+	    Binary(state, spv::OpIEqual, TypeBool(state), next,
+	           ConstantU32(state, state.loop_guard_limit + 1u));
+	const auto previous = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpLoad, TypeU32(state), previous, state.loop_guard_loop);
+	state.builder.AddFunction(spv::OpStore, state.loop_guard_loop,
+	                          Select(state, TypeU32(state), first, ConstantU32(state, loop_id),
+	                                 previous));
+	return Binary(state, spv::OpUGreaterThan, TypeBool(state), next,
+	              ConstantU32(state, state.loop_guard_limit));
+}
+
+uint32_t GuardLoopExit(EmitterState& state, uint32_t condition, bool exit_when_true,
+                       uint32_t loop_id) {
+	const auto tripped = LoopGuardTripped(state, loop_id);
+	if (exit_when_true) {
+		return Binary(state, spv::OpLogicalOr, TypeBool(state), condition, tripped);
+	}
+	return Binary(state, spv::OpLogicalAnd, TypeBool(state), condition,
+	              Unary(state, spv::OpLogicalNot, TypeBool(state), tripped));
+}
+
+// The id of the block heading the loop that `target` is the merge block of, if any.
+std::optional<uint32_t> LoopHeaderIdOfMerge(const IR::Program& program, const IR::Block* target) {
+	for (const auto* block: program.blocks) {
+		if (block->terminator.loop_header && block->terminator.merge_block == target) {
+			return block->id;
+		}
+	}
+	return std::nullopt;
+}
+
 void EmitReturn(ValueEmitContext& ctx) {
+	EmitLoopGuardReport(ctx.state);
 	EmitKillIfPixelValidMaskInactive(ctx.state);
 	if (ctx.state.object_primitive_id_variable != 0) {
 		auto& state = ctx.state;
@@ -130,7 +174,14 @@ void EmitStructuredTerminator(ValueEmitContext& ctx, const IR::Block* block) {
 				EmitReturn(ctx);
 				return;
 			}
-			const auto condition = ctx.Def(block->condition);
+			auto condition = ctx.Def(block->condition);
+			if (ctx.state.loop_guard_limit != 0 && true_block != false_block) {
+				if (const auto loop = LoopHeaderIdOfMerge(ctx.state.program, true_block)) {
+					condition = GuardLoopExit(ctx.state, condition, true, *loop);
+				} else if (const auto other = LoopHeaderIdOfMerge(ctx.state.program, false_block)) {
+					condition = GuardLoopExit(ctx.state, condition, false, *other);
+				}
+			}
 			emit_merge();
 			ctx.state.builder.AddFunction(spv::OpBranchConditional, condition,
 			                              true_block->Definition(), false_block->Definition());
@@ -365,9 +416,14 @@ void EmitDispatcherFunction(ValueEmitContext& ctx, const DispatcherFunctionState
 	const auto next_pc = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpPhi, TypeU32(state), pc, initial_pc, initial_parent, next_pc,
 	                          dispatcher.continue_label);
-	const auto done = state.builder.AllocateId();
+	auto done = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpIEqual, TypeBool(state), done, pc,
 	                          ConstantU32(ctx.state, UINT32_MAX));
+	if (state.loop_guard_limit != 0) {
+		// Counts block transitions of the dispatcher, not loop exits.
+		done = Binary(state, spv::OpLogicalOr, TypeBool(state), done,
+		              LoopGuardTripped(state, LoopGuardDispatcherLoop));
+	}
 	state.builder.AddFunction(spv::OpLoopMerge, dispatcher.merge_label, dispatcher.continue_label,
 	                          spv::LoopControlMaskNone);
 	state.builder.AddFunction(spv::OpBranchConditional, done, dispatcher.merge_label,
@@ -747,6 +803,15 @@ void EmitProgram(EmitterState& state) {
 		const auto index = EmitAddU32(state, group_x, EmitBinaryU32(state, spv::OpIMul, row, count_x));
 		state.lds_base_dwords = EmitBinaryU32(state, spv::OpIMul, index,
 		                                     ConstantU32(state, LdsDwordCount(state)));
+	}
+	if (state.loop_guard_limit != 0) {
+		const auto pointer_type = TypePointer(state, spv::StorageClassPrivate, TypeU32(state));
+		state.loop_guard_visits =
+		    state.builder.DefineGlobalVariable(pointer_type, spv::StorageClassPrivate);
+		state.loop_guard_loop =
+		    state.builder.DefineGlobalVariable(pointer_type, spv::StorageClassPrivate);
+		state.builder.AddFunction(spv::OpStore, state.loop_guard_visits, ConstantU32(state, 0u));
+		state.builder.AddFunction(spv::OpStore, state.loop_guard_loop, ConstantU32(state, UINT32_MAX));
 	}
 	EmitMemoryBindings(state);
 	if (program.blocks.empty()) {

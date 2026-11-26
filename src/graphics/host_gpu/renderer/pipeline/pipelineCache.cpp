@@ -216,7 +216,8 @@ ShaderRecompiler::Spirv::Profile SpirvProfile(const GraphicContext& graphics) {
 	        .r8_srgb_views          = graphics.r8_srgb_views,
 	        .r8g8_srgb_views        = graphics.r8g8_srgb_views,
 	        .relaxed_float          = Config::RelaxedShaderFloatEnabled(),
-	        .ray_query              = graphics.ray_query_enabled};
+	        .ray_query              = graphics.ray_query_enabled,
+	        .loop_guard_limit       = Config::LoopGuardLimit()};
 }
 
 std::filesystem::path ShaderStorePath() {

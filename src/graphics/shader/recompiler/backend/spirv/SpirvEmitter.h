@@ -24,6 +24,9 @@ struct Profile {
 	bool relaxed_float = false;
 	// Ray queries: recognized traversal loops trace the dispatch's host TLAS.
 	bool ray_query = false;
+	// Debug (--loop-guard): after this many evaluated loop exits an invocation leaves every loop and
+	// records its shader hash and loop in the fault buffer. 0 = off. Mesh shaders are not guarded.
+	uint32_t loop_guard_limit = 0;
 };
 
 inline constexpr Profile DefaultProfile {};

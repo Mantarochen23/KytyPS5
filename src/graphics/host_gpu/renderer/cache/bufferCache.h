@@ -8,6 +8,7 @@
 #include "graphics/host_gpu/memoryTracker.h"
 #include "graphics/host_gpu/rangeSet.h"
 #include "graphics/host_gpu/renderer/cache/faultManager.h"
+#include "graphics/host_gpu/renderer/cache/loopGuardReport.h"
 #include "graphics/host_gpu/renderer/cache/multiLevelPageTable.h"
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
 
@@ -47,7 +48,13 @@ public:
 	static constexpr uint32_t BDA_MISS_AREA_DWORDS   = 2 + BDA_MISS_SLOT_COUNT * 2;
 	static constexpr uint64_t BDA_MISS_AREA_SIZE =
 	    uint64_t {BDA_MISS_AREA_DWORDS} * sizeof(uint32_t);
-	static constexpr uint64_t FAULT_BUFFER_SIZE = FAULT_BITMAP_SIZE + BDA_MISS_AREA_SIZE;
+	// Loop-guard records follow the miss area; see loopGuardReport.h. Both areas are downloaded and
+	// cleared together as the fault buffer's tail.
+	static constexpr uint32_t LOOP_GUARD_DWORD = BDA_MISS_COUNTER_DWORD + BDA_MISS_AREA_DWORDS;
+	static constexpr uint64_t LOOP_GUARD_AREA_SIZE =
+	    uint64_t {LoopGuardAreaDwords} * sizeof(uint32_t);
+	static constexpr uint64_t FAULT_TAIL_SIZE   = BDA_MISS_AREA_SIZE + LOOP_GUARD_AREA_SIZE;
+	static constexpr uint64_t FAULT_BUFFER_SIZE = FAULT_BITMAP_SIZE + FAULT_TAIL_SIZE;
 	static_assert(CACHING_NUMPAGES % 128 == 0);
 	static_assert(FAULT_BITMAP_SIZE % sizeof(uint64_t) == 0);
 	static_assert((BDA_MISS_SLOTS_DWORD & 1u) == 0u);

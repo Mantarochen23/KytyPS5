@@ -7,9 +7,11 @@
 
 #include <array>
 #include <cstdint>
+#include <set>
 #include <span>
 #include <string>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace Libs::Graphics {
@@ -41,6 +43,7 @@ private:
 	uint32_t                                   m_current_area          = 0;
 	uint32_t                                   m_last_breadcrumb_op_id = 0;
 	std::unordered_set<uint64_t>               m_seen_bda_miss_pages;
+	std::set<std::pair<uint64_t, uint32_t>>    m_seen_loop_guard_trips;
 	vk::DescriptorSetLayout                    m_fault_process_desc_layout = nullptr;
 	vk::Pipeline                               m_fault_process_pipeline = nullptr;
 	vk::PipelineLayout                         m_fault_process_pipeline_layout = nullptr;

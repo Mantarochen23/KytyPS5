@@ -44,6 +44,11 @@ std::vector<uint32_t> EmitProgram(IR::Program& program, ShaderStageInputInfo inp
 	    workgroup != nullptr && program.wave_size == 64u && workgroup->host_subgroup_size == 32u
 	        ? 2u
 	        : 1u;
+	// Debug loop guard (off by default). Mesh shaders are skipped: their entry point is built
+	// separately and would have to list the counter variables.
+	if (program.stage != ShaderType::Mesh) {
+		state.loop_guard_limit = profile.loop_guard_limit;
+	}
 	DefineModule(state);
 	EmitProgram(state);
 	state.builder.AddEntryPoint(ExecutionModelForStage(state.program.stage), state.main_func,

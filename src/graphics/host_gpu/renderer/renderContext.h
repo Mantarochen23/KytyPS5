@@ -64,6 +64,8 @@ public:
 	void               MapMemory(uint64_t vaddr, uint64_t size);
 	void               UnmapMemory(uint64_t vaddr, uint64_t size);
 	void               PrepareBda();
+	// Shaders that only write the fault buffer (loop guard) need its next drain, not the BDA sync.
+	void               RequestFaultBufferProcess() noexcept { m_fault_process_pending = true; }
 	void               RunGarbageCollector();
 
 	void AddInterruptEq(LibKernel::EventQueue::KernelEqueue eq, int event_id);

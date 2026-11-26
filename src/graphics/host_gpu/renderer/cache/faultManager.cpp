@@ -23,7 +23,7 @@ namespace {
 
 constexpr size_t MaxPageFaults         = 1024;
 constexpr size_t PageFaultAreaSize     = MaxPageFaults * sizeof(uint64_t);
-constexpr size_t FaultDownloadAreaSize = PageFaultAreaSize + BufferCache::BDA_MISS_AREA_SIZE;
+constexpr size_t FaultDownloadAreaSize = PageFaultAreaSize + BufferCache::FAULT_TAIL_SIZE;
 constexpr size_t MaxTrackedBdaMissPages = 4096;
 
 std::string FormatShaderSuffix(const GpuBreadcrumbTracker::ShaderHashSnapshot& shaders) {
@@ -161,7 +161,7 @@ void FaultManager::ProcessFaultBuffer() {
 	clear_barrier.dstAccessMask = vk::AccessFlagBits2::eTransferWrite;
 	clear_barrier.buffer        = m_fault_buffer.Handle();
 	clear_barrier.offset        = BufferCache::FAULT_BITMAP_SIZE;
-	clear_barrier.size          = BufferCache::BDA_MISS_AREA_SIZE;
+	clear_barrier.size          = BufferCache::FAULT_TAIL_SIZE;
 
 	vk::BufferMemoryBarrier2 post_barrier {};
 	post_barrier.srcStageMask =
@@ -204,13 +204,13 @@ void FaultManager::ProcessFaultBuffer() {
 	const vk::BufferCopy miss_copy {
 	    BufferCache::FAULT_BITMAP_SIZE,
 	    offset + PageFaultAreaSize,
-	    BufferCache::BDA_MISS_AREA_SIZE,
+	    BufferCache::FAULT_TAIL_SIZE,
 	};
 	command.copyBuffer(m_fault_buffer.Handle(), m_download_buffer.Handle(), 1, &miss_copy);
 	dependency.pBufferMemoryBarriers = &clear_barrier;
 	command.pipelineBarrier2(dependency);
 	command.fillBuffer(m_fault_buffer.Handle(), BufferCache::FAULT_BITMAP_SIZE,
-	                   BufferCache::BDA_MISS_AREA_SIZE, 0);
+	                   BufferCache::FAULT_TAIL_SIZE, 0);
 
 	dependency.pBufferMemoryBarriers = &post_barrier;
 	command.pipelineBarrier2(dependency);
@@ -239,6 +239,12 @@ void FaultManager::ProcessFaultBuffer() {
 		         std::span<const uint32_t>(miss_words, BufferCache::BDA_MISS_AREA_DWORDS), shaders,
 		         m_seen_bda_miss_pages)) {
 			LOGF("%s\n", line.c_str());
+		}
+		const auto* guard_words = miss_words + BufferCache::BDA_MISS_AREA_DWORDS;
+		for (const auto& line: FormatLoopGuardTrips(
+		         std::span<const uint32_t>(guard_words, LoopGuardAreaDwords),
+		         m_seen_loop_guard_trips)) {
+			Log::WriteToConsoleAndLog((line + "\n").c_str());
 		}
 		m_fault_areas[area] = 0;
 	});

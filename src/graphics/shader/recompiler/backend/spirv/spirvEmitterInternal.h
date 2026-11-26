@@ -118,6 +118,12 @@ struct EmitterState {
 	std::vector<uint32_t>                           memory_byte_sizes;
 	uint32_t                                         bda_pagetable_variable  = 0;
 	uint32_t                                         fault_buffer_variable   = 0;
+	// Debug aid (Profile::loop_guard_limit): evaluated loop exits per invocation before every loop
+	// is left; 0 = off. loop_guard_visits and loop_guard_loop are Private variables: the counter and
+	// the id of the loop whose exit evaluation first ran over budget.
+	uint32_t                                         loop_guard_limit        = 0;
+	uint32_t                                         loop_guard_visits       = 0;
+	uint32_t                                         loop_guard_loop         = 0;
 	uint32_t                                         bda_pointer_function    = 0;
 	uint32_t                                         indirect_format_function = 0;
 	uint32_t                                         indirect_format_geometry_function = 0;
@@ -409,6 +415,8 @@ bool EmptyIndirectBufferCandidate(const EmitterState& state, uint32_t resource);
 uint32_t SharedIndirectBufferResource(const EmitterState& state, uint32_t resource);
 
 void EmitMemoryBindings(EmitterState& state);
+// Loop guard: if this invocation used up its loop-exit budget, adds a record to the fault buffer.
+void EmitLoopGuardReport(EmitterState& state);
 
 uint32_t LdsDwordCount(const EmitterState& state);
 void EnsureLdsStorage(EmitterState& state);
