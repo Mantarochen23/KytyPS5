@@ -141,6 +141,7 @@ private:
 	std::atomic<bool>                  m_fault_shutdown {false};
 	std::atomic<bool>                  m_fault_request {false};
 	std::atomic<bool>                  m_fault_done {false};
+	std::atomic<bool>                  m_report_finished {false};
 #if KYTY_PLATFORM != KYTY_PLATFORM_WINDOWS
 	int m_wake_pipe[2] = {-1, -1};
 #else
@@ -150,6 +151,7 @@ private:
 	std::thread             m_fault_thread;
 	std::array<char, 8192>  m_report_buf {};
 
+	void WaitForDriverHangDump();
 	void FaultWorkerLoop();
 	void WakeFaultWorker();
 };

@@ -127,6 +127,9 @@ static void PrintUsage() {
 #endif
 	::printf("  --keymap <Control=Input>             DualSense mapping; may be repeated.\n");
 	::printf("  --rd                                 Enable RenderDoc capture.\n");
+	::printf("  --hang-dump-wait <seconds>           Debug: after a device loss, wait up to this long for the\n"
+	         "                                       driver's own hang dump when RADV_DEBUG contains `hang`.\n"
+	         "                                       0 = do not wait. Default: 60.\n");
 }
 
 static bool NextArg(int argc, char* argv[], int& index, std::string& out) {
@@ -514,6 +517,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				return false;
 			}
 			options.config.keymap.push_back(value);
+		} else if (arg == "--hang-dump-wait") {
+			if (!ParseUint32(value, options.config.hang_dump_wait_seconds)) {
+				::printf("invalid hang dump wait: %s\n", value.c_str());
+				return false;
+			}
 		} else {
 			::printf("unknown option: %s\n", arg.c_str());
 			return false;

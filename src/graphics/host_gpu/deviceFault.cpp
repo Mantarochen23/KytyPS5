@@ -2,6 +2,7 @@
 
 #include "common/assert.h"
 #include "common/emulatorConfig.h"
+#include "common/hangDump.h"
 #include "common/logging/log.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
@@ -20,6 +21,7 @@
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 #include <io.h>
+#include <process.h>
 #else
 #include <unistd.h>
 #endif
@@ -655,6 +657,16 @@ void GpuBreadcrumbTracker::ReportDeviceLost(GraphicContext& graphics, const char
                                             vk::Result result, uint64_t tick,
                                             uint64_t known_gpu_tick) {
 	if (m_reported.test_and_set(std::memory_order_acq_rel)) {
+		// Another thread owns the report and may be waiting for the driver's hang dump. The
+		// caller usually ends the process next; hold it back until the first thread is done.
+		if (Common::HangDump::DriverHangModeActive(std::getenv("RADV_DEBUG"))) {
+			const auto limit = std::chrono::seconds(Config::HangDumpWaitSeconds() + 10u);
+			const auto start = std::chrono::steady_clock::now();
+			while (!m_report_finished.load(std::memory_order_acquire) &&
+			       std::chrono::steady_clock::now() - start < limit) {
+				std::this_thread::sleep_for(std::chrono::milliseconds(50));
+			}
+		}
 		return;
 	}
 
@@ -895,6 +907,10 @@ void GpuBreadcrumbTracker::ReportDeviceLost(GraphicContext& graphics, const char
 	out.Append("=== END GPU DEVICE LOST TRIAGE ===\n");
 	out.Flush();
 
+	// With the driver's hang mode on, its dump is written by the driver's own submit thread; the
+	// process must stay alive until that is finished. This comes before the optional fault query.
+	WaitForDriverHangDump();
+
 	// Run VK_EXT_device_fault only when explicitly requested via --gpu-fault-query /
 	// KYTY_GPU_FAULT_QUERY=1, on the dedicated host worker thread after breadcrumbs are flushed.
 	if (Config::GpuFaultQueryEnabled() && m_fault_thread.joinable()) {
@@ -911,6 +927,45 @@ void GpuBreadcrumbTracker::ReportDeviceLost(GraphicContext& graphics, const char
 			WriteRawStderr(kTimeoutMsg.data(), kTimeoutMsg.size());
 		}
 	}
+	m_report_finished.store(true, std::memory_order_release);
+}
+
+void GpuBreadcrumbTracker::WaitForDriverHangDump() {
+	if (!Common::HangDump::DriverHangModeActive(std::getenv("RADV_DEBUG"))) {
+		return;
+	}
+	const uint32_t seconds = Config::HangDumpWaitSeconds();
+	const char*    home    = std::getenv("HOME");
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	const int pid = _getpid();
+#else
+	const int pid = static_cast<int>(::getpid());
+#endif
+	std::array<char, 8192> buf {};
+	FixedStderrSink        out(buf);
+	if (seconds == 0) {
+		out.Printf("=== DRIVER HANG DUMP ===\nwait disabled (--hang-dump-wait 0); looking in {}/radv_dumps_{}_*\n"
+		           "=== END DRIVER HANG DUMP ===\n",
+		           home != nullptr ? home : ".", pid);
+		out.Flush();
+		return;
+	}
+	out.Printf("=== DRIVER HANG DUMP ===\nRADV_DEBUG has `hang`: waiting up to {} s for {}/radv_dumps_{}_*\n",
+	           seconds, home != nullptr ? home : ".", pid);
+	out.Flush();
+
+	Common::HangDump::WaitPolicy policy;
+	policy.timeout    = std::chrono::seconds(seconds);
+	const auto result = Common::HangDump::WaitForDriverDump(
+	    policy, [&] { return Common::HangDump::ScanDumpFolder(home, pid); },
+	    [](std::chrono::milliseconds d) { std::this_thread::sleep_for(d); });
+	out.Printf("driver_dump: outcome={} path={} files={} bytes={} last_chunk={} waited_ms={}\n"
+	           "=== END DRIVER HANG DUMP ===\n",
+	           Common::HangDump::WaitOutcomeName(result.outcome),
+	           result.state.found ? result.state.path : "(none)", result.state.file_count,
+	           result.state.total_bytes, result.state.has_last_chunk ? "yes" : "no",
+	           result.waited.count());
+	out.Flush();
 }
 
 void ReportDeviceLost(GraphicContext& graphics, const char* operation, vk::Result result,

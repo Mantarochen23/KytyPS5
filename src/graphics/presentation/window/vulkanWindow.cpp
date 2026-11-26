@@ -2,6 +2,7 @@
 #include "common/common.h"
 #include "common/emulatorConfig.h"
 #include "common/file.h"
+#include "common/hangDump.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
 #include "common/stringUtils.h"
@@ -488,6 +489,11 @@ static vk::Device VulkanCreateDevice(GraphicContext&          graphics,
 	graphics.shader_image_int64_atomics_enabled = image_atomic_int64.shaderImageInt64Atomics;
 	graphics.sampler_filter_minmax_enabled      = supported12.samplerFilterMinmax;
 	graphics.device_fault_ext_enabled           = device_fault.deviceFault == VK_TRUE;
+	// RADV keeps its hang report in memory for vkGetDeviceFaultInfoEXT instead of writing the
+	// radv_dumps_* folder when the vendor-binary feature is on, so leave it off in hang mode.
+	if (Common::HangDump::DriverHangModeActive(std::getenv("RADV_DEBUG"))) {
+		device_fault.deviceFaultVendorBinary = VK_FALSE;
+	}
 	graphics.device_fault_vendor_binary_enabled =
 	    graphics.device_fault_ext_enabled && device_fault.deviceFaultVendorBinary == VK_TRUE;
 

@@ -448,4 +448,8 @@ bool BdaTableValidateEnabled() {
 	return g_config != nullptr && g_config->bda_table_validate_enabled;
 }
 
+uint32_t HangDumpWaitSeconds() {
+	return g_config != nullptr ? g_config->hang_dump_wait_seconds : 60u;
+}
+
 } // namespace Config

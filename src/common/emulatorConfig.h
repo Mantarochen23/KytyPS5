@@ -131,6 +131,8 @@ struct ConfigOptions {
 	// Ordinary boots need a non-null argv[0]; --guest-exec supplies the caller's arguments.
 	std::vector<std::string> guest_arguments {""};
 	bool                     bda_table_validate_enabled = false;
+	// Seconds to wait for the driver's own hang dump after a device loss (RADV_DEBUG=hang); 0 = off.
+	uint32_t                 hang_dump_wait_seconds     = 60;
 };
 
 void Load(const ConfigOptions& cfg);
@@ -227,6 +229,7 @@ bool RedZoneProtectionEnabled();
 const Keymap& GetKeymap();
 const std::vector<std::string>& GetGuestArguments();
 bool BdaTableValidateEnabled();
+uint32_t HangDumpWaitSeconds();
 
 } // namespace Config
 
