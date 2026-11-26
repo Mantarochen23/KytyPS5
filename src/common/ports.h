@@ -14,7 +14,6 @@ namespace Config {
 enum class Port : uint32_t {
 	Wave64OverLimit32, // run wave64 compute groups over the invocation limit in 32-lane subgroups
 	Wave64LdsSync,     // order LDS between the halves of a wave64 compute program
-	WaveIAddReduce,    // reduce proven whole-wave integer adds with a subgroup add
 	GuestLaneNumber,   // number lanes inside the guest wave when the host subgroup is wider
 	Count
 };
@@ -30,7 +29,6 @@ struct PortInfo {
 inline constexpr PortInfo PORTS[] = {
     {Port::Wave64OverLimit32, "wave64-over-limit-32", "upstream PR 2567", true},
     {Port::Wave64LdsSync, "wave64-lds-sync", "Senaxx/KytyPS5@86151b7251", true},
-    {Port::WaveIAddReduce, "wave-iadd-reduce", "bobrass/KytyPS5@c50559ec3b", true},
     {Port::GuestLaneNumber, "guest-lane-number", "lordra9-svg/KytyPS5@85c70d0416", true},
 };
 static_assert(std::size(PORTS) == static_cast<size_t>(Port::Count));

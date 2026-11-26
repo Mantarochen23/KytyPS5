@@ -100,6 +100,10 @@ uint32_t BufferLane(EmitterState& state) {
 	// The guest lane runs inside the host subgroup: a wave32 program on a 64-lane host keeps
 	// both guest waves in one subgroup, while a wave64 program on a 32-lane host splits across
 	// two emissions. The host lane alone is not the guest lane.
+	if (!Config::PortEnabled(Config::Port::GuestLaneNumber)) {
+		return Binary(state, spv::OpBitwiseAnd, TypeU32(state), EmitSubgroupLocalInvocationId(state),
+		              ConstantU32(state, 63));
+	}
 	return EmitGuestLane(state);
 }
 
@@ -1701,7 +1705,7 @@ uint32_t EmitAppendConsume(ValueEmitContext& ctx, const IR::Inst& inst) {
 	                           ? workgroup->host_subgroup_size
 	                           : state.program.wave_size;
 	const auto shuffle_lane =
-	    host_size > state.program.wave_size
+	    host_size > state.program.wave_size && Config::PortEnabled(Config::Port::GuestLaneNumber)
 	        ? Binary(state, spv::OpBitwiseOr, TypeU32(state),
 	                 Binary(state, spv::OpBitwiseAnd, TypeU32(state), host_lane,
 	                        ConstantU32(state, ~(state.program.wave_size - 1u))),

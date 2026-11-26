@@ -489,7 +489,7 @@ TEST(Ports, DisablePortParsesNamesAndSelectsTheShaderStore) {
 	Config::SetDisabledPorts(names);
 	EXPECT_FALSE(Config::PortEnabled(Config::Port::Wave64LdsSync));
 	EXPECT_FALSE(Config::PortEnabled(Config::Port::GuestLaneNumber));
-	EXPECT_TRUE(Config::PortEnabled(Config::Port::WaveIAddReduce));
+	EXPECT_TRUE(Config::PortEnabled(Config::Port::Wave64OverLimit32));
 	EXPECT_NE(Config::ShaderPortMask(), all_on);
 	EXPECT_NE(Config::PortsSummary().find("disabled: wave64-lds-sync,guest-lane-number"),
 	          std::string::npos);
