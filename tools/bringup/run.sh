@@ -20,6 +20,7 @@
 #   KYTY_SHADER_CACHE=0  do not keep translated shaders between runs (default: kept in the state
 #                      folder and compiled at boot on all cores, so every run starts further)
 #   KYTY_TRACE=0       run without --trace-calls
+#   KYTY_UMR=1         when frames stop, dump the GPU ring and shader waves with umr (needs root)
 #   KYTY_SKIP_SHADERS=<hashes>  comma-separated hex shader hashes to skip (bisect GPU hangs)
 #   RADV_DEBUG=<flags> passed to RADV; with `hang`, RADV's radv_dumps_* are kept in <run>/radv/
 #   KYTY_FORCE=1   start although another sandboxed run holds the GPU
@@ -139,6 +140,22 @@ net=$(bwrap "${args[@]}" /usr/bin/cat /proc/net/dev 2>"$run/sandbox-probe.err" |
 
 echo "run folder: $run"
 start_epoch=$(date +%s)
+if [ "${KYTY_UMR:-0}" = 1 ] && command -v umr >/dev/null && sudo -n true 2>/dev/null; then
+    # GPU-side view of a hang, from outside the sandbox (root): once frames were shown and none is
+    # for 3 s, dump the gfx ring and the running shader waves while the GPU is still stuck.
+    ( seen=0; prev=0
+      while sleep 3; do
+          pgrep -x kyty_emulator >/dev/null || exit 0
+          now=$(grep -ac 'flip_arg  *= ' "$run/kyty.log" 2>/dev/null || true); now=${now:-0}
+          [ "$now" -gt 300 ] && seen=1
+          [ "$seen" = 1 ] && [ "$now" = "$prev" ] && break
+          prev=$now
+      done
+      sudo -n umr -O bits -wa gfx_0.0.0 > "$run/umr-waves.txt" 2>&1
+      sudo -n umr -RS gfx_0.0.0 > "$run/umr-ring.txt" 2>&1
+      sudo -n umr -r '*.*.mmGRBM_STATUS' > "$run/umr-status.txt" 2>&1
+    ) &
+fi
 if [ -n "${KYTY_PROFILE_AT:-}" ]; then
     # Host CPU profile of the emulator, taken from outside the sandbox.
     ( if [ "$KYTY_PROFILE_AT" = stall ]; then
