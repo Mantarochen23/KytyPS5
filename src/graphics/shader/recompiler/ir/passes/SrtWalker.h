@@ -79,8 +79,9 @@ public:
 	RuntimeValueMemoScope(const RuntimeValueMemoScope&)            = delete;
 	RuntimeValueMemoScope& operator=(const RuntimeValueMemoScope&) = delete;
 
-private:
 	struct State;
+
+private:
 	std::unique_ptr<State> m_state;
 	State*                 m_outer = nullptr;
 };
