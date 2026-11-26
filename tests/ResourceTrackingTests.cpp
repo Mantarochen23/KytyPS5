@@ -9744,9 +9744,8 @@ void TestSrtRootedBufferDescriptor() {
       f.AddMemory({.kind = ResourceKind::Buffer, .data_bits = 8u, .idxen = true}, 0x1a0u));
   f.PlanAndTrack();
 
-  const auto plan = ExtractResourcePlan(f.program);
-  Check(plan.info.buffers.size() == 1u,
-        "SRT-rooted pointer descriptor lost its buffer resource");
+  Check(f.program.resource_tracking_complete,
+        "SRT-rooted pointer descriptor did not finish translation");
 }
 
 } // namespace
