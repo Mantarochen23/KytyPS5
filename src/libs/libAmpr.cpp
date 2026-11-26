@@ -547,16 +547,19 @@ constexpr uint64_t READ_GATHER_RECORD_SIZE_EXT   = 0x0c;
 constexpr uint64_t READ_SCATTER_RECORD_SIZE      = 0x0c;
 constexpr uint64_t READ_GATHER_SCATTER_SIZE      = 0x10;
 constexpr uint64_t READ_GATHER_SCATTER_SIZE_EXT  = 0x14;
-constexpr uint64_t RESET_GATHER_SCATTER_SIZE     = 0x04;
-constexpr uint64_t KERNEL_EVENT_RECORD_SIZE      = 0x20;
-constexpr uint64_t APR_MAP_BEGIN_RECORD_SIZE     = 0x0c;
-constexpr uint64_t APR_MAP_DIRECT_BEGIN_SIZE     = 0x10;
-constexpr uint64_t APR_MAP_END_RECORD_SIZE       = 0x04;
-constexpr uint64_t AMM_MAP_RECORD_SIZE           = 0x20;
-constexpr uint64_t AMM_MAP_DIRECT_RECORD_SIZE    = 0x30;
-constexpr uint64_t AMM_UNMAP_RECORD_SIZE         = 0x20;
-constexpr uint64_t AMM_MAP_AS_PRT_RECORD_SIZE    = 0x0c;
-constexpr uint64_t AMM_REMAP_RECORD_SIZE         = 0x10;
+constexpr uint64_t RESET_GATHER_SCATTER_SIZE           = 0x04;
+constexpr uint64_t KERNEL_EVENT_RECORD_SIZE            = 0x14;
+constexpr uint64_t APR_MAP_BEGIN_RECORD_SIZE           = 0x0c;
+constexpr uint64_t APR_MAP_DIRECT_BEGIN_SIZE           = 0x10;
+constexpr uint64_t APR_MAP_END_RECORD_SIZE             = 0x04;
+constexpr uint64_t AMM_MAP_RECORD_SIZE                 = 0x0c;
+constexpr uint64_t AMM_MAP_GPU_MASK_RECORD_SIZE        = 0x10;
+constexpr uint64_t AMM_MAP_DIRECT_RECORD_SIZE          = 0x10;
+constexpr uint64_t AMM_MAP_DIRECT_GPU_MASK_RECORD_SIZE = 0x14;
+constexpr uint64_t AMM_UNMAP_RECORD_SIZE               = 0x0c;
+constexpr uint64_t AMM_MAP_AS_PRT_RECORD_SIZE          = 0x0c;
+constexpr uint64_t AMM_ALLOCATE_PA_FOR_PRT_RECORD_SIZE = 0x10;
+constexpr uint64_t AMM_REMAP_RECORD_SIZE               = 0x10;
 constexpr uint64_t AMM_PAGE_SIZE                 = 0x4000;
 constexpr int      AMM_MAP_FIXED                 = 0x10;
 constexpr int      AMM_USAGE_DIRECT              = 0;
@@ -893,8 +896,50 @@ static uint64_t AprReadFileRecordSize(uint64_t file_offset) {
 	return (file_offset >> 32u) != 0 ? READ_FILE_RECORD_SIZE_EXT : READ_FILE_RECORD_SIZE;
 }
 
+static uint64_t MaskCounterValue(uint64_t value, uint8_t access) {
+	if (access == 0) {
+		return value;
+	}
+	if (access == 1) {
+		return value & 0xFFFFFFFFull;
+	}
+	if (access < 4) {
+		return value & 0xFFFFull;
+	}
+	return value & 0xFFull;
+}
+
 static uint64_t WriteAddressRecordSize(uint64_t value) {
 	return value <= 3 ? 8 : value < (uint64_t {1} << 34) ? 12 : 16;
+}
+
+static uint64_t WaitAddressRecordSize(uint64_t value) {
+	return value == 0 ? 8 : (value >> 32u) == 0 ? 12 : 16;
+}
+
+static uint64_t WriteCounterRecordSize(uint8_t access, uint64_t value, uint8_t operation) {
+	const uint64_t masked = MaskCounterValue(value, access);
+	if (access == 1 && operation == 0 && masked < 0x1000ull) {
+		return 4;
+	}
+	return (masked >> 32u) != 0 ? 12 : 8;
+}
+
+static uint64_t WaitCounterRecordSize(uint8_t access, uint64_t value, uint8_t mask_op,
+                                      uint64_t mask) {
+	if (access == 1 && value <= 0xFFull && mask_op == 0) {
+		return 4;
+	}
+	if (value > 0xFFFFull) {
+		if ((value >> 32u) != 0 || ((mask >> 32u) != 0 && mask_op != 0)) {
+			return mask_op != 0 ? 20 : 12;
+		}
+		return mask_op != 0 ? 12 : 8;
+	}
+	if (mask_op == 0 || mask < 0x10000ull) {
+		return 8;
+	}
+	return (mask >> 32u) != 0 ? 20 : 12;
 }
 
 static uint64_t AprReadGatherRecordSize(uint64_t file_offset) {
@@ -1071,12 +1116,13 @@ static int AppendReadFileRecord(uint64_t command_buffer, uint8_t opcode, uint32_
 
 static bool AppendKernelEventRecord(uint64_t command_buffer, uint64_t eq, int32_t id,
                                     uint64_t data) {
-	std::array<uint8_t, KERNEL_EVENT_RECORD_SIZE> record {};
-	const uint32_t                                type = 2;
-	std::memcpy(&record[0x00], &type, sizeof(type));
-	std::memcpy(&record[0x08], &eq, sizeof(eq));
-	std::memcpy(&record[0x10], &id, sizeof(id));
-	std::memcpy(&record[0x18], &data, sizeof(data));
+	std::array<uint32_t, 5> record {};
+	static_assert(sizeof(record) == KERNEL_EVENT_RECORD_SIZE);
+	record[0] = 0x408u | static_cast<uint32_t>((eq >> 16u) & 0xFFFF0000ull);
+	record[1] = static_cast<uint32_t>(eq);
+	record[2] = static_cast<uint32_t>(id);
+	record[3] = static_cast<uint32_t>(data);
+	record[4] = static_cast<uint32_t>(data >> 32u);
 
 	std::scoped_lock      lock(g_command_buffer_mutex);
 	CommandBufferIterator it;
@@ -1092,7 +1138,7 @@ static bool AppendKernelEventRecord(uint64_t command_buffer, uint64_t eq, int32_
 
 	const auto record_offset = state.write_offset;
 	std::memcpy(reinterpret_cast<void*>(state.buffer + record_offset), record.data(),
-	            record.size());
+	            sizeof(record));
 	state.commands.push_back(
 	    {record_offset, CommandBufferState::KernelEventCommand {eq, id, data}});
 	CommitCommandBufferRecord(command_buffer, state, KERNEL_EVENT_RECORD_SIZE);
@@ -1721,11 +1767,26 @@ static uint64_t KYTY_SYSV_ABI MeasureCommandSizeWriteKernelEventQueue(uint64_t, 
 	return KERNEL_EVENT_RECORD_SIZE;
 }
 
-static uint64_t KYTY_SYSV_ABI MeasureCommandSizeFixed32(uint64_t, uint64_t, uint64_t, uint64_t,
-                                                        uint64_t, uint64_t) {
+static uint64_t KYTY_SYSV_ABI MeasureCommandSizeWaitOnAddress(volatile uint64_t*, uint64_t value,
+                                                              uint8_t compare, uint8_t flush) {
 	PRINT_NAME();
 
-	return 0x20;
+	if (compare > 6 || flush > 1) {
+		return KernelErrorU64(LibKernel::KERNEL_ERROR_EINVAL);
+	}
+	return WaitAddressRecordSize(value);
+}
+
+static uint64_t KYTY_SYSV_ABI MeasureCommandSizeWaitOnCounter(uint8_t, uint8_t access,
+                                                              uint64_t value, uint8_t compare,
+                                                              uint8_t mask_op, uint64_t mask,
+                                                              uint8_t flush) {
+	PRINT_NAME();
+
+	if (access > 7 || compare > 6 || mask_op > 1 || flush > 1) {
+		return KernelErrorU64(LibKernel::KERNEL_ERROR_EINVAL);
+	}
+	return WaitCounterRecordSize(access, value, mask_op, mask);
 }
 
 static uint64_t KYTY_SYSV_ABI MeasureCommandSizeWriteAddress(volatile uint64_t*, uint64_t value) {
@@ -1738,28 +1799,41 @@ static uint64_t KYTY_SYSV_ABI
 MeasureCommandSizeWriteAddressFromTimeCounterOnCompletion(volatile uint64_t*) {
 	PRINT_NAME();
 
-	return 0x20;
+	return WriteAddressRecordSize(0);
 }
 
 static uint64_t KYTY_SYSV_ABI
-MeasureCommandSizeWriteAddressFromCounterOnCompletion(volatile uint64_t*, uint8_t) {
+MeasureCommandSizeWriteAddressFromCounterOnCompletion(volatile uint64_t*, uint8_t index) {
 	PRINT_NAME();
 
-	return 0x20;
+	return WriteAddressRecordSize(index);
 }
 
 static uint64_t KYTY_SYSV_ABI
-MeasureCommandSizeWriteAddressFromCounterPairOnCompletion(volatile uint64_t*, uint8_t) {
+MeasureCommandSizeWriteAddressFromCounterPairOnCompletion(volatile uint64_t*, uint8_t index) {
 	PRINT_NAME();
 
-	return 0x20;
+	return WriteAddressRecordSize(index);
 }
 
-static uint64_t KYTY_SYSV_ABI MeasureCommandSizeWriteCounterOnCompletion(uint8_t, uint8_t, uint64_t,
-                                                                         uint8_t) {
+static uint64_t KYTY_SYSV_ABI MeasureCommandSizeWriteCounter(uint8_t index, uint8_t access,
+                                                             uint64_t value, uint8_t operation) {
 	PRINT_NAME();
 
-	return 0x20;
+	if (index >= 128 || access > 7 || operation > 4) {
+		return KernelErrorU64(LibKernel::KERNEL_ERROR_EINVAL);
+	}
+	return WriteCounterRecordSize(access, value, operation);
+}
+
+static uint64_t KYTY_SYSV_ABI MeasureCommandSizeWriteCounterOnCompletion(uint8_t  index,
+                                                                         uint32_t value) {
+	PRINT_NAME();
+
+	if (index >= 128) {
+		return KernelErrorU64(LibKernel::KERNEL_ERROR_EINVAL);
+	}
+	return WriteCounterRecordSize(1, value, 0);
 }
 
 static int64_t KYTY_SYSV_ABI MeasureAmmCommandSizeMap(uint64_t, uint64_t, int32_t, int32_t) {
@@ -1772,14 +1846,14 @@ static int64_t KYTY_SYSV_ABI MeasureAmmCommandSizeMapWithGpuMaskId(uint64_t, uin
                                                                    int32_t, uint8_t) {
 	PRINT_NAME();
 
-	return AMM_MAP_RECORD_SIZE;
+	return AMM_MAP_GPU_MASK_RECORD_SIZE;
 }
 
 static int64_t KYTY_SYSV_ABI MeasureAmmCommandSizeAllocatePaForPrt(uint64_t, uint64_t, int32_t,
                                                                    int32_t) {
 	PRINT_NAME();
 
-	return AMM_MAP_RECORD_SIZE;
+	return AMM_ALLOCATE_PA_FOR_PRT_RECORD_SIZE;
 }
 
 static int64_t KYTY_SYSV_ABI MeasureAmmCommandSizeMapDirect(uint64_t, uint64_t, uint64_t, int32_t,
@@ -1794,7 +1868,7 @@ static int64_t KYTY_SYSV_ABI MeasureAmmCommandSizeMapDirectWithGpuMaskId(uint64_
                                                                          uint8_t) {
 	PRINT_NAME();
 
-	return AMM_MAP_DIRECT_RECORD_SIZE;
+	return AMM_MAP_DIRECT_GPU_MASK_RECORD_SIZE;
 }
 
 static int64_t KYTY_SYSV_ABI MeasureAmmCommandSizeUnmap(uint64_t, uint64_t) {
@@ -2045,14 +2119,14 @@ static int KYTY_SYSV_ABI CommandBufferWaitOnAddress(void*              command_b
 	return AppendCommandRecord(reinterpret_cast<uint64_t>(command_buffer),
 	                           CommandBufferState::WaitCommand {
 	                               reinterpret_cast<uint64_t>(address), value, compare, false},
-	                           0x20, "WaitOnAddress")
+	                           WaitAddressRecordSize(value), "WaitOnAddress")
 	           ? OK
 	           : LibKernel::KERNEL_ERROR_EBUSY;
 }
 
 static int KYTY_SYSV_ABI CommandBufferWaitOnCounter(void* command_buffer, uint8_t index,
                                                     uint8_t access, uint64_t value, uint8_t compare,
-                                                    uint8_t mask_op, uint64_t, uint8_t flush) {
+                                                    uint8_t mask_op, uint64_t mask, uint8_t flush) {
 	PRINT_NAME();
 
 	if (command_buffer == nullptr || access > 7 || compare > 6 || mask_op > 1 || flush > 1) {
@@ -2061,7 +2135,7 @@ static int KYTY_SYSV_ABI CommandBufferWaitOnCounter(void* command_buffer, uint8_
 	EXIT_NOT_IMPLEMENTED(access != 1 || mask_op != 0 || flush != 0 || value > UINT32_MAX);
 	return AppendCommandRecord(reinterpret_cast<uint64_t>(command_buffer),
 	                           CommandBufferState::WaitCommand {index, value, compare, true},
-	                           0x20, "WaitOnCounter")
+	                           WaitCounterRecordSize(access, value, mask_op, mask), "WaitOnCounter")
 	           ? OK
 	           : LibKernel::KERNEL_ERROR_EBUSY;
 }
@@ -2109,16 +2183,23 @@ static int KYTY_SYSV_ABI CommandBufferWriteCounter(void* command_buffer, uint8_t
 	return AppendCommandRecord(reinterpret_cast<uint64_t>(command_buffer),
 	                           CommandBufferState::WriteCounterCommand {
 	                               index, static_cast<uint32_t>(value)},
-	                           0x20, "WriteCounter")
+	                           WriteCounterRecordSize(access, value, operation), "WriteCounter")
 	           ? OK
 	           : LibKernel::KERNEL_ERROR_EBUSY;
 }
 
-static int KYTY_SYSV_ABI CommandBufferWriteCounterOnCompletion(void* command_buffer, uint8_t,
-                                                               uint8_t, uint64_t, uint8_t) {
+static int KYTY_SYSV_ABI CommandBufferWriteCounterOnCompletion(void* command_buffer, uint8_t index,
+                                                               uint32_t value) {
 	PRINT_NAME();
 
-	return AppendNoOpCommand(command_buffer, 0x20, "WriteCounterOnCompletion");
+	if (command_buffer == nullptr || index >= 128) {
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+	return AppendCommandRecord(reinterpret_cast<uint64_t>(command_buffer),
+	                           CommandBufferState::WriteCounterCommand {index, value},
+	                           WriteCounterRecordSize(1, value, 0), "WriteCounterOnCompletion")
+	           ? OK
+	           : LibKernel::KERNEL_ERROR_EBUSY;
 }
 
 static int KYTY_SYSV_ABI CommandBufferWriteAddressFromTimeCounter(void*              command_buffer,
@@ -2126,49 +2207,52 @@ static int KYTY_SYSV_ABI CommandBufferWriteAddressFromTimeCounter(void*         
                                                                   uint32_t) {
 	PRINT_NAME();
 
-	return AppendWriteAddressCommand(command_buffer, address, uint64_t {0}, 0x20,
-	                                 "WriteAddressFromTimeCounter");
+	return AppendWriteAddressCommand(command_buffer, address, uint64_t {0},
+	                                 WriteAddressRecordSize(0), "WriteAddressFromTimeCounter");
 }
 
 static int KYTY_SYSV_ABI CommandBufferWriteAddressFromTimeCounterOnCompletion(
     void* command_buffer, volatile uint64_t* address) {
 	PRINT_NAME();
 
-	return AppendWriteAddressCommand(command_buffer, address, uint64_t {0}, 0x20,
+	return AppendWriteAddressCommand(command_buffer, address, uint64_t {0},
+	                                 WriteAddressRecordSize(0),
 	                                 "WriteAddressFromTimeCounterOnCompletion");
 }
 
 static int KYTY_SYSV_ABI CommandBufferWriteAddressFromCounter(void*              command_buffer,
-                                                              volatile uint64_t* address, uint8_t,
-                                                              uint32_t) {
+                                                              volatile uint64_t* address,
+                                                              uint8_t index, uint32_t) {
 	PRINT_NAME();
 
-	return AppendWriteAddressCommand(command_buffer, address, uint64_t {0}, 0x20,
-	                                 "WriteAddressFromCounter");
+	return AppendWriteAddressCommand(command_buffer, address, uint64_t {0},
+	                                 WriteAddressRecordSize(index), "WriteAddressFromCounter");
 }
 
 static int KYTY_SYSV_ABI CommandBufferWriteAddressFromCounterOnCompletion(
-    void* command_buffer, volatile uint64_t* address, uint8_t) {
+    void* command_buffer, volatile uint64_t* address, uint8_t index) {
 	PRINT_NAME();
 
-	return AppendWriteAddressCommand(command_buffer, address, uint64_t {0}, 0x20,
+	return AppendWriteAddressCommand(command_buffer, address, uint64_t {0},
+	                                 WriteAddressRecordSize(index),
 	                                 "WriteAddressFromCounterOnCompletion");
 }
 
 static int KYTY_SYSV_ABI CommandBufferWriteAddressFromCounterPair(void*              command_buffer,
                                                                   volatile uint64_t* address,
-                                                                  uint8_t, uint32_t) {
+                                                                  uint8_t index, uint32_t) {
 	PRINT_NAME();
 
-	return AppendWriteAddressCommand(command_buffer, address, uint64_t {0}, 0x20,
-	                                 "WriteAddressFromCounterPair");
+	return AppendWriteAddressCommand(command_buffer, address, uint64_t {0},
+	                                 WriteAddressRecordSize(index), "WriteAddressFromCounterPair");
 }
 
 static int KYTY_SYSV_ABI CommandBufferWriteAddressFromCounterPairOnCompletion(
-    void* command_buffer, volatile uint64_t* address, uint8_t) {
+    void* command_buffer, volatile uint64_t* address, uint8_t index) {
 	PRINT_NAME();
 
-	return AppendWriteAddressCommand(command_buffer, address, uint64_t {0}, 0x20,
+	return AppendWriteAddressCommand(command_buffer, address, uint64_t {0},
+	                                 WriteAddressRecordSize(index),
 	                                 "WriteAddressFromCounterPairOnCompletion");
 }
 
@@ -2370,7 +2454,7 @@ static int KYTY_SYSV_ABI AmmCommandBufferMapWithGpuMaskId(void* command_buffer, 
 	command.gpu_mask_id = gpu_mask_id;
 
 	return AppendCommandRecord(reinterpret_cast<uint64_t>(command_buffer), command,
-	                           AMM_MAP_RECORD_SIZE, "AmmMapWithGpuMaskId")
+	                           AMM_MAP_GPU_MASK_RECORD_SIZE, "AmmMapWithGpuMaskId")
 	           ? OK
 	           : LibKernel::KERNEL_ERROR_EBUSY;
 }
@@ -2420,7 +2504,7 @@ static int KYTY_SYSV_ABI AmmCommandBufferMapDirectWithGpuMaskId(void* command_bu
 	command.gpu_mask_id = gpu_mask_id;
 
 	return AppendCommandRecord(reinterpret_cast<uint64_t>(command_buffer), command,
-	                           AMM_MAP_DIRECT_RECORD_SIZE, "AmmMapDirectWithGpuMaskId")
+	                           AMM_MAP_DIRECT_GPU_MASK_RECORD_SIZE, "AmmMapDirectWithGpuMaskId")
 	           ? OK
 	           : LibKernel::KERNEL_ERROR_EBUSY;
 }
@@ -2453,7 +2537,7 @@ static int KYTY_SYSV_ABI AmmCommandBufferAllocatePaForPrt(void* command_buffer, 
 		return LibKernel::KERNEL_ERROR_EINVAL;
 	}
 
-	// Physical backing for a PRT range: allocate real memory at the VA so the game can write to it.
+	// Physical backing for a PRT range: allocate real memory at the VA so the program can write to it.
 	CommandBufferState::AmmMapCommand command {};
 	command.kind = AmmCommandKind::MapAuto;
 	command.va   = va;
@@ -2463,7 +2547,7 @@ static int KYTY_SYSV_ABI AmmCommandBufferAllocatePaForPrt(void* command_buffer, 
 	               ~(PROT_AMPR_READ | PROT_AMPR_WRITE | PROT_ACP_READ | PROT_ACP_WRITE);
 
 	return AppendCommandRecord(reinterpret_cast<uint64_t>(command_buffer), command,
-	                           AMM_MAP_RECORD_SIZE, "AmmAllocatePaForPrt")
+	                           AMM_ALLOCATE_PA_FOR_PRT_RECORD_SIZE, "AmmAllocatePaForPrt")
 	           ? OK
 	           : LibKernel::KERNEL_ERROR_EBUSY;
 }
@@ -2670,13 +2754,13 @@ LIB_DEFINE(InitAmpr_1) {
 	LIB_FUNC("32AcaTaBPSY", Ampr::MeasureCommandSizeWriteAddressFromCounterOnCompletion);
 	LIB_FUNC("vxC58+DRk-U", Ampr::MeasureCommandSizeWriteAddressFromCounterPairOnCompletion);
 	LIB_FUNC("4muPEJ-x5N8", Ampr::MeasureCommandSizeWriteCounterOnCompletion);
-	LIB_FUNC("0BMj1hgG+kE", Ampr::MeasureCommandSizeFixed32);
-	LIB_FUNC("ClnsFLLLcss", Ampr::MeasureCommandSizeFixed32);
+	LIB_FUNC("0BMj1hgG+kE", Ampr::MeasureCommandSizeWaitOnAddress);
+	LIB_FUNC("ClnsFLLLcss", Ampr::MeasureCommandSizeWaitOnCounter);
 	LIB_FUNC("4fgtGfXDrFc", Ampr::MeasureCommandSizeWriteAddress);
-	LIB_FUNC("gAtc79UTt5E", Ampr::MeasureCommandSizeFixed32);
-	LIB_FUNC("JYd9g9L+TmE", Ampr::MeasureCommandSizeFixed32);
-	LIB_FUNC("2Hw8gjMdwSY", Ampr::MeasureCommandSizeFixed32);
-	LIB_FUNC("I-Qm+MEso5c", Ampr::MeasureCommandSizeFixed32);
+	LIB_FUNC("gAtc79UTt5E", Ampr::MeasureCommandSizeWriteAddressFromTimeCounterOnCompletion);
+	LIB_FUNC("JYd9g9L+TmE", Ampr::MeasureCommandSizeWriteAddressFromCounterOnCompletion);
+	LIB_FUNC("2Hw8gjMdwSY", Ampr::MeasureCommandSizeWriteAddressFromCounterPairOnCompletion);
+	LIB_FUNC("I-Qm+MEso5c", Ampr::MeasureCommandSizeWriteCounter);
 	LIB_FUNC("6hbai6KIXkk", Ampr::MeasureAmmCommandSizeMap);
 	LIB_FUNC("m+fYyX8oFqw", Ampr::MeasureAmmCommandSizeMapWithGpuMaskId);
 	LIB_FUNC("ZFDZoN9IbVU", Ampr::MeasureAmmCommandSizeMapDirect);

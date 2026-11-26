@@ -2111,6 +2111,184 @@ void CheckAmprOrdering(Loader::SymbolDatabase &symbols, uint32_t file_id) {
               wait_amm(sub_id) == OK && reuse_fence == 4,
           "CommandBufferSetBuffer rejects attached buffers with EBUSY until CommandBufferClearBuffer");
   }
+  {
+    using AllocatePaForPrt =
+        int (KYTY_SYSV_ABI *)(void *, uint64_t, uint64_t, int32_t, int32_t);
+    using MeasureAllocatePaForPrt =
+        int64_t (KYTY_SYSV_ABI *)(uint64_t, uint64_t, int32_t, int32_t);
+    using MeasureWriteCounter =
+        uint64_t (KYTY_SYSV_ABI *)(uint8_t, uint8_t, uint64_t, uint8_t);
+    using MeasureWriteCounterOnCompletion = uint64_t (KYTY_SYSV_ABI *)(uint8_t, uint32_t);
+    using MeasureWaitCounter = uint64_t (KYTY_SYSV_ABI *)(
+        uint8_t, uint8_t, uint64_t, uint8_t, uint8_t, uint64_t, uint8_t);
+    using MeasureWaitAddress =
+        uint64_t (KYTY_SYSV_ABI *)(volatile uint64_t *, uint64_t, uint8_t, uint8_t);
+    using WriteCounterOnCompletion = int (KYTY_SYSV_ABI *)(void *, uint8_t, uint32_t);
+    using GetNumCommands = uint32_t (KYTY_SYSV_ABI *)(void *);
+    const auto allocate_pa_for_prt =
+        reinterpret_cast<AllocatePaForPrt>(find("d3lKWPM6odc"));
+    const auto measure_allocate_pa_for_prt =
+        reinterpret_cast<MeasureAllocatePaForPrt>(find("2yYv9QWB3hU"));
+    const auto measure_write_counter =
+        reinterpret_cast<MeasureWriteCounter>(find("I-Qm+MEso5c"));
+    const auto measure_write_counter_completion =
+        reinterpret_cast<MeasureWriteCounterOnCompletion>(find("4muPEJ-x5N8"));
+    const auto measure_wait_counter =
+        reinterpret_cast<MeasureWaitCounter>(find("ClnsFLLLcss"));
+    const auto measure_wait_address =
+        reinterpret_cast<MeasureWaitAddress>(find("0BMj1hgG+kE"));
+    const auto write_counter_completion =
+        reinterpret_cast<WriteCounterOnCompletion>(find("3wn42MWTzTs"));
+    const auto num_commands = reinterpret_cast<GetNumCommands>(find("gzndltBEzWc"));
+
+    uint64_t dummy_addr = 0;
+    const auto measure_map =
+        reinterpret_cast<MeasureAllocatePaForPrt>(find("6hbai6KIXkk"));
+    const auto measure_map_gpu_mask = reinterpret_cast<int64_t (KYTY_SYSV_ABI *)(
+        uint64_t, uint64_t, int32_t, int32_t, uint8_t)>(find("m+fYyX8oFqw"));
+    const auto measure_map_direct = reinterpret_cast<int64_t (KYTY_SYSV_ABI *)(
+        uint64_t, uint64_t, uint64_t, int32_t, int32_t)>(find("ZFDZoN9IbVU"));
+    const auto measure_map_direct_gpu_mask = reinterpret_cast<int64_t (KYTY_SYSV_ABI *)(
+        uint64_t, uint64_t, uint64_t, int32_t, int32_t, uint8_t)>(find("KUjtdPZJo5I"));
+    const auto measure_unmap =
+        reinterpret_cast<int64_t (KYTY_SYSV_ABI *)(uint64_t, uint64_t)>(find("Ayg6PIon2wA"));
+    const auto measure_event = reinterpret_cast<uint64_t (KYTY_SYSV_ABI *)(
+        uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t)>(find("sSAUCCU1dv4"));
+    const auto measure_time_counter =
+        reinterpret_cast<uint64_t (KYTY_SYSV_ABI *)(volatile uint64_t *)>(find("x7SQEXfeovg"));
+    const auto measure_from_counter =
+        reinterpret_cast<uint64_t (KYTY_SYSV_ABI *)(volatile uint64_t *, uint8_t)>(
+            find("32AcaTaBPSY"));
+    Check(measure_allocate_pa_for_prt(0x1000000000ull, 0x10000, 0xc, 0xf2) == 16 &&
+              measure_map(0x1000000000ull, 0x10000, 0xc, 0x33) == 12 &&
+              measure_map_gpu_mask(0x1000000000ull, 0x10000, 0xc, 0x33, 1) == 16 &&
+              measure_map_direct(0x1000000000ull, 0, 0x10000, 0xc, 0x33) == 16 &&
+              measure_map_direct_gpu_mask(0x1000000000ull, 0, 0x10000, 0xc, 0x33, 1) == 20 &&
+              measure_unmap(0x1000000000ull, 0x10000) == 12 &&
+              measure_event(0, 0, 0, 0, 0, 0) == 20 &&
+              measure_time_counter(&dummy_addr) == 8 &&
+              measure_from_counter(&dummy_addr, 3) == 8 &&
+              measure_from_counter(&dummy_addr, 4) == 12 &&
+              measure_write_counter(0x10, 1, 0x4a7, 0) == 4 &&
+              measure_write_counter(0x10, 1, 0xfff, 0) == 4 &&
+              measure_write_counter(0x10, 1, 0x1000, 0) == 8 &&
+              measure_write_counter_completion(0x10, 0xfff) == 4 &&
+              measure_write_counter_completion(0x10, 0x1000) == 8 &&
+              measure_wait_counter(0x10, 1, 0xff, 1, 0, 0, 0) == 4 &&
+              measure_wait_counter(0x10, 1, 0x4a6, 1, 0, 0, 0) == 8 &&
+              measure_wait_address(&dummy_addr, 0, 1, 0) == 8 &&
+              measure_wait_address(&dummy_addr, 1, 1, 0) == 12 &&
+              measure_wait_address(&dummy_addr, uint64_t{1} << 32, 1, 0) == 16,
+          "AMPR measure exports report native packed command record sizes");
+
+    // Replay the failing sequence: a 0x10100-byte AMM buffer and 0x18100-byte APR
+    // buffer receive >1,400 consecutive AllocatePaForPrt + WriteCounter / WaitOnCounter
+    // + ReadFile batches after Reset. With inflated 0x20-byte records this overflowed
+    // around pair 1,028 (counter 0x450-0x560).
+    constexpr uint32_t kAmmBufSize = 0x10100;
+    constexpr uint32_t kAprBufSize = 0x18100;
+    std::array<uint64_t, 5> amm_header {};
+    std::array<uint64_t, 5> apr_header {};
+    std::vector<uint32_t> amm_storage(kAmmBufSize / sizeof(uint32_t), 0);
+    std::vector<uint32_t> apr_storage(kAprBufSize / sizeof(uint32_t), 0);
+    std::array<char, 3> read_scratch {};
+    construct(amm_header.data());
+    construct_amm(amm_header.data());
+    construct(apr_header.data());
+    construct_apr(apr_header.data(), &apr_header[3], &apr_header[4]);
+    Check(set_buffer(amm_header.data(), amm_storage.data(), kAmmBufSize) == OK &&
+              set_buffer(apr_header.data(), apr_storage.data(), kAprBufSize) == OK &&
+              reset_buffer(amm_header.data()) == OK &&
+              reset_buffer(apr_header.data()) == OK,
+          "initialize paired 0x10100 AMM and 0x18100 APR command buffers");
+
+    // Preamble command (mirrors the odd command count in the lifecycle logs), followed
+    // by 1,400 AllocatePaForPrt + WriteCounter / WaitOnCounter + ReadFile iterations.
+    Check(write_counter(amm_header.data(), 0x10, 1, 1, 0, 0) == OK,
+          "append preamble counter write");
+    constexpr uint32_t kReplayPairs = 1400;
+    uint64_t expected_amm_offset = 4;
+    uint64_t expected_apr_offset = 0;
+    for (uint32_t i = 0; i < kReplayPairs; ++i) {
+      const uint32_t counter_val = i + 2;
+      const uint64_t va = 0x1000000000ull + static_cast<uint64_t>(i) * 0x10000ull;
+      Check(allocate_pa_for_prt(amm_header.data(), va, 0x10000, 0xc, 0xf2) == OK &&
+                write_counter(amm_header.data(), 0x10, 1, counter_val, 0, 0) == OK &&
+                wait_counter(apr_header.data(), 0x10, 1, counter_val - 1, 1, 0, 0, 0) == OK &&
+                read_file(apr_header.data(), reinterpret_cast<uint64_t>(&apr_header[3]),
+                          reinterpret_cast<uint64_t>(&apr_header[4]), file_id,
+                          read_scratch.data(), read_scratch.size(), 0) == OK,
+            "paired AllocatePaForPrt/WriteCounter and WaitOnCounter/ReadFile fit in 0x10100/0x18100");
+      expected_amm_offset += 16 + (counter_val < 0x1000 ? 4 : 8);
+      expected_apr_offset += ((counter_val - 1) <= 0xff ? 4 : 8) + 20;
+    }
+    Check(offset(amm_header.data()) == expected_amm_offset &&
+              num_commands(amm_header.data()) == 1 + 2 * kReplayPairs &&
+              offset(apr_header.data()) == expected_apr_offset &&
+              num_commands(apr_header.data()) == 2 * kReplayPairs &&
+              expected_amm_offset < kAmmBufSize && expected_apr_offset < kAprBufSize,
+          "1,400 PRT streaming pairs stay well within 0x10100 AMM and 0x18100 APR capacities");
+    Check(reset_buffer(amm_header.data()) == OK && offset(amm_header.data()) == 0 &&
+              reset_buffer(apr_header.data()) == OK && offset(apr_header.data()) == 0,
+          "Reset rewinds paired AMM and APR buffers after replay");
+
+    // WriteCounterOnCompletion appends a live 4-byte or 8-byte counter write.
+    Check(write_counter_completion(amm_header.data(), 0x10, 0xfff) == OK &&
+              offset(amm_header.data()) == 4 &&
+              write_counter_completion(amm_header.data(), 0x10, 0x1000) == OK &&
+              offset(amm_header.data()) == 12,
+          "WriteCounterOnCompletion uses native 4/8-byte packed record sizes");
+
+    // Replay the benign SetBuffer -> Reset -> AprSubmit loop on a 0x100-byte buffer
+    // past the old 32-entry shared EBUSY log limit, followed by a record-space EBUSY
+    // on a separate buffer.
+    std::array<uint64_t, 5> small_apr_header {};
+    std::array<uint32_t, 0x100 / sizeof(uint32_t)> small_apr_storage {};
+    uint64_t loop_fence = 0;
+    construct(small_apr_header.data());
+    construct_apr(small_apr_header.data(), &small_apr_header[3], &small_apr_header[4]);
+    Check(set_buffer(small_apr_header.data(), small_apr_storage.data(),
+                     static_cast<uint32_t>(sizeof(small_apr_storage))) == OK,
+          "initial SetBuffer attaches 0x100-byte APR buffer");
+    for (uint32_t iter = 0; iter < 40; ++iter) {
+      Check(set_buffer(small_apr_header.data(), small_apr_storage.data(),
+                       static_cast<uint32_t>(sizeof(small_apr_storage))) ==
+                Libs::LibKernel::KERNEL_ERROR_EBUSY,
+            "repeated SetBuffer on attached buffer returns EBUSY");
+      Check(reset_buffer(small_apr_header.data()) == OK &&
+                read_file(small_apr_header.data(),
+                          reinterpret_cast<uint64_t>(&small_apr_header[3]),
+                          reinterpret_cast<uint64_t>(&small_apr_header[4]), file_id,
+                          read_scratch.data(), read_scratch.size(), 0) == OK &&
+                write_address(small_apr_header.data(), &loop_fence, iter + 4) == OK &&
+                offset(small_apr_header.data()) == 0x20 &&
+                num_commands(small_apr_header.data()) == 2,
+            "Reset + ReadFile + WriteAddress fills 0x20 bytes / 2 commands");
+      Result iter_result {1234, 5678};
+      uint32_t iter_sub = 0;
+      Check(submit_apr(small_apr_header.data(), 3, &iter_result, &iter_sub) == OK &&
+                wait_apr(iter_sub) == OK && iter_result.result == OK &&
+                loop_fence == iter + 4,
+            "AprSubmit completes after SetBuffer EBUSY + Reset");
+    }
+    // Fill amm_header (reset to 0) to exact capacity and verify EBUSY triggers cleanly.
+    Check(reset_buffer(amm_header.data()) == OK, "reset AMM buffer for overflow check");
+    uint32_t full_pairs = 0;
+    while (allocate_pa_for_prt(amm_header.data(), 0x1000000000ull, 0x10000, 0xc, 0xf2) == OK) {
+      if (write_counter(amm_header.data(), 0x10, 1, full_pairs + 1, 0, 0) != OK) {
+        break;
+      }
+      ++full_pairs;
+    }
+    Check(full_pairs > 3000 &&
+              allocate_pa_for_prt(amm_header.data(), 0x1000000000ull, 0x10000, 0xc, 0xf2) ==
+                  Libs::LibKernel::KERNEL_ERROR_EBUSY,
+          "0x10100 AMM buffer holds >3,000 AllocatePaForPrt+WriteCounter pairs before EBUSY");
+
+    destroy(small_apr_header.data());
+    destroy(apr_header.data());
+    destroy(amm_header.data());
+  }
   for (auto &buffer : buffers) {
     destroy(buffer.header.data());
   }
