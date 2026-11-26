@@ -1,5 +1,6 @@
 #include "kernel/memory.h"
 
+#include "common/ports.h"
 #include "common/assert.h"
 #include "common/logging/log.h"
 #include "common/stringUtils.h"
@@ -946,8 +947,11 @@ void Initialize() {
 	const auto table_overhead = g_cpu_table_memory + g_gpu_table_memory +
 	                            std::max(params.amm_table_memory, INCLUDED_TABLE_MEMORY) -
 	                            3 * INCLUDED_TABLE_MEMORY;
-	const auto memory_budget = GUEST_MEMORY_BUDGET +
-	                           (Loader::SystemContentIsTrinityMode() ? 1216ull * 1024ull * 1024ull : 0);
+	// Port large-memory-budget: grant the PS5 Pro budget to a title whose dump lacks the metadata
+	// that enables Pro mode.
+	const bool large_memory = Loader::SystemContentIsTrinityMode() ||
+	                          Config::PortEnabled(Config::Port::LargeMemoryBudget);
+	const auto memory_budget = GUEST_MEMORY_BUDGET + (large_memory ? 1216ull * 1024ull * 1024ull : 0);
 	EXIT_IF(g_flexible_memory_size + table_overhead >= memory_budget - RESERVED_CACHE_SIZE);
 	g_guest_memory_size = memory_budget - RESERVED_CACHE_SIZE - table_overhead;
 	LOGF("\t flexible memory size = %" PRIu64 " MiB, direct memory size = %" PRIu64 " MiB\n",

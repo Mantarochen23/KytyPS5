@@ -20,6 +20,7 @@ enum class Port : uint32_t {
 	GuestLaneNumber,   // number lanes inside the guest wave when the host subgroup is wider
 	GpuSelectedWrites, // keyed-table atomics; buffer writes do not block scalar branch lowering
 	DispatchGuard,     // zero indirect dispatches whose GPU-written group counts are out of range
+	LargeMemoryBudget, // grant the 1216 MiB larger guest memory budget without Pro-mode metadata
 	Count
 };
 
@@ -37,6 +38,7 @@ inline constexpr PortInfo PORTS[] = {
     {Port::GuestLaneNumber, "guest-lane-number", "lordra9-svg/KytyPS5@85c70d0416", true},
     {Port::GpuSelectedWrites, "gpu-selected-writes", "wololo-wololo/VIcky-Blue@d134910670", true},
     {Port::DispatchGuard, "dispatch-guard", "wololo-wololo/VIcky-Blue@841cb9cac2", false},
+    {Port::LargeMemoryBudget, "large-memory-budget", "wololo-wololo/VIcky-Blue@26d53f0fb", false},
 };
 static_assert(std::size(PORTS) == static_cast<size_t>(Port::Count));
 
