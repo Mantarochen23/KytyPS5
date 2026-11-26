@@ -1,6 +1,7 @@
 #include "kernel/pthread.h"
 
 #include "common/assert.h"
+#include "common/clockHold.h"
 #include "common/common.h"
 #include "common/emulatorConfig.h"
 #include "common/fpEnv.h"
@@ -176,7 +177,8 @@ uint64_t KernelGuestTscMultiplier() {
 	return multiplier;
 }
 
-static uint64_t KernelReadTscNative() {
+// The counter the emulator itself reads (frame timing, vblank stamps): never held.
+static uint64_t KernelReadTscUnheld() {
 	if (!Config::GuestTscEnabled()) {
 		return KernelHostTsc();
 	}
@@ -186,6 +188,26 @@ static uint64_t KernelReadTscNative() {
 
 static uint64_t KernelGetTscFrequencyNative() {
 	return Config::GuestTscEnabled() ? GUEST_TSC_FREQUENCY : KernelHostTscFrequency();
+}
+
+// What the guest sees: the counter minus the time --guest-clock-hold-on-stall held back. With no
+// hold ever started this is the raw counter.
+static uint64_t KernelReadTscNative() {
+	auto& hold = Common::GuestClockHold();
+	if (!hold.Ever()) {
+		return KernelReadTscUnheld();
+	}
+	const auto held = Common::HeldNsToTicks(hold.HeldNs(Common::SteadyNs()), KernelGetTscFrequencyNative());
+	return hold.Apply(Common::ClockHold::Domain::Tsc, KernelReadTscUnheld(), held);
+}
+
+// The guest clock of a clock_gettime-style domain, in nanoseconds, minus the held time.
+static uint64_t KernelHoldNs(Common::ClockHold::Domain domain, uint64_t raw_ns) {
+	auto& hold = Common::GuestClockHold();
+	if (!hold.Ever()) {
+		return raw_ns;
+	}
+	return hold.Apply(domain, raw_ns, hold.HeldNs(Common::SteadyNs()));
 }
 
 static uint64_t KernelGetInitialTsc() {
@@ -1191,6 +1213,26 @@ static bool GetPosixClockId(KernelClockid clock_id, clockid_t* out) {
 	}
 }
 
+static bool KernelClockIsRealtime(KernelClockid clock_id) {
+	return clock_id == KERNEL_CLOCK_REALTIME || clock_id == KERNEL_CLOCK_REALTIME_PRECISE ||
+	       clock_id == KERNEL_CLOCK_REALTIME_FAST || clock_id == KERNEL_CLOCK_SECOND;
+}
+
+// Takes the time --guest-clock-hold-on-stall held back out of a wall clock reading.
+static void KernelApplyClockHold(KernelClockid clock_id, KernelTimespec* tp) {
+	if (!Common::GuestClockHold().Ever()) {
+		return;
+	}
+	const auto raw_ns = static_cast<uint64_t>(tp->tv_sec) * NANOS_PER_SEC +
+	                    static_cast<uint64_t>(tp->tv_nsec);
+	const auto ns     = KernelHoldNs(KernelClockIsRealtime(clock_id)
+	                                     ? Common::ClockHold::Domain::Realtime
+	                                     : Common::ClockHold::Domain::Monotonic,
+	                                 raw_ns);
+	tp->tv_sec        = static_cast<int64_t>(ns / NANOS_PER_SEC);
+	tp->tv_nsec       = static_cast<int64_t>(ns % NANOS_PER_SEC);
+}
+
 static bool NativeClockGettime(KernelClockid clock_id, KernelTimespec* tp) {
 	EXIT_IF(tp == nullptr);
 
@@ -1211,6 +1253,7 @@ static bool NativeClockGettime(KernelClockid clock_id, KernelTimespec* tp) {
 
 	tp->tv_sec  = native_time.tv_sec;
 	tp->tv_nsec = native_time.tv_nsec;
+	KernelApplyClockHold(clock_id, tp);
 	return true;
 }
 
@@ -3679,8 +3722,8 @@ int KYTY_SYSV_ABI KernelClockGettime(KernelClockid clock_id, KernelTimespec* tp)
 
 	tp->tv_sec  = t.tv_sec;
 	tp->tv_nsec = t.tv_nsec;
-
 	if (result == 0) {
+		KernelApplyClockHold(clock_id, tp);
 		return OK;
 	}
 	return KERNEL_ERROR_EINVAL;
@@ -3714,6 +3757,14 @@ int KYTY_SYSV_ABI KernelGettimeofday(KernelTimeval* tp) {
 #endif
 
 	if (result == 0) {
+		if (Common::GuestClockHold().Ever()) {
+			const auto raw_us = static_cast<uint64_t>(tp->tv_sec) * 1000000u +
+			                    static_cast<uint64_t>(tp->tv_usec);
+			const auto us     = KernelHoldNs(Common::ClockHold::Domain::Realtime,
+			                                 raw_us * 1000u) / 1000u;
+			tp->tv_sec        = static_cast<int64_t>(us / 1000000u);
+			tp->tv_usec       = static_cast<int64_t>(us % 1000000u);
+		}
 		return OK;
 	}
 	return KERNEL_ERROR_EINVAL;
@@ -3809,6 +3860,10 @@ uint64_t KYTY_SYSV_ABI KernelGetTscFrequency() {
 
 uint64_t KYTY_SYSV_ABI KernelReadTsc() {
 	return KernelReadTscNative();
+}
+
+uint64_t KernelReadTscForEmulator() {
+	return KernelReadTscUnheld();
 }
 
 uint64_t KYTY_SYSV_ABI KernelGetProcessTime() {

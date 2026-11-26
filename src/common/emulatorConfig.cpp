@@ -518,4 +518,16 @@ uint32_t AsyncIrBudgetMb() {
 	return g_config != nullptr ? g_config->async_ir_budget_mb : 2048u;
 }
 
+bool GuestFaultParkEnabled() {
+	return g_config != nullptr && g_config->guest_fault_park;
+}
+
+bool GuestFaultReportOnlyEnabled() {
+	return g_config != nullptr && g_config->guest_fault_report_only;
+}
+
+uint32_t GuestClockHoldMs() {
+	return g_config != nullptr ? g_config->guest_clock_hold_ms : 0u;
+}
+
 } // namespace Config

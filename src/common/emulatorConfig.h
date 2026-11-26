@@ -156,6 +156,15 @@ struct ConfigOptions {
 	// --async-ir-budget-mb: the memory finished shader translations that no draw has asked for
 	// yet may hold before the least recently requested are dropped. 0 = no limit.
 	uint32_t                 async_ir_budget_mb         = 2048;
+	// --guest-fault-park: a guest thread that takes a fault nobody resolves is reported and parked
+	// instead of ending the process.
+	bool                     guest_fault_park           = false;
+	// --guest-fault-report-only: on that fault, also dump guest code around the pc and the return
+	// addresses into the run's log folder.
+	bool                     guest_fault_report_only    = false;
+	// --guest-clock-hold-on-stall <ms>: the guest clock stands still while no frame was recorded for
+	// more than this long and the render side is busy with shaders. 0 = off.
+	uint32_t                 guest_clock_hold_ms        = 0;
 };
 
 void Load(const ConfigOptions& cfg);
@@ -263,6 +272,9 @@ uint32_t AsyncWorkers();
 bool     AsyncSpeculativeModules();
 uint32_t RenderStallReportSeconds();
 uint32_t AsyncIrBudgetMb();
+bool     GuestFaultParkEnabled();
+bool     GuestFaultReportOnlyEnabled();
+uint32_t GuestClockHoldMs();
 
 } // namespace Config
 

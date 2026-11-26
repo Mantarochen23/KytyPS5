@@ -1,6 +1,7 @@
 #include "loader/runtimeLinker.h"
 
 #include "common/assert.h"
+#include "common/guestPark.h"
 #include "common/common.h"
 #include "common/debugCounters.h"
 #include "common/emulatorConfig.h"
@@ -623,6 +624,72 @@ static bool IsReadableRange(uint64_t addr, uint64_t size) {
 	return true;
 }
 
+// Module name and offset of a code address, or "not in a loaded module".
+static void FormatModuleOffset(RuntimeLinker* rt, uint64_t vaddr, char* out, size_t size) {
+	if (auto* p = rt->FindProgramByAddr(vaddr); p != nullptr) {
+		std::snprintf(out, size, "%s+0x%" PRIx64,
+		              Common::FilenameWithoutDirectory(Common::PathToGenericString(p->file_name))
+		                  .c_str(),
+		              vaddr - p->base_vaddr);
+	} else {
+		std::snprintf(out, size, "not in a loaded module");
+	}
+}
+
+// --guest-fault-report-only: writes fault-code-<n>.txt with 0x400 bytes of guest code around the pc
+// and around each return address, as hex rows, so the code can be disassembled afterwards. The folder
+// is $KYTY_RUN_OUT (the run folder when started by tools/bringup/run.sh) or the current folder.
+// Memory that cannot be read is said so, row by row. Runs inside the fault handler: stdio only.
+static void DumpFaultCode(RuntimeLinker* rt, const char* thread_name,
+                          const Common::HostException::ExceptionInfo& info,
+                          const void* const* frames, int depth) {
+	static std::atomic<uint32_t> counter {0};
+	const auto                   number = counter.fetch_add(1, std::memory_order_relaxed) + 1u;
+	const char*                  folder = std::getenv("KYTY_RUN_OUT");
+	char                         path[512];
+	std::snprintf(path, sizeof(path), "%s/fault-code-%u.txt",
+	              (folder != nullptr && folder[0] != '\0') ? folder : ".", number);
+	FILE* file = std::fopen(path, "w");
+	if (file == nullptr) {
+		std::printf("[fault-code] cannot write %s\n", path);
+		return;
+	}
+	std::fprintf(file, "thread: %s\nfault pc=0x%016" PRIx64 " access=%u address=0x%016" PRIx64 "\n",
+	             thread_name, info.exception_address,
+	             static_cast<unsigned>(info.access_violation_type), info.access_violation_vaddr);
+	constexpr uint64_t SPAN = 0x400;
+	constexpr uint64_t ROW  = 16;
+	for (int region = 0; region <= depth; region++) {
+		const uint64_t address =
+		    region == 0 ? info.exception_address : reinterpret_cast<uint64_t>(frames[region - 1]);
+		char where[256];
+		FormatModuleOffset(rt, address, where, sizeof(where));
+		const uint64_t start = address >= SPAN / 2 ? address - SPAN / 2 : 0;
+		if (region == 0) {
+			std::fprintf(file, "\n== pc\n");
+		} else {
+			std::fprintf(file, "\n== return address %d\n", region);
+		}
+		std::fprintf(file, "address 0x%016" PRIx64 " = %s\nbytes 0x%016" PRIx64 " .. 0x%016" PRIx64
+		                   " (the address is at byte 0x%" PRIx64 ")\n",
+		             address, where, start, start + SPAN, address - start);
+		for (uint64_t row = start; row < start + SPAN; row += ROW) {
+			std::fprintf(file, "%016" PRIx64 ":", row);
+			if (!IsReadableRange(row, ROW)) {
+				std::fprintf(file, " not readable\n");
+				continue;
+			}
+			const auto* bytes = reinterpret_cast<const uint8_t*>(row);
+			for (uint64_t i = 0; i < ROW; i++) {
+				std::fprintf(file, " %02x", bytes[i]);
+			}
+			std::fprintf(file, "\n");
+		}
+	}
+	std::fclose(file);
+	std::printf("[fault-code] wrote %s (%d regions)\n", path, depth + 1);
+}
+
 bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exception_info) {
 	const auto* info = &exception_info;
 
@@ -663,13 +730,34 @@ bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exception_
 	}
 	// Report whatever guest context can be read safely before terminating: which guest thread
 	// faulted, the register file, the faulting code bytes and the top of its stack.
-	{
-		char thread_name[64] = "(host thread)";
-		if (auto self = Libs::LibKernel::PthreadSelfOrNull(); self != nullptr) {
-			if (Libs::LibKernel::PthreadGetname(self, thread_name) != 0) {
-				std::snprintf(thread_name, sizeof(thread_name), "(unnamed guest thread)");
-			}
+	char thread_name[64] = "(host thread)";
+	if (auto self = Libs::LibKernel::PthreadSelfOrNull(); self != nullptr) {
+		if (Libs::LibKernel::PthreadGetname(self, thread_name) != 0) {
+			std::snprintf(thread_name, sizeof(thread_name), "(unnamed guest thread)");
 		}
+	}
+	// --guest-fault-park: a fault at a guest pc that nobody resolved parks this thread instead of
+	// ending the process. A fault in emulator code (pc outside every guest module) keeps ending it.
+	const bool park = Config::GuestFaultParkEnabled() &&
+	                  Common::Singleton<RuntimeLinker>::Instance()->FindProgramByAddr(
+	                      info->exception_address) != nullptr;
+	bool full_report = true;
+	if (park) {
+		const auto added = Common::GuestPark::Global().Add(
+		    info->exception_address, info->access_violation_vaddr,
+		    Libs::LibKernel::PthreadGetthreadid(), thread_name);
+		full_report = added.first_at_pc;
+		if (!full_report) {
+			char where[256];
+			FormatModuleOffset(Common::Singleton<RuntimeLinker>::Instance(), info->exception_address,
+			                   where, sizeof(where));
+			std::printf("[park] thread '%s' (id %d) faulted again at pc=0x%016" PRIx64
+			            " = %s (%u threads at this pc); full report was printed for the first\n",
+			            thread_name, Libs::LibKernel::PthreadGetthreadid(), info->exception_address,
+			            where, added.at_pc);
+		}
+	}
+	if (full_report) {
 		std::printf("--- Guest fault context ---\n");
 		std::printf("thread: %s\n", thread_name);
 		std::printf("rax=%016" PRIx64 " rbx=%016" PRIx64 " rcx=%016" PRIx64 " rdx=%016" PRIx64 "\n"
@@ -710,6 +798,9 @@ bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exception_
 		for (int i = 0; i < depth; i++) {
 			describe("frame   ", reinterpret_cast<uint64_t>(frames[i]));
 		}
+		if (Config::GuestFaultReportOnlyEnabled()) {
+			DumpFaultCode(rt, thread_name, *info, frames, depth);
+		}
 		std::printf("stack words (rsp upward; code addresses are named):\n");
 		for (int i = 0; i < 192; i++) {
 			const auto addr = info->rsp + static_cast<uint64_t>(i) * sizeof(uint64_t);
@@ -747,6 +838,18 @@ bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exception_
 			std::printf("\n");
 		});
 		std::fflush(stdout);
+	}
+	if (park) {
+		char where[256];
+		FormatModuleOffset(Common::Singleton<RuntimeLinker>::Instance(), info->exception_address,
+		                   where, sizeof(where));
+		std::printf("[park] thread '%s' (id %d) parked for good: pc=0x%016" PRIx64
+		            " = %s access=%u address=0x%016" PRIx64 "\n[park] %u guest threads parked\n",
+		            thread_name, Libs::LibKernel::PthreadGetthreadid(), info->exception_address,
+		            where, static_cast<unsigned>(info->access_violation_type),
+		            info->access_violation_vaddr, Common::GuestPark::Global().Count());
+		std::fflush(stdout);
+		Common::GuestPark::ParkForever();
 	}
 	EXIT("Unhandled host exception: type=%u code=%u pc=0x%016" PRIx64
 	     " access=%u address=0x%016" PRIx64 "\n",

@@ -1,12 +1,15 @@
 #ifndef EMULATOR_SRC_GRAPHICS_HOST_GPU_RENDERER_PIPELINE_RENDERACTIVITY_H_
 #define EMULATOR_SRC_GRAPHICS_HOST_GPU_RENDERER_PIPELINE_RENDERACTIVITY_H_
 
+#include "common/clockHold.h"
+
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <thread>
 
 namespace Libs::Graphics {
@@ -105,25 +108,59 @@ struct Snapshot {
 	        g_packets.load(std::memory_order_relaxed)};
 }
 
+// Whether the render thread is busy with shader work or has every queue suspended for it: the
+// states in which a long gap between frames is the emulator's doing, not the program's.
+[[nodiscard]] inline bool BusyWithShaders(const Snapshot& snapshot) noexcept {
+	const std::string_view phase(snapshot.phase);
+	if (phase == "cp-blocked") {
+		return std::string_view(snapshot.detail).starts_with("every queue waits");
+	}
+	for (const std::string_view busy: {"dispatch-shader", "dispatch-pipeline", "wait-pipeline",
+	                                   "sync-translate", "draw-shaders", "pump-async", "wait-async",
+	                                   "expire-translations", "cp-prefetch-scan",
+	                                   "cp-prefetch-drain"}) {
+		if (phase == busy) {
+			return true;
+		}
+	}
+	return false;
+}
+
 } // namespace RenderActivity
+
+// What the stall line says about the guest clock and parked threads.
+struct StallExtras {
+	bool     clock_hold_enabled = false;
+	bool     clock_held         = false;
+	uint64_t clock_current_ms   = 0; // length of the running hold
+	uint64_t clock_total_ms     = 0; // all holds, including the running one
+	uint32_t clock_holds        = 0;
+	uint32_t parked_threads     = 0;
+};
 
 // Starts a thread that prints one line when no frame was recorded for `seconds`, and again every
 // `seconds` while it stays so. Idle cost: one wake-up per second. 0 starts nothing.
 class RenderStallReporter {
 public:
-	explicit RenderStallReporter(uint32_t seconds);
+	// `seconds`: stall line period (0 = no line). `clock_hold_ms`: --guest-clock-hold-on-stall (0 =
+	// off). `report_parked`: --guest-fault-park is on, so parked threads are listed.
+	explicit RenderStallReporter(uint32_t seconds, uint32_t clock_hold_ms = 0,
+	                             bool report_parked = false);
 	~RenderStallReporter();
 	RenderStallReporter(const RenderStallReporter&)            = delete;
 	RenderStallReporter& operator=(const RenderStallReporter&) = delete;
 
 	// The line for a stall of `stalled_ms`, from the activity read now. Public for tests.
 	static std::string Describe(uint64_t stalled_ms, uint64_t frame, uint64_t now_ms,
-	                            const RenderActivity::Snapshot& snapshot, uint32_t jobs_pending);
+	                            const RenderActivity::Snapshot& snapshot, uint32_t jobs_pending,
+	                            const StallExtras& extras = {});
 
 private:
 	void Run();
 
 	uint32_t                m_seconds;
+	uint32_t                m_clock_hold_ms;
+	bool                    m_report_parked;
 	std::mutex              m_mutex;
 	std::condition_variable m_wake;
 	bool                    m_stop = false;
