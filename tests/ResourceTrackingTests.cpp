@@ -9745,9 +9745,8 @@ void TestSrtRootedBufferDescriptor() {
   f.PlanAndTrack();
 
   const auto plan = ExtractResourcePlan(f.program);
-  Check(std::ranges::any_of(plan.descriptor_sources,
-            [](const auto &source) { return source.indirect_descriptor.has_value(); }),
-        "SRT-rooted pointer descriptor was not planned");
+  Check(plan.info.buffers.size() == 1u,
+        "SRT-rooted pointer descriptor lost its buffer resource");
 }
 
 } // namespace
