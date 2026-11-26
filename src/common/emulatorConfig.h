@@ -121,6 +121,7 @@ struct ConfigOptions {
 	bool                   perf_overlay_enabled            = false;
 	bool                   playgo_hack_enabled         = false;
 	bool                   skip_notice_screen          = false;
+	bool                   gpu_fault_query_enabled     = false;
 	std::string            launch_activity;
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 	bool red_zone_protection_enabled = false;
@@ -213,6 +214,7 @@ bool TrophyEnabled();
 uint32_t GetTrophyDurationSeconds();
 bool PlayGoHackEnabled();
 bool SkipNoticeScreen();
+bool GpuFaultQueryEnabled();
 // Activity ID of the one-shot launchActivity game intent; empty sends none.
 const std::string& GetLaunchActivity();
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS

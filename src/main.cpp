@@ -83,6 +83,8 @@ static void PrintUsage() {
 	::printf("  --skip-shaders <hashes|@file>        Debug: skip draws and dispatches matching any comma-\n"
 	         "                                       separated hex shader hash (or @path). Repeatable; also\n"
 	         "                                       reads KYTY_SKIP_SHADERS.\n");
+	::printf("  --gpu-fault-query                    Debug: query VK_EXT_device_fault after flushing\n"
+	         "                                       device-lost breadcrumbs (also KYTY_GPU_FAULT_QUERY=1).\n");
 	::printf("  --shader-cache                       Keep compiled shaders and pipelines between boots.\n");
 	::printf("  --shader-cache-keep                  Keep usable records from a mismatched shader cache,\n"
 	         "                                       dropping only records that fail to load.\n");
@@ -245,6 +247,7 @@ static constexpr Flag FLAGS[] = {
     {"--perf-overlay", &ConfigOptions::perf_overlay_enabled},
     {"--playgo-hack", &ConfigOptions::playgo_hack_enabled},
     {"--skip-notice-screen", &ConfigOptions::skip_notice_screen},
+    {"--gpu-fault-query", &ConfigOptions::gpu_fault_query_enabled},
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
     {"--redzone", &ConfigOptions::red_zone_protection_enabled},
 #endif

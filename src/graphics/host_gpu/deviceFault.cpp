@@ -744,13 +744,42 @@ void GpuBreadcrumbTracker::ReportDeviceLost(GraphicContext& graphics, const char
 				const bool print_buffers =
 				    suspect || (is_last && in_flight) || (!has_op_suspect && in_flight);
 				if (print_buffers) {
+					if (op.push_dword_count > 0) {
+						out.Append("      push_dwords:");
+						for (uint8_t pi = 0; pi < op.push_dword_count && pi < op.push_dwords.size();
+						     ++pi) {
+							out.Printf(" {:08x}", op.push_dwords[pi]);
+						}
+						out.Append("\n");
+					}
+					if (op.user_data_count > 0) {
+						out.Append("      user_data:");
+						for (uint8_t ui = 0;
+						     ui < op.user_data_count && ui < op.user_data_dwords.size(); ++ui) {
+							out.Printf(" {:08x}", op.user_data_dwords[ui]);
+						}
+						out.Append("\n");
+					}
 					for (uint8_t bi = 0; bi < op.buffer_count && bi < op.buffers.size(); ++bi) {
 						const auto& b = op.buffers[bi];
 						out.Printf(
 						    "      buf[{}]: set={} binding={} elem={} guest_va=0x{:016x} "
-						    "vk_buf=0x{:016x} offset=0x{:x} range=0x{:x} buffer_size=0x{:x}\n",
+						    "vk_buf=0x{:016x} gpu_va=0x{:016x} offset=0x{:x} range=0x{:x} "
+						    "buffer_size=0x{:x}",
 						    bi, b.set, b.binding, b.array_element, b.guest_va, b.vk_buffer,
-						    b.offset, b.range, b.buffer_size);
+						    b.gpu_va, b.offset, b.range, b.buffer_size);
+						if (b.gpu_va != 0 && b.range != 0 && b.range != VK_WHOLE_SIZE) {
+							out.Printf(" gpu_range=[0x{:016x}..0x{:016x})", b.gpu_va + b.offset,
+							           b.gpu_va + b.offset + b.range);
+						}
+						out.Append("\n");
+						if (b.word_count > 0) {
+							out.Append("        words:");
+							for (uint8_t wi = 0; wi < b.word_count && wi < b.words.size(); ++wi) {
+								out.Printf(" {:08x}", b.words[wi]);
+							}
+							out.Append("\n");
+						}
 					}
 					if (op.total_buffers > op.buffer_count) {
 						out.Printf("      ... ({} more bound buffers omitted)\n",
@@ -780,9 +809,9 @@ void GpuBreadcrumbTracker::ReportDeviceLost(GraphicContext& graphics, const char
 	out.Append("=== END GPU DEVICE LOST TRIAGE ===\n");
 	out.Flush();
 
-	// Run VK_EXT_device_fault on the dedicated host worker thread so driver calls never execute
-	// on a guest signal stack, and after all breadcrumbs have already been flushed to stderr.
-	if (m_fault_thread.joinable()) {
+	// Run VK_EXT_device_fault only when explicitly requested via --gpu-fault-query /
+	// KYTY_GPU_FAULT_QUERY=1, on the dedicated host worker thread after breadcrumbs are flushed.
+	if (Config::GpuFaultQueryEnabled() && m_fault_thread.joinable()) {
 		m_fault_done.store(false, std::memory_order_release);
 		m_fault_request.store(true, std::memory_order_release);
 		WakeFaultWorker();

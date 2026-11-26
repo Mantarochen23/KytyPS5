@@ -37,30 +37,37 @@ struct ShaderStageBreadcrumb {
 };
 
 struct OpBufferBreadcrumb {
-	uint64_t guest_va      = 0;
-	uint64_t vk_buffer     = 0;
-	uint64_t offset        = 0;
-	uint64_t range         = 0;
-	uint64_t buffer_size   = 0;
-	uint16_t binding       = 0;
-	uint16_t array_element = 0;
-	uint8_t  set           = 0;
-	uint8_t  is_storage_array = 0;
+	uint64_t                   guest_va         = 0;
+	uint64_t                   vk_buffer        = 0;
+	uint64_t                   gpu_va           = 0;
+	uint64_t                   offset           = 0;
+	uint64_t                   range            = 0;
+	uint64_t                   buffer_size      = 0;
+	uint16_t                   binding          = 0;
+	uint16_t                   array_element    = 0;
+	uint8_t                    set              = 0;
+	uint8_t                    is_storage_array = 0;
+	uint8_t                    word_count       = 0;
+	std::array<uint32_t, 16>   words {};
 };
 
 struct OpBreadcrumb {
 	static constexpr size_t kMaxBuffers = 32;
 
-	uint32_t                               marker_id     = 0;
-	BreadcrumbOpKind                       kind          = BreadcrumbOpKind::Unknown;
-	uint32_t                               dim_x         = 0;
-	uint32_t                               dim_y         = 0;
-	uint32_t                               dim_z         = 0;
-	uint8_t                                stage_count   = 0;
-	uint8_t                                buffer_count  = 0;
-	uint16_t                               total_buffers = 0;
-	std::array<ShaderStageBreadcrumb, 4>   stages {};
+	uint32_t                                    marker_id        = 0;
+	BreadcrumbOpKind                            kind             = BreadcrumbOpKind::Unknown;
+	uint32_t                                    dim_x            = 0;
+	uint32_t                                    dim_y            = 0;
+	uint32_t                                    dim_z            = 0;
+	uint8_t                                     stage_count      = 0;
+	uint8_t                                     buffer_count     = 0;
+	uint16_t                                    total_buffers    = 0;
+	uint8_t                                     push_dword_count = 0;
+	uint8_t                                     user_data_count  = 0;
+	std::array<ShaderStageBreadcrumb, 4>        stages {};
 	std::array<OpBufferBreadcrumb, kMaxBuffers> buffers {};
+	std::array<uint32_t, 32>                    push_dwords {};
+	std::array<uint32_t, 16>                    user_data_dwords {};
 };
 
 // Tracks per-submit draw/dispatch breadcrumbs on the CPU alongside a small host-visible GPU

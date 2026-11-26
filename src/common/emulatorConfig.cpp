@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <charconv>
 #include <cstdlib>
+#include <cstring>
 #include <memory>
 
 namespace Config {
@@ -40,6 +41,10 @@ void Load(const ConfigOptions& cfg) {
 	auto& skip = g_config->skip_shader_hashes;
 	std::ranges::sort(skip);
 	skip.erase(std::unique(skip.begin(), skip.end()), skip.end());
+	if (const char* env_fault = std::getenv("KYTY_GPU_FAULT_QUERY");
+	    env_fault != nullptr && env_fault[0] != '\0' && std::strcmp(env_fault, "0") != 0) {
+		g_config->gpu_fault_query_enabled = true;
+	}
 	Common::DebugCounters::SetEnabled(cfg.perf_overlay_enabled);
 }
 
@@ -406,6 +411,10 @@ bool PlayGoHackEnabled() {
 
 bool SkipNoticeScreen() {
 	return g_config->skip_notice_screen;
+}
+
+bool GpuFaultQueryEnabled() {
+	return g_config->gpu_fault_query_enabled;
 }
 
 const std::string& GetLaunchActivity() {

@@ -50,6 +50,9 @@ public:
 	[[nodiscard]] bool               IsCoherent() const noexcept { return m_coherent; }
 	[[nodiscard]] MemoryUsage        Usage() const noexcept { return m_usage; }
 	[[nodiscard]] uint64_t           CpuAddress() const noexcept { return m_cpu_address; }
+	[[nodiscard]] vk::DeviceAddress  TryBufferDeviceAddress() const noexcept {
+		return m_device_address;
+	}
 	[[nodiscard]] vk::DeviceAddress  BufferDeviceAddress() const noexcept {
 		EXIT_IF(m_device_address == 0);
 		return m_device_address;

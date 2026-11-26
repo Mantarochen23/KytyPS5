@@ -111,8 +111,12 @@ NativeStorageBuffer(RenderContext& context, PreparedBindings::BufferSource& sour
                     const ShaderRecompiler::IR::BufferResource& resource, uint32_t& buffer_offset) {
 	buffer_offset       = 0;
 	source.backing_size = 0;
+	source.gpu_va       = 0;
+	source.mapped       = nullptr;
+	source.mapped_size  = 0;
 
-	auto [address, size, backing_size, id] = source;
+	const uint64_t address = source.address;
+	uint64_t       size    = source.size;
 	if (address == 0 || size == 0) {
 		// Null descriptors read zero and drop writes, with or without shader bounds checks.
 		return {nullptr, 0, vk::WholeSize};
@@ -125,7 +129,7 @@ NativeStorageBuffer(RenderContext& context, PreparedBindings::BufferSource& sour
 	}
 	auto [buffer, offset] = context.GetBufferCache().ObtainBuffer(
 	    address, size, resource.written,
-	    resource.formatted || (resource.read && Config::SyncRawImageBuffersEnabled()), id);
+	    resource.formatted || (resource.read && Config::SyncRawImageBuffersEnabled()), source.id);
 	const auto aligned_offset = Common::AlignDown(offset, alignment);
 	const auto adjustment     = offset - aligned_offset;
 	const auto max_range      = graphics.GetPhysicalDeviceProperties().limits.maxStorageBufferRange;
@@ -134,6 +138,10 @@ NativeStorageBuffer(RenderContext& context, PreparedBindings::BufferSource& sour
 	}
 	buffer_offset       = static_cast<uint32_t>(adjustment);
 	source.backing_size = buffer->Size();
+	source.gpu_va       = static_cast<uint64_t>(buffer->TryBufferDeviceAddress());
+	const auto mapped   = buffer->Mapped();
+	source.mapped       = mapped.empty() ? nullptr : mapped.data();
+	source.mapped_size  = mapped.size();
 	const vk::DescriptorBufferInfo result {buffer->Handle(), aligned_offset, size + adjustment};
 	if (resource.written) {
 		context.GetTextureCache().InvalidateMemoryFromGPU(address, size);
