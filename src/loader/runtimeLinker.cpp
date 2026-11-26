@@ -19,6 +19,7 @@
 #include "kernel/fileSystem.h"
 #include "kernel/memory.h"
 #include "kernel/pthread.h"
+#include "libs/libs.h"
 #include "loader/elf.h"
 #include "loader/gamePatch.h"
 #include "loader/guestInstructionPatcher.h"
@@ -723,6 +724,28 @@ bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exception_
 				std::printf(" %s %016" PRIx64 "\n", what, value);
 			}
 		}
+		std::printf("recent library calls on faulting thread (oldest -> newest):\n");
+		Libs::GetThreadCallRing().ForEachOldestFirst([rt](const Libs::CallRecord& rec, size_t idx) {
+			if (rec.completed) {
+				std::printf(" [%3zu] %s::%s(0x%" PRIx64 ", 0x%" PRIx64 ", 0x%" PRIx64 ", 0x%" PRIx64
+				            ", 0x%" PRIx64 ", 0x%" PRIx64 ") = 0x%" PRIx64 " ret=%016" PRIx64,
+				            idx, rec.library, rec.function, rec.args[0], rec.args[1], rec.args[2],
+				            rec.args[3], rec.args[4], rec.args[5], rec.result, rec.guest_ret_addr);
+			} else {
+				std::printf(" [%3zu] %s::%s(0x%" PRIx64 ", 0x%" PRIx64 ", 0x%" PRIx64 ", 0x%" PRIx64
+				            ", 0x%" PRIx64 ", 0x%" PRIx64 ") = <in-flight> ret=%016" PRIx64,
+				            idx, rec.library, rec.function, rec.args[0], rec.args[1], rec.args[2],
+				            rec.args[3], rec.args[4], rec.args[5], rec.guest_ret_addr);
+			}
+			if (auto* p = rt->FindProgramByAddr(rec.guest_ret_addr); p != nullptr) {
+				std::printf(" (%s+0x%" PRIx64 ")",
+				            Common::FilenameWithoutDirectory(
+				                Common::PathToGenericString(p->file_name))
+				                .c_str(),
+				            rec.guest_ret_addr - p->base_vaddr);
+			}
+			std::printf("\n");
+		});
 		std::fflush(stdout);
 	}
 	EXIT("Unhandled host exception: type=%u code=%u pc=0x%016" PRIx64

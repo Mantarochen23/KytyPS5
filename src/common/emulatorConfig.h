@@ -9,6 +9,7 @@
 #include <limits>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace Config {
@@ -87,6 +88,7 @@ struct ConfigOptions {
 	bool                   shader_validation_enabled   = false;
 	bool                   keep_going_enabled          = false;
 	bool                   trace_calls_enabled         = false;
+	std::vector<std::string> trace_calls_filter;
 	int32_t                auto_cross_seconds          = 0;
 	bool                   shader_cache_enabled        = false;
 	LogDirection           shader_log_direction        = LogDirection::Silent;
@@ -125,6 +127,7 @@ struct ConfigOptions {
 };
 
 void Load(const ConfigOptions& cfg);
+bool ParseTraceCallsOption(std::string_view arg, ConfigOptions& cfg);
 
 uint32_t GetScreenWidth();
 uint32_t GetScreenHeight();
@@ -166,6 +169,7 @@ bool     VulkanValidationEnabled();
 bool                   ShaderValidationEnabled();
 bool                   KeepGoingEnabled();
 bool                   TraceCallsEnabled();
+const std::vector<std::string>& TraceCallsFilter();
 int32_t                AutoCrossSeconds();
 bool                   ShaderCacheEnabled();
 LogDirection           GetShaderLogDirection();

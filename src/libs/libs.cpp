@@ -5,6 +5,11 @@
 #include "libs/errno.h"
 #include "loader/symbolDatabase.h"
 
+#include <cctype>
+#include <cstdio>
+#include <mutex>
+#include <unordered_map>
+
 namespace Libs {
 
 namespace LibContentDelete {
@@ -113,8 +118,95 @@ LIB_DEFINE(InitUsbd_1);
 LIB_DEFINE(InitUserService_1);
 LIB_DEFINE(InitWebBrowserDialog_1);
 
+namespace {
+
+thread_local CallRing t_call_ring;
+
+struct FailedCallKey {
+	const void* fn     = nullptr;
+	uint64_t    result = 0;
+
+	bool operator==(const FailedCallKey&) const = default;
+};
+
+struct FailedCallKeyHash {
+	size_t operator()(const FailedCallKey& k) const {
+		const auto a = reinterpret_cast<uintptr_t>(k.fn);
+		return static_cast<size_t>(a ^ (k.result * 0x9e3779b97f4a7c15ull));
+	}
+};
+
+std::mutex                                               g_fail_mutex;
+std::unordered_map<FailedCallKey, uint64_t, FailedCallKeyHash> g_fail_counts;
+
+bool AsciiEqualInsensitive(std::string_view a, std::string_view b) {
+	if (a.size() != b.size()) {
+		return false;
+	}
+	for (size_t i = 0; i < a.size(); i++) {
+		if (std::tolower(static_cast<unsigned char>(a[i])) !=
+		    std::tolower(static_cast<unsigned char>(b[i]))) {
+			return false;
+		}
+	}
+	return true;
+}
+
+} // namespace
+
+const CallRing& GetThreadCallRing() {
+	return t_call_ring;
+}
+
+[[gnu::noinline]] CallRecord& RecordThreadCallEntry(const char* library, const char* function,
+                                                    const uint64_t (&args)[6],
+                                                    uint64_t guest_ret_addr) {
+	return t_call_ring.Push(library, function, args, guest_ret_addr);
+}
+
+[[gnu::noinline]] bool MatchesTraceFilter(const char* library) {
+	if (!g_trace_calls_filtered || library == nullptr) {
+		return false;
+	}
+	const std::string_view lib(library);
+	for (const auto& entry: g_trace_calls_filter) {
+		if (AsciiEqualInsensitive(lib, entry)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+[[gnu::noinline]] bool ShouldLogFailedCall(const void* fn_key, uint64_t result) {
+	std::scoped_lock lock(g_fail_mutex);
+	const auto       count = ++g_fail_counts[FailedCallKey {fn_key, result}];
+	return ShouldLogPowerOfTwo(count);
+}
+
+[[gnu::noinline]] void LogFilteredCall(const char* library, const char* function,
+                                       const uint64_t (&args)[6], uint64_t result) {
+	std::printf("[%d][call] %s::%s(0x%llx, 0x%llx, 0x%llx, 0x%llx, 0x%llx, 0x%llx) = 0x%llx\n",
+	            Common::Thread::GetThreadIdUnique(), library, function,
+	            static_cast<unsigned long long>(args[0]), static_cast<unsigned long long>(args[1]),
+	            static_cast<unsigned long long>(args[2]), static_cast<unsigned long long>(args[3]),
+	            static_cast<unsigned long long>(args[4]), static_cast<unsigned long long>(args[5]),
+	            static_cast<unsigned long long>(result));
+}
+
+[[gnu::noinline]] void LogFailedCall(const char* library, const char* function,
+                                     const uint64_t (&args)[6], uint64_t result) {
+	std::printf("[%d][fail] %s::%s(0x%llx, 0x%llx, 0x%llx, 0x%llx, 0x%llx, 0x%llx) = 0x%llx\n",
+	            Common::Thread::GetThreadIdUnique(), library, function,
+	            static_cast<unsigned long long>(args[0]), static_cast<unsigned long long>(args[1]),
+	            static_cast<unsigned long long>(args[2]), static_cast<unsigned long long>(args[3]),
+	            static_cast<unsigned long long>(args[4]), static_cast<unsigned long long>(args[5]),
+	            static_cast<unsigned long long>(result));
+}
+
 void InitAll(Loader::SymbolDatabase* s) {
-	g_trace_calls = Config::TraceCallsEnabled();
+	g_trace_calls          = Config::TraceCallsEnabled();
+	g_trace_calls_filter   = Config::TraceCallsFilter();
+	g_trace_calls_filtered = g_trace_calls && !g_trace_calls_filter.empty();
 	InitAudio_1(s);
 	InitConvertKeycode_1(s);
 	LibAmpr::InitAmpr_1(s);

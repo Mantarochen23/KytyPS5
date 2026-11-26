@@ -32,6 +32,42 @@ void Load(const ConfigOptions& cfg) {
 	Common::DebugCounters::SetEnabled(cfg.perf_overlay_enabled);
 }
 
+bool ParseTraceCallsOption(std::string_view arg, ConfigOptions& cfg) {
+	if (arg == "--trace-calls") {
+		cfg.trace_calls_enabled = true;
+		cfg.trace_calls_filter.clear();
+		return true;
+	}
+	constexpr std::string_view prefix = "--trace-calls=";
+	if (!arg.starts_with(prefix)) {
+		return false;
+	}
+	const auto rest = arg.substr(prefix.size());
+	if (rest.empty()) {
+		return false;
+	}
+	std::vector<std::string> libs;
+	size_t                   pos = 0;
+	while (pos < rest.size()) {
+		const size_t comma = rest.find(',', pos);
+		const auto   token =
+		    comma == std::string_view::npos ? rest.substr(pos) : rest.substr(pos, comma - pos);
+		if (!token.empty()) {
+			libs.emplace_back(token);
+		}
+		if (comma == std::string_view::npos) {
+			break;
+		}
+		pos = comma + 1;
+	}
+	if (libs.empty()) {
+		return false;
+	}
+	cfg.trace_calls_enabled = true;
+	cfg.trace_calls_filter  = std::move(libs);
+	return true;
+}
+
 uint32_t GetScreenWidth() {
 	return g_config->screen_width;
 }
@@ -183,6 +219,10 @@ int32_t AutoCrossSeconds() {
 
 bool TraceCallsEnabled() {
 	return g_config->trace_calls_enabled;
+}
+
+const std::vector<std::string>& TraceCallsFilter() {
+	return g_config->trace_calls_filter;
 }
 
 bool ShaderCacheEnabled() {

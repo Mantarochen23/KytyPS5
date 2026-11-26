@@ -9,6 +9,7 @@
 #include "common/stringUtils.h"
 #include "common/threads.h"
 #include "common/virtualMemory.h"
+#include "libs/libs.h"
 
 #include <chrono>
 #include <csignal>
@@ -352,6 +353,61 @@ TEST(Thread, ReservesTheFastestCoreAndRestoresTheProcessAffinity) {
 	EXPECT_TRUE(CPU_EQUAL(&restored, &reserved));
 }
 #endif
+
+TEST(Config, ParseTraceCallsOptionHandlesBareAndFiltered) {
+	Config::ConfigOptions options;
+	EXPECT_TRUE(Config::ParseTraceCallsOption("--trace-calls", options));
+	EXPECT_TRUE(options.trace_calls_enabled);
+	EXPECT_TRUE(options.trace_calls_filter.empty());
+
+	EXPECT_TRUE(Config::ParseTraceCallsOption("--trace-calls=libA,libB", options));
+	EXPECT_TRUE(options.trace_calls_enabled);
+	ASSERT_EQ(options.trace_calls_filter.size(), 2u);
+	EXPECT_EQ(options.trace_calls_filter[0], "libA");
+	EXPECT_EQ(options.trace_calls_filter[1], "libB");
+
+	// Bare --trace-calls clears a previous filter.
+	EXPECT_TRUE(Config::ParseTraceCallsOption("--trace-calls", options));
+	EXPECT_TRUE(options.trace_calls_filter.empty());
+
+	EXPECT_FALSE(Config::ParseTraceCallsOption("--trace-calls=", options));
+	EXPECT_FALSE(Config::ParseTraceCallsOption("--trace-calls=,,,", options));
+	EXPECT_FALSE(Config::ParseTraceCallsOption("--other-flag", options));
+}
+
+TEST(Libs, PowerOfTwoRateLimitMatchesFirstFourAndPowersOfTwo) {
+	EXPECT_FALSE(Libs::ShouldLogPowerOfTwo(0));
+	for (uint64_t n = 1; n <= 4; n++) {
+		EXPECT_TRUE(Libs::ShouldLogPowerOfTwo(n));
+	}
+	EXPECT_FALSE(Libs::ShouldLogPowerOfTwo(5));
+	EXPECT_FALSE(Libs::ShouldLogPowerOfTwo(7));
+	EXPECT_TRUE(Libs::ShouldLogPowerOfTwo(8));
+	EXPECT_FALSE(Libs::ShouldLogPowerOfTwo(9));
+	EXPECT_TRUE(Libs::ShouldLogPowerOfTwo(16));
+	EXPECT_TRUE(Libs::ShouldLogPowerOfTwo(32));
+	EXPECT_FALSE(Libs::ShouldLogPowerOfTwo(33));
+}
+
+TEST(Libs, CallRingWrapsAroundAndIteratesOldestFirst) {
+	Libs::CallRing ring;
+	for (uint64_t i = 0; i < Libs::kCallRingSize + 10; i++) {
+		const uint64_t args[6] = {i, i + 1, 0, 0, 0, 0};
+		auto&          rec     = ring.Push("libkernel", "Func", args, 0x1000 + i);
+		rec.result             = i * 2;
+		rec.completed          = true;
+	}
+	EXPECT_EQ(ring.count, Libs::kCallRingSize);
+	size_t seen = 0;
+	ring.ForEachOldestFirst([&](const Libs::CallRecord& rec, size_t idx) {
+		EXPECT_EQ(idx, seen);
+		EXPECT_EQ(rec.args[0], 10u + seen);
+		EXPECT_EQ(rec.result, (10u + seen) * 2u);
+		EXPECT_EQ(rec.guest_ret_addr, 0x1000u + 10u + seen);
+		seen++;
+	});
+	EXPECT_EQ(seen, Libs::kCallRingSize);
+}
 
 } // namespace
 
