@@ -1297,14 +1297,16 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 		if (stage.stage.module != nullptr && draw_op.stage_count < draw_op.stages.size()) {
 			draw_op.stages[draw_op.stage_count++] = {stage.stage.module->info.stage,
 			                                         stage.stage.module->info.shader_hash,
-			                                         stage.stage.module->id};
+			                                         stage.stage.module->id,
+			                                         stage.stage.module->info.info.uses_dma};
 		}
 	}
 	if (state.ps_active && state.ps_input_info.stage.module != nullptr &&
 	    draw_op.stage_count < draw_op.stages.size()) {
 		draw_op.stages[draw_op.stage_count++] = {state.ps_input_info.stage.module->info.stage,
 		                                         state.ps_input_info.stage.module->info.shader_hash,
-		                                         state.ps_input_info.stage.module->id};
+		                                         state.ps_input_info.stage.module->id,
+		                                         state.ps_input_info.stage.module->info.info.uses_dma};
 	}
 	auto&          graphics  = m_context.GetGraphics();
 	const uint32_t marker_id = graphics.breadcrumbs.BeginOp(graphics, vk_buffer, draw_op);

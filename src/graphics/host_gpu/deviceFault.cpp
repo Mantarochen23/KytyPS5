@@ -565,6 +565,92 @@ void GpuBreadcrumbTracker::MarkSubmitted(uint64_t tick, uint64_t known_gpu_tick)
 	}
 }
 
+GpuBreadcrumbTracker::ShaderHashSnapshot
+GpuBreadcrumbTracker::CollectShaderHashesSince(uint32_t after_op_id, size_t max_shaders) {
+	ShaderHashSnapshot snapshot {};
+	std::lock_guard    lock(m_mutex);
+	snapshot.last_op_id = m_next_op_id;
+	if (after_op_id == m_next_op_id) {
+		return snapshot;
+	}
+
+	std::array<size_t, kMaxSubmits> order {};
+	size_t                          order_count = 0;
+	for (size_t i = 0; i < kMaxSubmits; ++i) {
+		const auto& rec = m_submits[i];
+		if (rec.state != SubmitState::Empty && rec.total_ops != 0 && rec.last_op_id > after_op_id) {
+			order[order_count++] = i;
+		}
+	}
+	if (order_count == 0) {
+		snapshot.truncated = true;
+		return snapshot;
+	}
+	std::sort(order.begin(), order.begin() + static_cast<std::ptrdiff_t>(order_count),
+	          [&](size_t a, size_t b) { return m_submits[a].seq < m_submits[b].seq; });
+
+	if (m_submits[order[0]].first_op_id > after_op_id + 1u) {
+		snapshot.truncated = true;
+	}
+
+	std::vector<ShaderStageBreadcrumb> dma_shaders;
+	std::vector<ShaderStageBreadcrumb> all_shaders;
+	bool                               dma_overflow = false;
+	bool                               all_overflow = false;
+	const auto add_unique = [&](std::vector<ShaderStageBreadcrumb>& out, bool& overflow,
+	                            const ShaderStageBreadcrumb& stage) {
+		for (const auto& existing: out) {
+			if (existing.stage == stage.stage && existing.hash == stage.hash) {
+				return;
+			}
+		}
+		if (out.size() >= max_shaders) {
+			overflow = true;
+			return;
+		}
+		out.push_back(stage);
+	};
+
+	for (size_t idx = 0; idx < order_count; ++idx) {
+		const auto& rec = m_submits[order[idx]];
+		++snapshot.submit_count;
+		if (rec.total_ops > kMaxOpsPerSubmit) {
+			snapshot.truncated = true;
+		}
+		const size_t op_count   = rec.ops.size();
+		const size_t oldest_idx = rec.total_ops <= kMaxOpsPerSubmit
+		                              ? 0u
+		                              : static_cast<size_t>(rec.total_ops % kMaxOpsPerSubmit);
+		for (size_t i = 0; i < op_count; ++i) {
+			const auto& op = rec.ops[(oldest_idx + i) % op_count];
+			if (op.marker_id <= after_op_id) {
+				continue;
+			}
+			for (uint8_t si = 0; si < op.stage_count && si < op.stages.size(); ++si) {
+				const auto& stage = op.stages[si];
+				if (stage.hash == 0) {
+					continue;
+				}
+				if (stage.uses_dma) {
+					add_unique(dma_shaders, dma_overflow, stage);
+				}
+				add_unique(all_shaders, all_overflow, stage);
+			}
+		}
+	}
+
+	if (!dma_shaders.empty()) {
+		snapshot.dma_filtered = true;
+		snapshot.truncated |= dma_overflow;
+		snapshot.shaders = std::move(dma_shaders);
+	} else {
+		snapshot.dma_filtered = false;
+		snapshot.truncated |= all_overflow;
+		snapshot.shaders = std::move(all_shaders);
+	}
+	return snapshot;
+}
+
 void GpuBreadcrumbTracker::ReportDeviceLost(GraphicContext& graphics, const char* operation,
                                             vk::Result result, uint64_t tick,
                                             uint64_t known_gpu_tick) {
