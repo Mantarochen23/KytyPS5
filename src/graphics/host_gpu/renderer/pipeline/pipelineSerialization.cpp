@@ -368,6 +368,8 @@ void PipelineCache::StoreFailedProgram(const ProgramKey& key, std::string_view r
 	IoAll(record, text);
 	m_store.Append(std::move(record.bytes));
 }
+
+void PipelineCache::StorePipeline(const GraphicsPipelineKey& key) {
 	if (!m_store) {
 		return;
 	}
