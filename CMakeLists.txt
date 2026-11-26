@@ -533,6 +533,11 @@ add_executable(async_plan_tests EXCLUDE_FROM_ALL
 )
 target_include_directories(async_plan_tests PRIVATE ${inc_headers})
 
+add_executable(wait_diagnostics_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/WaitDiagnosticsTests.cpp"
+)
+target_include_directories(wait_diagnostics_tests PRIVATE ${inc_headers})
+
 add_executable(lru_cache_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/LruCacheTests.cpp"
 )

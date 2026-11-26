@@ -6,6 +6,7 @@
 #include "common/emulatorConfig.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
+#include "graphics/guest_gpu/command_processor/waitDiagnostics.h"
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/cache/textureCache.h"
@@ -523,6 +524,7 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 			const auto end = std::min(std::max(start + DownloadWindowSize, vaddr + size),
 			                          buffer.CpuAddress() + buffer.Size());
 			if (DownloadBufferMemory<false>(buffer, start, end - start)) {
+				WaitDiag::Global().NoteReadback(start, end - start, WaitDiag::NowMs());
 				m_memory_tracker.UnmarkRegionAsGpuModified(start, end - start);
 			}
 		}

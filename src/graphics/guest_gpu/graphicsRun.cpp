@@ -9,6 +9,7 @@
 #include "common/threads.h"
 #include "graphics/guest_gpu/command_processor/commandProcessor.h"
 #include "graphics/guest_gpu/command_processor/pm4Dispatch.h"
+#include "graphics/guest_gpu/command_processor/waitDiagnostics.h"
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/guest_gpu/pm4.h"
 #include "graphics/host_gpu/renderer/debug.h"
@@ -283,9 +284,51 @@ void CommandProcessor::WaitRegMem(uint32_t func, const T* addr, T ref, T mask, u
 		EXIT("unsupported wait_reg_mem operation: 0x%08" PRIx32 "\n", wait_op);
 	}
 
-	if (!TestWaitRegMemValue(*addr, ref, mask, func)) {
+	const T value = *addr;
+	if (!TestWaitRegMemValue(value, ref, mask, func)) {
+		NoteWaitPoll(addr, sizeof(T) == sizeof(uint64_t), func, ref, mask, value);
 		SuspendPm4();
 	}
+}
+
+uint32_t CommandProcessor::DiagnosticsSlot() const {
+	return m_interrupt_event_id >= 0x20 ? static_cast<uint32_t>(m_interrupt_event_id - 0x20) + 1u
+	                                    : 0u;
+}
+
+// For the stall reporter: which packet this queue polls and what it read. The buffer cache is asked
+// about the range on the first poll and about once a second after (it is the same thread).
+void CommandProcessor::NoteWaitPoll(const void* address, bool is64, uint32_t func, uint64_t ref,
+                                    uint64_t mask, uint64_t value) {
+	WaitDiag::WaitPacket packet;
+	packet.is64      = is64;
+	packet.func      = func;
+	packet.address   = reinterpret_cast<uint64_t>(address);
+	packet.mask      = mask;
+	packet.reference = ref;
+	packet.value     = value;
+	if (g_current_execution != nullptr && !g_current_execution->m_buffer_stack.empty()) {
+		const auto& cursor = g_current_execution->m_buffer_stack.back();
+		packet.buffer      = reinterpret_cast<uint64_t>(cursor.commands.data());
+		packet.offset_dw   = cursor.offset_dw;
+	}
+	const auto now   = WaitDiag::NowMs();
+	auto&      diag  = WaitDiag::Global();
+	const auto polls = diag.NotePoll(DiagnosticsSlot(), packet, now);
+	if (polls == 1 || polls % 8192u == 0) {
+		const auto size = is64 ? sizeof(uint64_t) : sizeof(uint32_t);
+		if (GuestRange {packet.address, size}.Valid()) {
+			auto& buffers          = m_renderer.GetBufferCache();
+			packet.gpu_modified    = buffers.IsRegionGpuModified(packet.address, size) ? 1 : 0;
+			packet.gpu_dirty       = buffers.HasGpuDirtyBytes(packet.address, size) ? 1 : 0;
+			diag.NotePoll(DiagnosticsSlot(), packet, now);
+		}
+	}
+}
+
+void CommandProcessor::NoteLabelWrite(const void* address, uint64_t value, uint32_t size) {
+	WaitDiag::Global().NoteLabel(reinterpret_cast<uint64_t>(address), value, size,
+	                             DiagnosticsSlot(), WaitDiag::NowMs());
 }
 
 template void CommandProcessor::WaitRegMem<uint32_t>(uint32_t, const uint32_t*, uint32_t, uint32_t,
@@ -328,6 +371,9 @@ void CommandProcessor::WriteData(uint64_t dst, const uint32_t* src, uint32_t dw_
 	// Completion labels can be reused immediately; memcpy may write a destination twice.
 	auto* output = reinterpret_cast<volatile uint32_t*>(dst);
 	for (uint32_t i = 0; i < dw_num; i++) {
+		if (dw_num <= 4u) {
+			NoteLabelWrite(const_cast<const uint32_t*>(output), src[i], sizeof(uint32_t));
+		}
 		*output = src[i];
 		output += !write_one_address;
 	}
@@ -597,12 +643,23 @@ void GuestGpu::ThreadRun(void* data) {
 		}
 
 		RenderActivity::Note("cp-process", 0, "-", "submission");
+		WaitDiag::Global().NoteRunning(submission.queue_id, WaitDiag::NowMs());
 		const bool complete = [&] {
 			Common::DebugCounters::ScopedTimer busy(
 			    Common::DebugCounters::Counter::GpuThreadBusyNs);
 			return gpu->Process(submission);
 		}();
 
+		if (submission.type == SubmissionType::Commands) {
+			using State = WaitDiag::QueueState;
+			const bool for_shader = !complete && submission.execution.SuspendedForShader();
+			WaitDiag::Global().NoteQueue(submission.queue_id,
+			                             complete ? State::Idle
+			                                      : (for_shader ? State::SuspendedForShader
+			                                                    : State::WaitingMemory),
+			                             for_shader ? RenderActivity::Read().hash : 0,
+			                             WaitDiag::NowMs());
+		}
 		Common::LockGuard lock(gpu->m_queue_mutex);
 		if (!complete) {
 			submission.blocked = true;
@@ -1254,6 +1311,9 @@ void CommandProcessor::ReleaseMem(uint32_t data_sel, uint32_t interrupt_selector
 	// downloads GPU-written bytes under the label before the store.
 	const auto write_label = [this, address](const void* value, uint64_t size) {
 		const auto vaddr   = reinterpret_cast<uint64_t>(address);
+		uint64_t   noted   = 0;
+		std::memcpy(&noted, value, size);
+		NoteLabelWrite(address, noted, static_cast<uint32_t>(size));
 		auto&      buffers = m_renderer.GetBufferCache();
 		if (!GuestRange {vaddr, size}.Valid() || !buffers.IsRegionGpuModified(vaddr, size) ||
 		    buffers.HasGpuDirtyBytes(vaddr, size) ||

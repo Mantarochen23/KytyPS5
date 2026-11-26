@@ -1,6 +1,7 @@
 #include "graphics/host_gpu/renderer/pipeline/renderActivity.h"
 
 #include "common/logging/log.h"
+#include "graphics/guest_gpu/command_processor/waitDiagnostics.h"
 #include "graphics/host_gpu/renderer/pipeline/skippedDraws.h"
 
 #include <fmt/format.h>
@@ -64,6 +65,10 @@ void RenderStallReporter::Run() {
 		const auto text = Describe(now - progress_ms, current, now, RenderActivity::Read(),
 		                           Detail::g_shader_worker_jobs.load(std::memory_order_relaxed));
 		Log::WriteToConsoleAndLog(text + "\n");
+		// Where each command queue is and what a waiting one waits for.
+		for (const auto& line: WaitDiag::Global().Report(now)) {
+			Log::WriteToConsoleAndLog(line + "\n");
+		}
 	}
 }
 

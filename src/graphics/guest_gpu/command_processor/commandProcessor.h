@@ -105,6 +105,11 @@ public:
 	template <typename T>
 	void WaitRegMem(uint32_t func, const T* addr, T ref, T mask, uint32_t wait_op);
 	void MemSemaphore(uint64_t* counter, bool signal, bool write);
+	// For the stall reporter (waitDiagnostics.h).
+	[[nodiscard]] uint32_t DiagnosticsSlot() const;
+	void NoteWaitPoll(const void* address, bool is64, uint32_t func, uint64_t ref, uint64_t mask,
+	                  uint64_t value);
+	void NoteLabelWrite(const void* address, uint64_t value, uint32_t size);
 	void WriteData(uint64_t dst, const uint32_t* src, uint32_t dw_num, uint32_t write_control);
 	void WriteReferenceClock(uint64_t dst_address, uint32_t num_bytes);
 	void GetLodStats(volatile uint32_t* dst, uint32_t size, bool reset);
