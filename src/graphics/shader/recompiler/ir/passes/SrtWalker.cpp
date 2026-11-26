@@ -224,11 +224,13 @@ private:
 			return valid;
 		};
 		const auto op = inst->GetOpcode();
-		if (m_type == RuntimeValueType::ImmutableInteger &&
-		    (op == ValueOpcode::ReadConst || BufferAccessOf(op) != BufferAccess::None ||
-		     AddressOpcodeInfoOf(op).access != AddressAccess::None ||
-		     ImageOpcodeInfoOf(op).access != ImageAccess::None ||
-		     SharedAccessOf(op) != SharedAccess::None)) {
+		if ((m_type == RuntimeValueType::ImmutableInteger &&
+		     AddressOpcodeInfoOf(op).access != AddressAccess::None) ||
+		    ((m_type == RuntimeValueType::ImmutableInteger ||
+		      m_type == RuntimeValueType::StorageImmutableInteger) &&
+		     (op == ValueOpcode::ReadConst || BufferAccessOf(op) != BufferAccess::None ||
+		      ImageOpcodeInfoOf(op).access != ImageAccess::None ||
+		      SharedAccessOf(op) != SharedAccess::None))) {
 			return finish(false);
 		}
 		if (op == ValueOpcode::ReadConst) {
@@ -243,6 +245,7 @@ private:
 				// SRT storage buffer, so the read is bounds-safe without a host-side slot
 				// to enumerate. It cannot serve as an immutable integer proof.
 				if (!m_allow_dynamic_srt || m_type == RuntimeValueType::ImmutableInteger ||
+				    m_type == RuntimeValueType::StorageImmutableInteger ||
 				    !ValidateArguments(*inst, require_uniform)) return finish(false);
 				return finish(true);
 			}

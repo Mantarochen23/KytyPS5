@@ -2,6 +2,7 @@
 #include "graphics/shader/recompiler/ir/passes/ResourceTracking.h"
 
 #include "common/assert.h"
+#include "common/ports.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/recompiler/ir/passes/DeadCodeElimination.h"
 #include "graphics/shader/recompiler/ir/passes/SrtWalker.h"
@@ -923,8 +924,13 @@ private:
 		    !ValidateRuntimeValue(m_program, inst->Arg(1))) {
 			return value;
 		}
-		if (!ValidateRuntimeValue(m_program, info.condition, m_shader_writes != ShaderWrites::None
-		        ? RuntimeValueType::ImmutableInteger : RuntimeValueType::Integer)) {
+		// Port gpu-selected-writes: buffer and image writes only exclude the reads they can change.
+		const auto branch_type = m_shader_writes == ShaderWrites::None ? RuntimeValueType::Integer
+		    : m_shader_writes == ShaderWrites::Address ||
+		            !Config::PortEnabled(Config::Port::GpuSelectedWrites)
+		        ? RuntimeValueType::ImmutableInteger
+		        : RuntimeValueType::StorageImmutableInteger;
+		if (!ValidateRuntimeValue(m_program, info.condition, branch_type)) {
 			// A repeated test of the very same SSA value guarantees which arm reaches this use.
 			// Comparing addresses of separate loads would be unsound for a writable shader.
 			if (use == nullptr || !ValidateRuntimeValue(m_program, info.condition, RuntimeValueType::Integer)) return value;
@@ -3262,7 +3268,10 @@ private:
 
 	bool IndirectBufferAccess(const Inst& inst) const {
 		const auto opcode = inst.GetOpcode();
-		if (opcode != ValueOpcode::StoreBufferU32 && opcode != ValueOpcode::StoreBufferU32x2 &&
+		const bool atomic = Config::PortEnabled(Config::Port::GpuSelectedWrites) &&
+		                    (opcode == ValueOpcode::BufferAtomicIAdd32 ||
+		                     opcode == ValueOpcode::BufferAtomicOr32);
+		if (!atomic && opcode != ValueOpcode::StoreBufferU32 && opcode != ValueOpcode::StoreBufferU32x2 &&
 		    opcode != ValueOpcode::StoreBufferU8 &&
 		    opcode != ValueOpcode::StoreBufferU32x4 && opcode != ValueOpcode::LoadBufferU32x2 &&
 		    opcode != ValueOpcode::LoadBufferU32x3 && opcode != ValueOpcode::LoadBufferU32x4) return false;
@@ -3274,6 +3283,8 @@ private:
 		    inst.Arg(3).Resolve() != Value(0u)) return false;
 		if (memory.idxen && memory.offset != 0u &&
 		    (memory.formatted || memory.data_bits != 32u || (memory.offset & 3u) != 0u)) return false;
+		// Atomics follow the raw indexed DWORD store: the selected candidate receives the update.
+		if (atomic) return memory.idxen && !memory.formatted;
 		if (opcode == ValueOpcode::StoreBufferU32)
 			return !memory.formatted || (memory.idxen && memory.data_bits == 32u && memory.data_dwords == 1u);
 		if (!memory.idxen) return false;
@@ -3848,7 +3859,11 @@ private:
 		if (handle.GetOpcode() != ValueOpcode::GetBufferResource || handle.NumArgs() != 4u ||
 		    handle.Uses().empty()) return false;
 		if (!IndirectBufferAccess(*handle.Uses().front().user)) return false;
-		const bool legacy_store = handle.Uses().front().user->GetOpcode() == ValueOpcode::StoreBufferU32;
+		// Raw DWORD stores and 32-bit atomics need a proven key range; wider accesses use the V# bound.
+		const auto first_access = handle.Uses().front().user->GetOpcode();
+		const bool legacy_store = first_access == ValueOpcode::StoreBufferU32 ||
+		                          first_access == ValueOpcode::BufferAtomicIAdd32 ||
+		                          first_access == ValueOpcode::BufferAtomicOr32;
 		const auto indexed = m_program.memory_info[handle.Uses().front().user->Flags<MemoryFlags>().index].idxen;
 		for (const auto& use: handle.Uses()) {
 			const auto& inst = *use.user;

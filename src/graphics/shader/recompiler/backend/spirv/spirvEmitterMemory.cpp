@@ -698,6 +698,22 @@ template <typename Fn>
 uint32_t EmitAtomicAccess(ValueEmitContext& ctx, const IR::Inst& inst,
                           const IR::MemoryInfo& mem, Fn&& operation) {
 	return EmitValueOrZeroIfCondition(ctx.state, ctx.Arg(inst, inst.NumArgs() - 1), [&]() {
+		if (mem.kind == IR::ResourceKind::Buffer &&
+		    ctx.state.program.info.buffers[mem.resource].indirect_root == mem.resource &&
+		    Config::PortEnabled(Config::Port::GpuSelectedWrites)) {
+			// The descriptor is selected by a GPU key: the atomic reaches the selected candidate
+			// within its record bounds. Unmapped keys and null candidates perform no access.
+			return EmitBufferAccess(ctx, inst, mem, 1u,
+			    [&](const IR::MemoryInfo& selected, const MemoryResourceAccess& resource) {
+				    if (resource.object_pointer == 0u) return ConstantU32(ctx.state, 0u);
+				    const auto index = DwordIndex(ctx, inst, selected, resource.byte_offset);
+				    const auto in_bounds = BufferIndexInBounds(ctx, inst, selected, resource,
+				        EmitStorageElementInBounds(ctx.state, resource, index));
+				    return EmitValueOrZeroIfCondition(ctx.state, in_bounds, [&]() {
+					    return operation(EmitMemoryElementPointer(ctx.state, resource, index));
+				    });
+			    });
+		}
 		return EmitBufferAccess(ctx, inst, mem, 1u,
 		    [&](const IR::MemoryInfo& selected, const MemoryResourceAccess& resource) {
 			    if (resource.object_pointer == 0u) return ConstantU32(ctx.state, 0u);
