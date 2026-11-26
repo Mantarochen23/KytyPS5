@@ -126,6 +126,7 @@ static void CreateLayouts(GraphicContext& graphics, PipelineCache::Pipeline& pip
 	            &create, nullptr, &pipeline.descriptor_set_layout) != vk::Result::eSuccess);
 	const vk::PushConstantRange push_constants {pipeline.push_stages, 0,
 	                                            ShaderRecompiler::IR::NativePushConstantSize};
+	EXIT_IF(pipeline.uses_image_heap && graphics.image_heap_layout == nullptr);
 	const std::array set_layouts {pipeline.descriptor_set_layout, graphics.image_heap_layout};
 
 	vk::PipelineLayoutCreateInfo pipeline_layout_info {};

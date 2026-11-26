@@ -464,6 +464,34 @@ Decoder::Program DecodeFusedProgram(std::span<const uint32_t> front, std::span<c
 	return result;
 }
 
+constexpr uint64_t kIrPassLogThresholdMs = 5;
+
+struct IrPassTimer {
+	const char*                           stage;
+	uint64_t                              shader_hash;
+	const char*                           pass_name;
+	std::chrono::steady_clock::time_point begin;
+
+	~IrPassTimer() {
+		const auto elapsed_ms = static_cast<uint64_t>(
+		    std::chrono::duration_cast<std::chrono::milliseconds>(
+		        std::chrono::steady_clock::now() - begin)
+		        .count());
+		if (elapsed_ms > kIrPassLogThresholdMs) {
+			LOGF("ShaderRecompiler %s IR pass: hash=0x%016" PRIx64
+			     " pass=%s elapsed_ms=%" PRIu64 "\n",
+			     stage, shader_hash, pass_name, elapsed_ms);
+		}
+	}
+};
+
+template <typename Fn>
+auto TimeIrPass(const char* stage, uint64_t shader_hash, const char* pass_name, Fn&& fn)
+    -> decltype(std::forward<Fn>(fn)()) {
+	const IrPassTimer timer {stage, shader_hash, pass_name, std::chrono::steady_clock::now()};
+	return std::forward<Fn>(fn)();
+}
+
 } // namespace
 
 const char* StageName(ShaderType stage) {
@@ -590,35 +618,40 @@ TranslateResult TranslateProgram(const Decoder::Program& decoded, const CompileO
 	     " elapsed_ms=%" PRIu64 "\n",
 	     stage, options.shader_hash,
 	     static_cast<uint64_t>(ir.blocks.size()), phase_ms());
-	IR::RewriteToSsa(ir.blocks);
-	const auto simplify = [&ir] {
-		IR::ConstantPropagationPass(ir.blocks, ir.wave_size);
-		IR::RemoveIdentities(ir);
-		IR::EliminateDeadCode(ir.blocks);
+	const auto time_pass = [&](const char* pass_name, auto&& fn) -> decltype(auto) {
+		return TimeIrPass(stage, options.shader_hash, pass_name, std::forward<decltype(fn)>(fn));
 	};
-	simplify();
-	const auto read_lane_stats = IR::EliminateReadLane(ir, ir.wave_size);
+	time_pass("RewriteToSsa", [&] { IR::RewriteToSsa(ir.blocks); });
+	const auto simplify = [&](const char* cp_name, const char* id_name, const char* dce_name) {
+		time_pass(cp_name, [&] { IR::ConstantPropagationPass(ir.blocks, ir.wave_size); });
+		time_pass(id_name, [&] { IR::RemoveIdentities(ir); });
+		time_pass(dce_name, [&] { IR::EliminateDeadCode(ir.blocks); });
+	};
+	simplify("ConstantPropagation#1", "RemoveIdentities#1", "EliminateDeadCode#1");
+	const auto read_lane_stats =
+	    time_pass("EliminateReadLane", [&] { return IR::EliminateReadLane(ir, ir.wave_size); });
 	if (read_lane_stats.rewritten_reads != 0 || read_lane_stats.rewritten_reductions != 0) {
 		LOGF("ShaderRecompiler %s read-lane elimination: reads=%" PRIu32
 		     " reductions=%" PRIu32 "\n",
 		     stage, read_lane_stats.rewritten_reads, read_lane_stats.rewritten_reductions);
 	}
 	// Cleanup also exposes profitable folds by removing dead predicate consumers.
-	simplify();
+	simplify("ConstantPropagation#2", "RemoveIdentities#2", "EliminateDeadCode#2");
 	if (decoded.has_swap_pc) {
 		// Leaf returns are resolved CFG edges; native PC values must not escape into GPU data.
 		for (const auto* block: ir.blocks)
 			for (const auto& inst: *block)
 				EXIT_NOT_IMPLEMENTED(inst.GetOpcode() == IR::ValueOpcode::GetShaderBase);
 	}
-	LowerTessellationMemory(ir, options);
+	time_pass("LowerTessellationMemory", [&] { LowerTessellationMemory(ir, options); });
 	std::string cfg_dump;
 	if (options.dump_ir) {
 		cfg_dump = CFG::GraphToString(cfg);
 		LOGF("ShaderRecompiler %s native IR before resource tracking:\n%s", stage,
 		     MakeIrDump(cfg_dump, ir).c_str());
 	}
-	IR::TrackResources(ir, decoded, native_cfg, options.input_info);
+	time_pass("TrackResources",
+	          [&] { IR::TrackResources(ir, decoded, native_cfg, options.input_info); });
 	TranslateResult result;
 	result.program = std::move(ir);
 	if (options.dump_ir) {
@@ -634,55 +667,63 @@ CompileResult CompileProgram(TranslateResult translated, const CompileOptions& o
 	const auto emit_begin = std::chrono::steady_clock::now();
 	auto& ir = translated.program;
 	const auto* stage = StageName(ir.stage);
-	IR::ApplyResourceSpecialization(ir, specialization);
+	const auto time_pass = [&](const char* pass_name, auto&& fn) -> decltype(auto) {
+		return TimeIrPass(stage, ir.shader_hash, pass_name, std::forward<decltype(fn)>(fn));
+	};
+	time_pass("ApplyResourceSpecialization",
+	          [&] { IR::ApplyResourceSpecialization(ir, specialization); });
 	// The resource plan owns host descriptor evaluation now. Keep only dependencies consumed
 	// by GPU memory operations; bound descriptor dwords must not retain shader instructions.
-	for (auto& inst: ir.value_storage) {
-		inst.Invalidate();
-	}
-	for (auto* block: ir.blocks) {
-		for (auto& inst: *block) {
-			const auto op = inst.GetOpcode();
-			uint32_t first = 0;
-			if (op == IR::ValueOpcode::GetBufferResource) {
-				if (std::ranges::any_of(inst.Uses(), [&](const IR::Use& use) {
-					return ir.memory_info[use.user->Flags<IR::MemoryFlags>().index].kind ==
-					       IR::ResourceKind::IndirectBuffer;
-				})) {
+	time_pass("StripBoundDescriptors", [&] {
+		for (auto& inst: ir.value_storage) {
+			inst.Invalidate();
+		}
+		for (auto* block: ir.blocks) {
+			for (auto& inst: *block) {
+				const auto op = inst.GetOpcode();
+				uint32_t first = 0;
+				if (op == IR::ValueOpcode::GetBufferResource) {
+					if (std::ranges::any_of(inst.Uses(), [&](const IR::Use& use) {
+						return ir.memory_info[use.user->Flags<IR::MemoryFlags>().index].kind ==
+						       IR::ResourceKind::IndirectBuffer;
+					})) {
+						continue;
+					}
+					const auto resource = inst.Flags<uint32_t>();
+					first               = resource < ir.info.buffers.size() &&
+					                              ir.info.buffers[resource].indirect_root == resource
+					                          ? 1u
+					                          : 0u;
+				} else if (op == IR::ValueOpcode::GetImageResource) {
+					const auto resource = inst.Flags<uint32_t>();
+					first = resource < ir.info.images.size() &&
+					                ir.info.images[resource].indirect_root == resource ? 1u : 0u;
+				} else if (op == IR::ValueOpcode::GetSamplerResource) {
+					const auto resource = inst.Flags<uint32_t>();
+					first = resource < ir.info.samplers.size() &&
+					                !ir.info.samplers[resource].indirect_resources.empty() ? 1u : 0u;
+				} else {
 					continue;
 				}
-				const auto resource = inst.Flags<uint32_t>();
-				first               = resource < ir.info.buffers.size() &&
-				                              ir.info.buffers[resource].indirect_root == resource
-				                          ? 1u
-				                          : 0u;
-			} else if (op == IR::ValueOpcode::GetImageResource) {
-				const auto resource = inst.Flags<uint32_t>();
-				first = resource < ir.info.images.size() &&
-				                ir.info.images[resource].indirect_root == resource ? 1u : 0u;
-			} else if (op == IR::ValueOpcode::GetSamplerResource) {
-				const auto resource = inst.Flags<uint32_t>();
-				first = resource < ir.info.samplers.size() &&
-				                !ir.info.samplers[resource].indirect_resources.empty() ? 1u : 0u;
-			} else {
-				continue;
-			}
-			for (size_t index = first; index < inst.NumArgs(); index++) {
-				inst.SetArg(index, IR::Value(0u));
+				for (size_t index = first; index < inst.NumArgs(); index++) {
+					inst.SetArg(index, IR::Value(0u));
+				}
 			}
 		}
-	}
-	ir.value_storage.clear();
-	IR::RemoveIdentities(ir);
-	IR::EliminateDeadCode(ir.blocks);
+		ir.value_storage.clear();
+	});
+	time_pass("RemoveIdentities#3", [&] { IR::RemoveIdentities(ir); });
+	time_pass("EliminateDeadCode#3", [&] { IR::EliminateDeadCode(ir.blocks); });
 	if (options.profile->ray_query) {
-		if (const auto traced = IR::TraceTraversalsWithRayQueries(ir); traced != 0) {
+		const auto traced = time_pass("TraceTraversalsWithRayQueries",
+		                              [&] { return IR::TraceTraversalsWithRayQueries(ir); });
+		if (traced != 0) {
 			LOGF("ShaderRecompiler %s ray query traversals: hash=0x%016" PRIx64 " loops=%u\n",
 			     stage, ir.shader_hash, traced);
 		}
 	}
 
-	IR::CollectShaderInfo(ir, options.input_info);
+	time_pass("CollectShaderInfo", [&] { IR::CollectShaderInfo(ir, options.input_info); });
 	std::string ir_dump;
 	if (options.dump_ir) {
 		ir_dump = MakeIrDump(translated.cfg_dump, ir);
