@@ -42,8 +42,13 @@ struct RequestState {
 		if (state.prefetch_only) {
 			return Action::Nothing;
 		}
+		// The module job took the translation, so a running one is joined whether or not a
+		// translation is still waiting: asking for a new translation then would redo the work.
+		if (state.module_job_in_flight) {
+			return Action::JoinModuleJob;
+		}
 		if (state.translation_ready) {
-			return state.module_job_in_flight ? Action::JoinModuleJob : Action::PostModuleJob;
+			return Action::PostModuleJob;
 		}
 	}
 	return state.translation_in_flight ? Action::JoinTranslation : Action::PostTranslation;
