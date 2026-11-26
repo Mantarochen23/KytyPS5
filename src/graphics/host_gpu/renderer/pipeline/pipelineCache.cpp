@@ -223,10 +223,17 @@ bool PipelineCache::Program::RefreshCallSource(const ShaderRecompiler::IR::SrtRu
 
 template <bool HasCalls>
 ShaderModule* PipelineCache::Program::FindModule(const ShaderRecompiler::IR::SrtRuntime& runtime,
-                                                 ShaderRecompiler::IR::PushData::Window push_data) {
+                                                 ShaderRecompiler::IR::PushData::Window push_data,
+                                                 bool* materialized) {
 	if (!ShaderRecompiler::IR::MaterializeResources(resource_plan, runtime, resources,
 	                                                specialization)) {
+		if (materialized != nullptr) {
+			*materialized = false;
+		}
 		return nullptr;
+	}
+	if (materialized != nullptr) {
+		*materialized = true;
 	}
 	for (auto& candidate: modules) {
 		const auto& layout = candidate.info.bindings;
@@ -507,24 +514,39 @@ const ShaderModule* PipelineCache::GetProgramImpl(const ShaderParams& params, In
 			if (Config::KeepGoingEnabled()) NoteSkippedUse(params.hash);
 			return nullptr;
 		}
-		ShaderModule* module = nullptr;
+		ShaderModule* module       = nullptr;
+		bool          materialized = true;
 		if (cached.call_source) {
 			source_changed = cached.RefreshCallSource(runtime);
-			if (!source_changed) module = cached.FindModule<true>(runtime, push_data);
+			if (!source_changed) module = cached.FindModule<true>(runtime, push_data, &materialized);
 		} else {
-			module = cached.FindModule<false>(runtime, push_data);
+			module = cached.FindModule<false>(runtime, push_data, &materialized);
 		}
 		if (module != nullptr) return bind(*module);
+		if (!cached.call_source && !materialized) {
+			PipelineCacheLog("!!! SHADER DISPATCH SKIP (resource materialization failed) "
+			                 "shader=0x{:016x}; rendering is incomplete",
+			                 params.hash);
+			if (cached.modules.empty()) {
+				cached.skip_dispatch = true;
+				if (m_async != nullptr) {
+					m_async->translations.erase(m_lookup_key);
+				}
+			}
+			return nullptr;
+		}
 	}
 
 	finish_options();
-	if constexpr (!std::is_same_v<InputInfo, ShaderComputeInputInfo>) {
-		if (mode == AsyncMode::On) {
-			// Stages with GPU-selected calls are compute only, which is never made async.
-			EXIT_IF(entry != m_program_cache.end() && entry->second.call_source != nullptr);
+	if (mode == AsyncMode::On && m_async != nullptr) {
+		const bool sync_only =
+		    (entry != m_program_cache.end() && entry->second.call_source != nullptr) ||
+		    m_async->sync_only_keys.contains(m_lookup_key);
+		if (!sync_only) {
 			m_last_deferred = true;
 			RequestAsync(m_lookup_key, entry != m_program_cache.end() ? &entry->second : nullptr,
-			             params, input_info, options, push_data, mode);
+			             params, input_info, options, push_data, mode,
+			             std::is_same_v<InputInfo, ShaderComputeInputInfo>);
 			return nullptr;
 		}
 	}
@@ -552,16 +574,14 @@ const ShaderModule* PipelineCache::GetProgramImpl(const ShaderParams& params, In
 	auto* current = entry == m_program_cache.end() ? &source : entry->second.call_source.get();
 	ShaderRecompiler::TranslateResult translated;
 	bool                              reused = false;
-	if constexpr (!std::is_same_v<InputInfo, ShaderComputeInputInfo>) {
-		if (m_async != nullptr && current == nullptr) {
-			// A worker may have translated this stage while draws waited for it. The translation
-			// depends only on the stage's static state, so it serves this draw too.
-			if (const auto waiting = m_async->translations.find(m_lookup_key);
-			    waiting != m_async->translations.end()) {
-				translated = std::move(*waiting->second.translated);
-				m_async->translations.erase(waiting);
-				reused = true;
-			}
+	if (m_async != nullptr && current == nullptr) {
+		// A worker may have translated this stage while draws or dispatches waited for it.
+		// The translation depends only on the stage's static state, so it serves this call too.
+		if (const auto waiting = m_async->translations.find(m_lookup_key);
+		    waiting != m_async->translations.end()) {
+			translated = std::move(*waiting->second.translated);
+			m_async->translations.erase(waiting);
+			reused = true;
 		}
 	}
 	bool        tracking_failed = false;
@@ -1070,12 +1090,11 @@ void PipelineCache::GetGraphicsPrograms(const CommandBuffer& command, DrawRender
 	for (uint32_t slot = 0; slot < RENDER_COLOR_ATTACHMENTS_MAX; slot++) {
 		const auto& rt = context.GetRenderTarget(slot);
 		if ((color_output_mask & (1u << slot)) != 0 && rt.base.addr != 0) {
+			const uint32_t width  = rt.attrib2.width + 1u;
+			const uint32_t height = rt.attrib2.height + 1u;
 			color_targets++;
-			all_small &= rt.attrib2.width < SmallTargetSyncPixels &&
-			             rt.attrib2.height < SmallTargetSyncPixels;
-			large_targets +=
-			    rt.attrib2.width >= GbufferMinPixels && rt.attrib2.height >= GbufferMinPixels ? 1u
-			                                                                                  : 0u;
+			all_small &= width <= SmallTargetSyncPixels && height <= SmallTargetSyncPixels;
+			large_targets += width >= GbufferMinPixels && height >= GbufferMinPixels ? 1u : 0u;
 			if (m_async != nullptr) {
 				// Every target is noted, so that the history is complete when it is needed.
 				redrawn = m_async->NoteTargetDraw(rt.base.addr) && redrawn;
@@ -1144,7 +1163,12 @@ void PipelineCache::GetGraphicsPrograms(const CommandBuffer& command, DrawRender
 }
 
 const ShaderModule* PipelineCache::GetComputeProgram(const HW::ComputeShaderInfo& regs,
-                                                     ShaderComputeInputInfo&      input_info) {
+                                                     ShaderComputeInputInfo&      input_info,
+                                                     bool*                        pending) {
+	PumpAsync();
+	if (pending != nullptr) {
+		*pending = false;
+	}
 	if (m_async != nullptr) {
 		m_async->reason = Async::StallReason::Compute;
 	}
@@ -1153,11 +1177,61 @@ const ShaderModule* PipelineCache::GetComputeProgram(const HW::ComputeShaderInfo
 	input_info.lds_storage = input_info.lds_size_dwords * 4u >
 	    m_graphics.GetPhysicalDeviceProperties().limits.maxComputeSharedMemorySize;
 	ShaderRecompiler::IR::PushData::Window push_data;
-	const auto* module = GetProgram(params, input_info, push_data);
+	const auto mode = (m_async != nullptr && pending != nullptr) ? AsyncMode::On : AsyncMode::Off;
+	const auto* module = GetProgram(params, input_info, push_data, mode);
+	if (module == nullptr && m_last_deferred && pending != nullptr) {
+		*pending = true;
+		return nullptr;
+	}
 	// HW_ID2 reads are translated with the graphics compute queue's values.
 	EXIT_NOT_IMPLEMENTED(module != nullptr && input_info.async_compute &&
 	                     module->info.info.reads_queue_id);
 	return module;
+}
+
+bool PipelineCache::PrefetchComputeProgram(const HW::CsStageRegisters& cs_regs,
+                                           bool dispatch_thread_dimensions, bool async_compute) {
+	if (m_async == nullptr || cs_regs.data_addr == 0) {
+		return false;
+	}
+	HW::ComputeShaderInfo regs {};
+	regs.cs_regs = cs_regs;
+	ShaderComputeInputInfo input_info {};
+	input_info.async_compute              = async_compute;
+	input_info.dispatch_thread_dimensions = dispatch_thread_dimensions;
+	input_info.host_subgroup_size         = m_graphics.SupportsComputeWave64() ? 64u : 32u;
+	ShaderParams                                 params;
+	std::shared_ptr<const std::vector<uint32_t>> code_owner;
+	if (!TryPrepareComputeProgram(regs, input_info, params, code_owner)) {
+		return false;
+	}
+	input_info.lds_storage = input_info.lds_size_dwords * 4u >
+	    m_graphics.GetPhysicalDeviceProperties().limits.maxComputeSharedMemorySize;
+	m_lookup_key.stage           = ShaderType::Compute;
+	m_lookup_key.hash            = params.hash;
+	m_lookup_key.user_data_count = params.user_data_count;
+	BuildStageStaticKey(input_info, m_lookup_key.static_state);
+	if (m_program_cache.contains(m_lookup_key) || m_async->translations.contains(m_lookup_key) ||
+	    m_async->sync_only_keys.contains(m_lookup_key)) {
+		return false;
+	}
+	const auto translating = FlightId(m_lookup_key, {UINT32_MAX, UINT32_MAX}, nullptr);
+	if (m_async->in_flight.contains(translating)) {
+		return false;
+	}
+	ShaderRecompiler::CompileOptions options {
+	    .stage           = ShaderType::Compute,
+	    .wave_size       = input_info.wave_size,
+	    .shader_hash     = params.hash,
+	    .dump_ir         = Config::GetShaderLogDirection() != Config::LogDirection::Silent,
+	    .emit_debug_info = Config::GraphicsDebugDumpEnabled(),
+	    .user_data       = std::span(params.user_data).first(params.user_data_count),
+	    .back_code       = params.back_code,
+	};
+	options.input_info.compute = &input_info;
+	RequestAsync(m_lookup_key, nullptr, params, input_info, options, {}, AsyncMode::PrefetchOnly,
+	             false);
+	return true;
 }
 
 GraphicsPipelineKey PipelineCache::MakeGraphicsPipelineKey(
@@ -1345,13 +1419,13 @@ PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(const CommandBuffer&
 	auto [iter, inserted] = m_graphics_pipelines.try_emplace(key);
 	auto& pipeline        = iter->second;
 	if (!inserted) {
-		// Only EnsureGraphicsPipeline starts one on a worker, and a draw waits for it before
-		// coming here, so this does not spin.
 		while (pipeline.pending) {
-			PumpAsync();
-			std::this_thread::yield();
+			WaitForAsync();
 		}
-		return pipeline;
+		if (!pipeline.failed) {
+			return pipeline;
+		}
+		pipeline.failed = false;
 	}
 
 	if (graphics_debug_dump_enabled()) {
@@ -1385,7 +1459,13 @@ PipelineCache::Pipeline& PipelineCache::GetComputePipeline(const ShaderComputeIn
 	auto [iter, inserted] = m_compute_pipelines.try_emplace(module.id);
 	auto& pipeline        = iter->second;
 	if (!inserted) {
-		return pipeline;
+		while (pipeline.pending) {
+			WaitForAsync();
+		}
+		if (!pipeline.failed) {
+			return pipeline;
+		}
+		pipeline.failed = false;
 	}
 
 	if (graphics_debug_dump_enabled()) {

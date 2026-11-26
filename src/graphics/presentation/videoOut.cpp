@@ -826,8 +826,9 @@ void VideoOutDriver::Impl::PresentThread(std::stop_token token) {
 
 		VblankBegin();
 		bool presented = m_flip_queue.Flip();
-		if (!presented && m_presenter.NeedsSystemOverlayRefresh()) {
-			if (!m_presenter.PresentLastFrame()) {
+		if (!presented &&
+		    (m_presenter.NeedsSystemOverlayRefresh() || Graphics::AreShaderWorkersBusy())) {
+			if (!m_presenter.PresentLastFrame() && m_presenter.NeedsSystemOverlayRefresh()) {
 				m_presenter.Present(m_presenter.PrepareBlankFrame(width, height, true));
 			}
 			presented = true;
@@ -1154,20 +1155,23 @@ bool FlipQueue::Flip() {
 		}
 		if (layer_count != 0) {
 			// --async-shader-compile skipped draws of this frame whose shaders were not ready.
-			// Keep showing the last complete frame instead of one with parts missing, but only
-			// for a few seconds, so a shader that never arrives cannot freeze the picture.
-			constexpr auto MaxHold    = std::chrono::seconds {3};
-			const auto     now        = std::chrono::steady_clock::now();
-			const bool     incomplete =
+			// Keep showing the last complete frame for as long as workers are actively building
+			// shaders, and only expire after MaxHold once workers go idle so a shader that never
+			// arrives cannot freeze the picture forever.
+			constexpr auto MaxHold      = std::chrono::seconds {3};
+			const auto     now          = std::chrono::steady_clock::now();
+			const bool     workers_busy = Graphics::AreShaderWorkersBusy();
+			const bool     incomplete   =
 			    std::any_of(requests.begin(), requests.begin() + count,
 			                [](const auto& r) { return r.incomplete; });
 			if (!incomplete) {
 				m_holding = false;
-			} else if (!m_holding) {
+			} else if (!m_holding || workers_busy) {
 				m_holding    = true;
 				m_hold_since = now;
 			}
-			if (incomplete && now - m_hold_since < MaxHold && m_presenter.PresentLastFrame()) {
+			if (incomplete && (workers_busy || now - m_hold_since < MaxHold) &&
+			    m_presenter.PresentLastFrame()) {
 				for (size_t i = 0; i < layer_count; i++) {
 					m_presenter.Discard(*layers[i].frame);
 				}

@@ -16,6 +16,7 @@
 #include <mutex>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <variant>
 #include <vector>
 
@@ -68,8 +69,11 @@ public:
 
 	// Null once stopped.
 	JobPtr Post(Common::UniqueFunction<void>&& job, Priority priority = Priority::Normal);
+	// Moves a queued normal-priority job to the urgent queue and refreshes its ask timestamp.
+	void Promote(const JobPtr& job);
 	// The jobs that have not started.
 	[[nodiscard]] size_t Queued();
+	[[nodiscard]] bool   Stopped();
 	// Drops the jobs that have not started and waits for the ones that have.
 	void Stop();
 
@@ -89,9 +93,9 @@ private:
 };
 
 struct PipelineCache::StageInputs {
-	ProgramKey                                                key;
-	std::variant<ShaderVertexInputInfo, ShaderPixelInputInfo> info;
-	std::vector<uint32_t>                                     code;
+	ProgramKey key;
+	std::variant<ShaderVertexInputInfo, ShaderPixelInputInfo, ShaderComputeInputInfo> info;
+	std::vector<uint32_t>                                                             code;
 	std::vector<uint32_t>                                     back_code;
 	std::array<uint32_t, 40>                                  user_data {};
 	ShaderRecompiler::Spirv::Profile                          profile;
@@ -105,6 +109,7 @@ struct PipelineCache::StageInputs {
 
 struct PipelineCache::Async {
 	explicit Async(uint32_t threads): workers(threads) {}
+	~Async();
 
 	// A translation waiting for a draw to name the resources it is compiled for.
 	struct Translation {
@@ -138,17 +143,20 @@ struct PipelineCache::Async {
 	};
 
 	// What a worker finished, to be applied by the render thread.
-	void Finish(Common::UniqueFunction<void>&& apply) {
-		std::scoped_lock lock(done_mutex);
-		done.push_back(std::move(apply));
-	}
+	void Finish(Common::UniqueFunction<void>&& apply);
 
 	ShaderWorkers                             workers;
 	std::mutex                                done_mutex;
+	std::condition_variable                   done_cv;
 	std::vector<Common::UniqueFunction<void>> done;
+	std::mutex                                notify_mutex;
+	Common::UniqueFunction<void>              on_finish;
 	// Render thread only: the translations and compilations being made, by id.
 	std::unordered_map<uint64_t, Flight>                         in_flight;
 	std::unordered_map<ProgramKey, Translation, ProgramKeyHash> translations;
+	// Render thread only: compute shaders with GPU-selected calls (s_swappc_b64) that must
+	// link callees from guest memory on the render thread.
+	std::unordered_set<ProgramKey, ProgramKeyHash>               sync_only_keys;
 	// Render thread only: pipelines being created on workers.
 	uint32_t pipelines_building = 0;
 

@@ -207,9 +207,16 @@ public:
 
 	// Reads the shaders and registers bound in `command` into the state's shader stages.
 	void GetGraphicsPrograms(const CommandBuffer& command, DrawRenderState& state);
-	// Null skips the dispatch.
+	// Null skips the dispatch unless `pending` is non-null and set to true (building on a worker).
 	const ShaderModule* GetComputeProgram(const HW::ComputeShaderInfo& regs,
-	                                      ShaderComputeInputInfo&      input_info);
+	                                      ShaderComputeInputInfo&      input_info,
+	                                      bool*                        pending = nullptr);
+	// Starts translating a compute shader discovered by PM4 lookahead on a worker thread.
+	bool PrefetchComputeProgram(const HW::CsStageRegisters& cs_regs,
+	                            bool dispatch_thread_dimensions, bool async_compute);
+	// Registers a callback invoked on worker threads whenever an async shader/pipeline job
+	// finishes, so the guest command processor wakes without polling.
+	void SetAsyncFinishCallback(Common::UniqueFunction<void>&& callback);
 
 	// With --async-shader-compile, starts the draw's pipeline on a worker if it has none and says
 	// whether it is ready; the draw is skipped until it is. Otherwise true, and
@@ -217,6 +224,10 @@ public:
 	[[nodiscard]] bool EnsureGraphicsPipeline(const CommandBuffer& command,
 	                                          const DrawRenderState& state,
 	                                          const DrawTargets& targets);
+	// With --async-shader-compile, starts a compute pipeline on a worker and reports `pending`
+	// so the command processor can suspend without skipping the dispatch.
+	[[nodiscard]] bool EnsureComputePipeline(const ShaderComputeInputInfo& input_info,
+	                                         bool&                         pending);
 	Pipeline& GetGraphicsPipeline(const CommandBuffer& command, const DrawRenderState& state,
 	                              const DrawTargets& targets);
 	Pipeline& GetComputePipeline(const ShaderComputeInputInfo& input_info);
@@ -239,7 +250,8 @@ private:
 		bool RefreshCallSource(const ShaderRecompiler::IR::SrtRuntime& runtime);
 		template <bool HasCalls>
 		ShaderModule* FindModule(const ShaderRecompiler::IR::SrtRuntime& runtime,
-		                         ShaderRecompiler::IR::PushData::Window  push_data);
+		                         ShaderRecompiler::IR::PushData::Window  push_data,
+		                         bool*                                   materialized = nullptr);
 		// The module of a program without calls that was built for these inputs, if any.
 		ShaderModule* FindCandidate(const ShaderRecompiler::IR::ResourceSpecialization& wanted,
 		                            ShaderRecompiler::IR::PushData::Window              push_data);
@@ -343,9 +355,12 @@ private:
 	template <typename InputInfo>
 	void RequestAsync(const ProgramKey& key, Program* program, const ShaderParams& params,
 	                  const InputInfo& input_info, const ShaderRecompiler::CompileOptions& options,
-	                  ShaderRecompiler::IR::PushData::Window push_data, AsyncMode mode);
+	                  ShaderRecompiler::IR::PushData::Window push_data, AsyncMode mode,
+	                  bool urgent_translate = false);
 	// Applies the work the workers have finished. Render thread only.
 	void            PumpAsync();
+	// Sleeps on a condition variable until a worker finishes, then applies finished work.
+	void            WaitForAsync();
 	static uint64_t FlightId(const ProgramKey& key,
 	                         ShaderRecompiler::IR::PushData::Window push_data,
 	                         const ShaderRecompiler::IR::ResourceSpecialization* specialization);

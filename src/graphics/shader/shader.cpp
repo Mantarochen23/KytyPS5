@@ -10,6 +10,7 @@
 #include "graphics/guest_gpu/gpu_defs.h"
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/guest_gpu/hardwareContext.h"
+#include "graphics/guest_gpu/pm4.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/shader/recompiler/BufferFormat.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
@@ -24,6 +25,7 @@
 #include <bit>
 #include <cstdio>
 #include <cstring>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <span>
@@ -46,12 +48,17 @@ struct ShaderMapData: ShaderMappedData {
 };
 
 struct ShaderMapEntry {
-	ShaderMapData data;
-	uint64_t      hash;
+	ShaderMapData                                data;
+	uint64_t                                     hash = 0;
+	// Immutable copy of the hashed shader words so speculative prefetch never reads guest memory.
+	std::shared_ptr<const std::vector<uint32_t>> code;
 };
 
 static std::unique_ptr<std::unordered_map<uint64_t, ShaderMapEntry>> g_shader_map;
 static std::mutex                                                      g_shader_map_mutex;
+static std::deque<ComputeShaderPrefetch>                               g_compute_prefetches;
+static std::mutex                                                      g_prefetch_notify_mutex;
+static Common::UniqueFunction<void>                                    g_prefetch_notifier;
 
 void ShaderInit() {
 	EXIT_IF(g_shader_map != nullptr);
@@ -86,10 +93,12 @@ void ShaderMapUserData(uint64_t addr, const ShaderMappedData& data) {
 	// Translation reads the bytes the hash covers.
 	mapped.code_size_bytes = ShaderProgramSize(binary, data.code_size_bytes);
 	const auto hash        = XXH3_64bits(binary, mapped.code_size_bytes);
+	auto       code_copy   = std::make_shared<std::vector<uint32_t>>(
+	    binary, binary + mapped.code_size_bytes / sizeof(uint32_t));
 	mapped.vertex_error =
 	    ShaderReadVertexMetadata(data, HW::UserSgprInfo::SGPRS_MAX, mapped.vertex);
 	std::scoped_lock lock(g_shader_map_mutex);
-	(*g_shader_map)[addr] = {mapped, hash};
+	(*g_shader_map)[addr] = {mapped, hash, std::move(code_copy)};
 }
 
 static ShaderMapEntry ShaderGetMappedData(uint64_t addr, const char* label) {
@@ -724,6 +733,136 @@ ShaderParams PrepareProgram(const HW::ComputeShaderInfo& regs, ShaderComputeInpu
 	return GetShaderParams(
 	    regs.cs_regs.data_addr, hash,
 	    std::span<const uint32_t>(regs.cs_user_sgpr.value, regs.cs_regs.user_sgpr), data);
+}
+
+bool ApplyComputeShRegister(HW::CsStageRegisters& cs_regs, uint32_t offset, uint32_t value) {
+	offset &= ~0x70000000u;
+	switch (offset) {
+		case Pm4::COMPUTE_PGM_LO:
+			cs_regs.data_addr &= 0xFFFFFF00000000FFull;
+			cs_regs.data_addr |= static_cast<uint64_t>(value) << 8u;
+			return true;
+		case Pm4::COMPUTE_PGM_HI:
+			cs_regs.data_addr &= 0xFFFF00FFFFFFFFFFull;
+			cs_regs.data_addr |= (static_cast<uint64_t>(value) & 0xffu) << 40u;
+			return true;
+		case Pm4::COMPUTE_PGM_RSRC1:
+			cs_regs.vgprs =
+			    (value >> Pm4::COMPUTE_PGM_RSRC1_VGPRS_SHIFT) & Pm4::COMPUTE_PGM_RSRC1_VGPRS_MASK;
+			cs_regs.priority = (value >> Pm4::COMPUTE_PGM_RSRC1_PRIORITY_SHIFT) &
+			                   Pm4::COMPUTE_PGM_RSRC1_PRIORITY_MASK;
+			cs_regs.float_mode    = (value >> Pm4::COMPUTE_PGM_RSRC1_FLOAT_MODE_SHIFT) &
+			                        Pm4::COMPUTE_PGM_RSRC1_FLOAT_MODE_MASK;
+			cs_regs.dx10_clamp    = ((value >> Pm4::COMPUTE_PGM_RSRC1_DX10_CLAMP_SHIFT) &
+			                         Pm4::COMPUTE_PGM_RSRC1_DX10_CLAMP_MASK) != 0u;
+			cs_regs.debug_mode    = ((value >> Pm4::COMPUTE_PGM_RSRC1_DEBUG_MODE_SHIFT) &
+			                         Pm4::COMPUTE_PGM_RSRC1_DEBUG_MODE_MASK) != 0u;
+			cs_regs.ieee_mode     = ((value >> Pm4::COMPUTE_PGM_RSRC1_IEEE_MODE_SHIFT) &
+			                         Pm4::COMPUTE_PGM_RSRC1_IEEE_MODE_MASK) != 0u;
+			cs_regs.fp16_overflow = ((value >> Pm4::COMPUTE_PGM_RSRC1_FP16_OVFL_SHIFT) &
+			                         Pm4::COMPUTE_PGM_RSRC1_FP16_OVFL_MASK) != 0u;
+			cs_regs.threadgroup_configuration = ((value >> Pm4::COMPUTE_PGM_RSRC1_WGP_MODE_SHIFT) &
+			                                     Pm4::COMPUTE_PGM_RSRC1_WGP_MODE_MASK) != 0u;
+			cs_regs.require_forward_progress =
+			    ((value >> Pm4::COMPUTE_PGM_RSRC1_FWD_PROGRESS_SHIFT) &
+			     Pm4::COMPUTE_PGM_RSRC1_FWD_PROGRESS_MASK) != 0u;
+			return true;
+		case Pm4::COMPUTE_PGM_RSRC2:
+			cs_regs.scratch_en     = ((value >> Pm4::COMPUTE_PGM_RSRC2_SCRATCH_EN_SHIFT) &
+			                          Pm4::COMPUTE_PGM_RSRC2_SCRATCH_EN_MASK) != 0u;
+			cs_regs.user_sgpr      = (value >> Pm4::COMPUTE_PGM_RSRC2_USER_SGPR_SHIFT) &
+			                         Pm4::COMPUTE_PGM_RSRC2_USER_SGPR_MASK;
+			cs_regs.tgid_x_en      = ((value >> Pm4::COMPUTE_PGM_RSRC2_TGID_X_EN_SHIFT) &
+			                          Pm4::COMPUTE_PGM_RSRC2_TGID_X_EN_MASK) != 0u;
+			cs_regs.tgid_y_en      = ((value >> Pm4::COMPUTE_PGM_RSRC2_TGID_Y_EN_SHIFT) &
+			                          Pm4::COMPUTE_PGM_RSRC2_TGID_Y_EN_MASK) != 0u;
+			cs_regs.tgid_z_en      = ((value >> Pm4::COMPUTE_PGM_RSRC2_TGID_Z_EN_SHIFT) &
+			                          Pm4::COMPUTE_PGM_RSRC2_TGID_Z_EN_MASK) != 0u;
+			cs_regs.tg_size_en     = ((value >> Pm4::COMPUTE_PGM_RSRC2_TG_SIZE_EN_SHIFT) &
+			                          Pm4::COMPUTE_PGM_RSRC2_TG_SIZE_EN_MASK) != 0u;
+			cs_regs.tidig_comp_cnt = (value >> Pm4::COMPUTE_PGM_RSRC2_TIDIG_COMP_CNT_SHIFT) &
+			                         Pm4::COMPUTE_PGM_RSRC2_TIDIG_COMP_CNT_MASK;
+			cs_regs.lds_size       = (value >> Pm4::COMPUTE_PGM_RSRC2_LDS_SIZE_SHIFT) &
+			                         Pm4::COMPUTE_PGM_RSRC2_LDS_SIZE_MASK;
+			return true;
+		case Pm4::COMPUTE_PGM_RSRC3:
+			cs_regs.shared_vgprs =
+			    (value >> Pm4::COMPUTE_PGM_RSRC3_SHARED_VGPRS_SHIFT) &
+			    Pm4::COMPUTE_PGM_RSRC3_SHARED_VGPRS_MASK;
+			return true;
+		case Pm4::COMPUTE_NUM_THREAD_X: cs_regs.num_thread_x = value; return true;
+		case Pm4::COMPUTE_NUM_THREAD_Y: cs_regs.num_thread_y = value; return true;
+		case Pm4::COMPUTE_NUM_THREAD_Z: cs_regs.num_thread_z = value; return true;
+		default: return false;
+	}
+}
+
+void ShaderQueueComputePrefetch(const HW::CsStageRegisters& cs_regs,
+                                bool dispatch_thread_dimensions) {
+	if (cs_regs.data_addr == 0 || g_shader_map == nullptr || !Config::AsyncShaderCompileEnabled()) {
+		return;
+	}
+	bool wake = false;
+	{
+		std::scoped_lock lock(g_shader_map_mutex);
+		constexpr size_t MaxQueuedPrefetches = 4096;
+		if (g_compute_prefetches.size() >= MaxQueuedPrefetches) {
+			return;
+		}
+		wake = g_compute_prefetches.empty();
+		g_compute_prefetches.push_back({cs_regs, dispatch_thread_dimensions});
+	}
+	if (wake) {
+		std::scoped_lock notify_lock(g_prefetch_notify_mutex);
+		if (g_prefetch_notifier) {
+			g_prefetch_notifier();
+		}
+	}
+}
+
+std::vector<ComputeShaderPrefetch> ShaderTakeComputePrefetches() {
+	std::vector<ComputeShaderPrefetch> batch;
+	std::scoped_lock                   lock(g_shader_map_mutex);
+	batch.reserve(g_compute_prefetches.size());
+	while (!g_compute_prefetches.empty()) {
+		batch.push_back(g_compute_prefetches.front());
+		g_compute_prefetches.pop_front();
+	}
+	return batch;
+}
+
+void ShaderSetComputePrefetchNotifier(Common::UniqueFunction<void>&& notifier) {
+	std::scoped_lock notify_lock(g_prefetch_notify_mutex);
+	g_prefetch_notifier = std::move(notifier);
+}
+
+bool TryPrepareComputeProgram(const HW::ComputeShaderInfo& regs, ShaderComputeInputInfo& info,
+                              ShaderParams& out,
+                              std::shared_ptr<const std::vector<uint32_t>>& code_owner) {
+	if (regs.cs_regs.data_addr == 0 || regs.cs_regs.user_sgpr > HW::UserSgprInfo::SGPRS_MAX ||
+	    g_shader_map == nullptr) {
+		return false;
+	}
+	ShaderMapEntry entry;
+	{
+		std::scoped_lock lock(g_shader_map_mutex);
+		const auto       iter = g_shader_map->find(regs.cs_regs.data_addr);
+		if (iter == g_shader_map->end()) {
+			return false;
+		}
+		entry = iter->second;
+	}
+	if (entry.data.code_size_bytes == 0 || !entry.code || entry.code->empty()) {
+		return false;
+	}
+	code_owner = std::move(entry.code);
+	ShaderGetStaticInputInfoCS(regs, entry.data, info);
+	out = ShaderParams {
+	    .code            = *code_owner,
+	    .user_data_count = regs.cs_regs.user_sgpr,
+	    .hash            = entry.hash,
+	};
+	return true;
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)

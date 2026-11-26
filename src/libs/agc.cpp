@@ -19,6 +19,7 @@
 #include "graphics/presentation/videoOut.h"
 #include "graphics/presentation/window.h"
 #include "graphics/shader/shader.h"
+#include "graphics/shader/shaderCompiler.h"
 #include "kernel/memory.h"
 #include "kernel/pthread.h"
 #include "libs/errno.h"
@@ -652,6 +653,24 @@ int KYTY_SYSV_ABI AgcCreateShader(Shader** dst, void* header, const volatile voi
 	    patch_program_address_register(h->sh_registers, h->num_sh_registers, h->type, base);
 	if (patch_result != OK) {
 		return patch_result;
+	}
+
+	if (static_cast<Prospero::ShaderBinaryType>(h->type) == Prospero::ShaderBinaryType::kCs &&
+	    h->sh_registers != nullptr) {
+		HW::CsStageRegisters cs_regs {};
+		for (uint32_t i = 0; i < h->num_sh_registers; i++) {
+			ApplyComputeShRegister(cs_regs, h->sh_registers[i].offset, h->sh_registers[i].value);
+		}
+		bool dispatch_thread_dimensions = false;
+		if (h->specials != nullptr) {
+			cs_regs.wave_size = Pm4::ComputeWaveSize(h->specials->dispatch_modifier);
+			dispatch_thread_dimensions =
+			    (h->specials->dispatch_modifier &
+			     Pm4::COMPUTE_DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS) != 0;
+		}
+		if (cs_regs.data_addr != 0) {
+			ShaderQueueComputePrefetch(cs_regs, dispatch_thread_dimensions);
+		}
 	}
 
 	*dst = h;

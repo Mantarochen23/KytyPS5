@@ -59,11 +59,13 @@ private:
 		std::span<const uint32_t> commands;
 		Pm4Execution              execution;
 		bool                      blocked         = false;
+		bool                      prefetched      = false;
 		uint64_t                  flip_request_id = 0;
 	};
 
 	void              Enqueue(Submission submission);
 	void              ProcessCommands();
+	void              DrainComputePrefetches();
 	bool              Process(Submission& submission);
 	static void       ThreadRun(void* data);
 	CommandProcessor& GetProcessor(uint32_t queue_id);
@@ -79,6 +81,8 @@ private:
 	uint32_t                                       m_next_queue        = 0;
 	uint32_t                                       m_submission_count  = 0;
 	bool                                           m_processing        = false;
+	bool                                           m_async_ready       = false;
+	bool                                           m_prefetch_pending  = true;
 	bool                                           m_accepting         = true;
 	bool                                           m_stopping          = false;
 	bool                                           m_shutdown_complete = false;

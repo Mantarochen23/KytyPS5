@@ -10,6 +10,7 @@ namespace Detail {
 inline std::atomic<uint32_t> g_draws_skipped_for_shaders {0};
 inline std::atomic<uint64_t> g_total_draws_skipped {0};
 inline std::atomic<uint64_t> g_frame {0};
+inline std::atomic<uint32_t> g_shader_worker_jobs {0};
 } // namespace Detail
 
 // With --async-shader-compile, a draw whose shader or pipeline is still being built is skipped.
@@ -38,6 +39,20 @@ inline void NoteFrameFlipped() noexcept {
 
 [[nodiscard]] inline uint64_t CurrentFrame() noexcept {
 	return Detail::g_frame.load(std::memory_order_relaxed);
+}
+
+// Tracks queued and running async shader worker jobs so the presenter can keep refreshing the
+// last frame on vblank while the command thread waits on non-skippable shader builds.
+inline void NoteShaderWorkerJobsAdded(uint32_t count = 1) noexcept {
+	Detail::g_shader_worker_jobs.fetch_add(count, std::memory_order_relaxed);
+}
+
+inline void NoteShaderWorkerJobsFinished(uint32_t count = 1) noexcept {
+	Detail::g_shader_worker_jobs.fetch_sub(count, std::memory_order_relaxed);
+}
+
+[[nodiscard]] inline bool AreShaderWorkersBusy() noexcept {
+	return Detail::g_shader_worker_jobs.load(std::memory_order_relaxed) != 0u;
 }
 
 } // namespace Libs::Graphics

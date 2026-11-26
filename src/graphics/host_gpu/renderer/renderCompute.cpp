@@ -410,9 +410,9 @@ static bool HasStorageWrites(const ShaderComputeInputInfo& input_info,
 	       });
 }
 
-void RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group_x,
+bool RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group_x,
                                     uint32_t thread_group_y, uint32_t thread_group_z, uint32_t mode,
-                                    bool async_compute) {
+                                    bool async_compute, bool allow_async) {
 	m_context.GetCommandScheduler().PopPendingOperations();
 	auto& sh_ctx = buffer.GetShaders();
 
@@ -424,7 +424,7 @@ void RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 			     thread_group_x, thread_group_y, thread_group_z, mode,
 			     sh_ctx.GetCs().cs_regs.data_addr);
 		}
-		return;
+		return true;
 	}
 
 	Common::LockGuard lock(m_context.GetMutex());
@@ -432,7 +432,7 @@ void RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 		LOGF("GraphicsRenderDispatchDirect: temporary: ignoring dispatch with null CS shader, "
 		     "groups=%ux%ux%u mode=%u\n",
 		     thread_group_x, thread_group_y, thread_group_z, mode);
-		return;
+		return true;
 	}
 
 	constexpr uint32_t DISPATCH_INITIATOR_BASE_BITS     = 0x41u;
@@ -472,7 +472,11 @@ void RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 		}
 	}
 	m_context.GetImageHeap().BeginDraw();
-	if (!m_context.GetPipelineCache().GetComputeProgram(cs_regs, input_info)) return;
+	bool pending = false;
+	if (!m_context.GetPipelineCache().GetComputeProgram(cs_regs, input_info,
+	                                                    allow_async ? &pending : nullptr)) {
+		return !pending;
+	}
 	if (use_thread_dimensions) {
 		input_info.dispatch_threads_num[0]    = thread_group_x;
 		input_info.dispatch_threads_num[1]    = thread_group_y;
@@ -486,7 +490,10 @@ void RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 	     TryConsumeComputeFill(input_info, buffer, thread_group_x, thread_group_y,
 	                           thread_group_z, mode))) {
 		ResetBindings();
-		return;
+		return true;
+	}
+	if (allow_async && !m_context.GetPipelineCache().EnsureComputePipeline(input_info, pending)) {
+		return !pending;
 	}
 
 	if (use_thread_dimensions) {
@@ -625,10 +632,11 @@ void RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 	// The removed host fence also ordered read-only dispatches before later writers.
 	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
 	ResetBindings();
+	return true;
 }
 
-void RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr, uint32_t mode,
-                                      bool async_compute) {
+bool RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr, uint32_t mode,
+                                      bool async_compute, bool allow_async) {
 	EXIT_IF(args_addr == 0 || (args_addr & 3u) != 0 ||
 	        (mode & Pm4::COMPUTE_DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS) != 0);
 	m_context.GetCommandScheduler().PopPendingOperations();
@@ -637,17 +645,24 @@ void RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 	if (!m_context.GetBufferCache().HasGpuDirtyBytes(args_addr, sizeof(args)) &&
 	    LibKernel::Memory::TryReadBacking(args_addr, &args, sizeof(args)) &&
 	    (args.x == 0 || args.y == 0 || args.z == 0)) {
-		return;
+		return true;
 	}
 	const auto& cs_regs = buffer.GetShaders().GetCs();
 	if (cs_regs.cs_regs.data_addr == 0) {
-		return;
+		return true;
 	}
 	ShaderComputeInputInfo input_info {};
 	input_info.async_compute = async_compute;
 	input_info.indirect_args_address = args_addr;
 	m_context.GetImageHeap().BeginDraw();
-	if (!m_context.GetPipelineCache().GetComputeProgram(cs_regs, input_info)) return;
+	bool pending = false;
+	if (!m_context.GetPipelineCache().GetComputeProgram(cs_regs, input_info,
+	                                                    allow_async ? &pending : nullptr)) {
+		return !pending;
+	}
+	if (allow_async && !m_context.GetPipelineCache().EnsureComputePipeline(input_info, pending)) {
+		return !pending;
+	}
 	buffer.EndRendering();
 	auto& pipeline = m_context.GetPipelineCache().GetComputePipeline(input_info);
 	auto& bindings = m_compute_bindings;
@@ -689,6 +704,7 @@ void RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::Dispatches);
 	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
 	ResetBindings();
+	return true;
 }
 
 } // namespace Libs::Graphics

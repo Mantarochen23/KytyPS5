@@ -17,6 +17,7 @@
 #include "graphics/presentation/videoOut.h"
 #include "graphics/presentation/window.h"
 #include "graphics/shader/shader.h"
+#include "graphics/shader/shaderCompiler.h"
 #include "kernel/memory.h"
 #include "libs/errno.h"
 
@@ -29,6 +30,7 @@
 #include <mutex>
 #include <semaphore>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace Libs::Graphics {
@@ -39,6 +41,16 @@ static thread_local GuestGpu*     g_gpu_state         = nullptr;
 GuestGpu::GuestGpu(RenderContext& renderer): m_renderer(renderer) {
 	EXIT_NOT_IMPLEMENTED(!Common::Thread::IsMainThread());
 	m_gfx_cp = std::make_unique<CommandProcessor>(renderer, 0);
+	m_renderer.GetPipelineCache().SetAsyncFinishCallback([this] {
+		Common::LockGuard lock(m_queue_mutex);
+		m_async_ready = true;
+		m_work_available.Signal();
+	});
+	ShaderSetComputePrefetchNotifier([this] {
+		Common::LockGuard lock(m_queue_mutex);
+		m_prefetch_pending = true;
+		m_work_available.Signal();
+	});
 	m_thread = std::jthread(ThreadRun, this);
 }
 
@@ -53,13 +65,16 @@ void GuestGpu::Shutdown() {
 	}
 	{
 		Common::LockGuard lock(m_queue_mutex);
-		m_accepting = false;
-		m_stopping  = true;
+		m_accepting        = false;
+		m_stopping         = true;
+		m_prefetch_pending = false;
 		m_work_available.SignalAll();
 	}
 	if (m_thread.joinable()) {
 		m_thread.join();
 	}
+	m_renderer.GetPipelineCache().SetAsyncFinishCallback({});
+	ShaderSetComputePrefetchNotifier({});
 	m_shutdown_complete = true;
 }
 
@@ -407,6 +422,22 @@ void GuestGpu::WaitForIdle() {
 	}
 }
 
+void GuestGpu::DrainComputePrefetches() {
+	if (!Config::AsyncShaderCompileEnabled()) {
+		(void)ShaderTakeComputePrefetches();
+		return;
+	}
+	const auto batch = ShaderTakeComputePrefetches();
+	if (batch.empty()) {
+		return;
+	}
+	Common::LockGuard lock(m_renderer.GetMutex());
+	auto&             cache = m_renderer.GetPipelineCache();
+	for (const auto& req: batch) {
+		cache.PrefetchComputeProgram(req.cs_regs, req.dispatch_thread_dimensions, false);
+	}
+}
+
 void GuestGpu::ThreadRun(void* data) {
 	auto* gpu = static_cast<GuestGpu*>(data);
 	EXIT_IF(gpu == nullptr);
@@ -418,12 +449,15 @@ void GuestGpu::ThreadRun(void* data) {
 	}
 
 	for (;;) {
-		Submission                   submission;
-		Common::UniqueFunction<void> command;
-		bool                         should_stop = false;
+		Submission                                                   submission;
+		Common::UniqueFunction<void>                                 command;
+		std::vector<std::pair<uint32_t, std::span<const uint32_t>>>  pending_prefetches;
+		bool                                                         should_stop  = false;
+		bool                                                         run_prefetch = false;
 		{
 			Common::LockGuard lock(gpu->m_queue_mutex);
-			while (gpu->m_commands.empty() && gpu->m_submission_count == 0 && !gpu->m_stopping) {
+			while (gpu->m_commands.empty() && gpu->m_submission_count == 0 &&
+			       !gpu->m_prefetch_pending && !gpu->m_stopping) {
 				gpu->m_processing = false;
 				gpu->m_idle.Signal();
 				gpu->m_work_available.Wait(&gpu->m_queue_mutex);
@@ -437,7 +471,19 @@ void GuestGpu::ThreadRun(void* data) {
 				gpu->m_commands.pop_front();
 				EXIT_IF(gpu->m_pending_commands.fetch_sub(1, std::memory_order_acq_rel) == 0);
 				gpu->m_processing = true;
+			} else if (gpu->m_prefetch_pending) {
+				gpu->m_prefetch_pending = false;
+				gpu->m_processing       = true;
+				run_prefetch            = true;
 			} else {
+				if (gpu->m_async_ready) {
+					gpu->m_async_ready = false;
+					for (auto& queue: gpu->m_queues) {
+						if (!queue.empty()) {
+							queue.front().blocked = false;
+						}
+					}
+				}
 				int selected_queue = -1;
 				for (uint32_t offset = 0; offset < QueueCount; offset++) {
 					const auto id = (gpu->m_next_queue + offset) % QueueCount;
@@ -447,27 +493,78 @@ void GuestGpu::ThreadRun(void* data) {
 					}
 				}
 				if (selected_queue < 0) {
-					gpu->m_processing = false;
-					gpu->m_work_available.WaitFor(&gpu->m_queue_mutex, 100);
-					for (auto& queue: gpu->m_queues) {
-						if (!queue.empty()) {
-							queue.front().blocked = false;
+					if (Config::AsyncShaderCompileEnabled()) {
+						for (uint32_t id = 0; id < QueueCount && pending_prefetches.size() < 16u;
+						     id++) {
+							for (auto& queued: gpu->m_queues[id]) {
+								if (queued.type == SubmissionType::Commands && !queued.prefetched) {
+									queued.prefetched = true;
+									pending_prefetches.emplace_back(id, queued.commands);
+									if (pending_prefetches.size() >= 16u) {
+										break;
+									}
+								}
+							}
 						}
 					}
-					continue;
+					if (!pending_prefetches.empty()) {
+						gpu->m_processing = true;
+					} else {
+						bool all_waiting_on_shaders = true;
+						for (const auto& queue: gpu->m_queues) {
+							if (!queue.empty() && !queue.front().execution.SuspendedForShader()) {
+								all_waiting_on_shaders = false;
+								break;
+							}
+						}
+						gpu->m_processing = false;
+						// When every blocked queue is waiting on async shader/pipeline workers,
+						// sleep on the condition variable until Async::Finish signals
+						// m_work_available (with a 50 ms safety fallback). Guest memory WaitRegMem
+						// polls keep 100 us.
+						const uint32_t wait_us = all_waiting_on_shaders ? 50000u : 100u;
+						if (!gpu->m_async_ready && !gpu->m_prefetch_pending) {
+							gpu->m_work_available.WaitFor(&gpu->m_queue_mutex, wait_us);
+						}
+						gpu->m_async_ready = false;
+						for (auto& queue: gpu->m_queues) {
+							if (!queue.empty()) {
+								queue.front().blocked = false;
+							}
+						}
+						continue;
+					}
+				} else {
+					auto& queue = gpu->m_queues[static_cast<uint32_t>(selected_queue)];
+					submission  = std::move(queue.front());
+					queue.pop_front();
+					gpu->m_submission_count--;
+					gpu->m_next_queue = (static_cast<uint32_t>(selected_queue) + 1) % QueueCount;
+					gpu->m_processing = true;
 				}
-				auto& queue = gpu->m_queues[static_cast<uint32_t>(selected_queue)];
-				submission  = std::move(queue.front());
-				queue.pop_front();
-				gpu->m_submission_count--;
-				gpu->m_next_queue = (static_cast<uint32_t>(selected_queue) + 1) % QueueCount;
-				gpu->m_processing = true;
 			}
 		}
 		if (should_stop) {
 			gpu->m_gfx_cp->BufferWait();
 			g_gpu_state = nullptr;
 			return;
+		}
+		if (run_prefetch) {
+			gpu->DrainComputePrefetches();
+			Common::LockGuard lock(gpu->m_queue_mutex);
+			gpu->m_processing = false;
+			if (gpu->m_commands.empty() && gpu->m_submission_count == 0) {
+				gpu->m_idle.SignalAll();
+			}
+			continue;
+		}
+		if (!pending_prefetches.empty()) {
+			for (const auto& [queue_id, cmds]: pending_prefetches) {
+				gpu->GetProcessor(queue_id).PrefetchComputeShaders(cmds);
+			}
+			Common::LockGuard lock(gpu->m_queue_mutex);
+			gpu->m_processing = false;
+			continue;
 		}
 
 		if (command) {
@@ -518,6 +615,10 @@ bool GuestGpu::Process(Submission& submission) {
 
 	switch (submission.type) {
 		case SubmissionType::Commands:
+			if (!submission.prefetched) {
+				submission.prefetched = true;
+				cp.PrefetchComputeShaders(submission.commands);
+			}
 			complete =
 			    cp.Process(submission.execution, submission.commands) == Pm4ProcessResult::Complete;
 			if (submission.execution.MadeProgress()) {
@@ -549,8 +650,9 @@ Pm4ProcessResult CommandProcessor::Process(Pm4Execution&             execution,
 	if (execution.m_buffer_stack.empty() && !commands.empty()) {
 		execution.m_buffer_stack.push_back({commands});
 	}
-	execution.m_suspended     = false;
-	execution.m_made_progress = false;
+	execution.m_suspended            = false;
+	execution.m_suspended_for_shader = false;
+	execution.m_made_progress        = false;
 
 	struct ExecutionScope {
 		explicit ExecutionScope(Pm4Execution& execution) { g_current_execution = &execution; }
@@ -572,6 +674,181 @@ void CommandProcessor::ProcessIndirectBuffer(std::span<const uint32_t> commands,
 void CommandProcessor::SuspendPm4() {
 	EXIT_IF(g_current_execution == nullptr);
 	g_current_execution->m_suspended = true;
+}
+
+void CommandProcessor::SuspendPm4ForShader() {
+	EXIT_IF(g_current_execution == nullptr);
+	g_current_execution->m_suspended            = true;
+	g_current_execution->m_suspended_for_shader = true;
+}
+
+void CommandProcessor::PrefetchComputeShaders(std::span<const uint32_t> commands) {
+	if (!Config::AsyncShaderCompileEnabled() || commands.empty()) {
+		return;
+	}
+	constexpr uint32_t MaxPacketsScanned = 131072u;
+	constexpr size_t   MaxIbDepth        = 4u;
+	constexpr size_t   MaxPrefetches     = 1024u;
+
+	struct ScanCursor {
+		std::vector<uint32_t>     owned;
+		std::span<const uint32_t> external;
+		uint32_t                  offset_dw = 0;
+
+		[[nodiscard]] std::span<const uint32_t> Words() const {
+			return owned.empty() ? external : std::span<const uint32_t>(owned);
+		}
+	};
+	std::vector<ScanCursor> stack;
+	stack.reserve(MaxIbDepth);
+	stack.push_back({{}, commands, 0u});
+
+	HW::CsStageRegisters               cs_regs = m_sh_ctx.GetCs().cs_regs;
+	std::vector<ComputeShaderPrefetch> discovered;
+	std::vector<uint32_t>              indirect_pairs;
+	uint32_t                           packets_scanned = 0;
+
+	while (!stack.empty() && packets_scanned < MaxPacketsScanned &&
+	       discovered.size() < MaxPrefetches) {
+		auto&      cursor = stack.back();
+		const auto words  = cursor.Words();
+		if (cursor.offset_dw >= words.size()) {
+			stack.pop_back();
+			continue;
+		}
+		packets_scanned++;
+		const auto* const packet        = words.data() + cursor.offset_dw;
+		const auto        total_dw      = static_cast<uint32_t>(words.size());
+		const auto        remaining_dw  = total_dw - cursor.offset_dw;
+		const auto        packet_header = packet[0];
+
+		if (packet_header == 0x80000000u || Pm4::PacketSizeDw(packet_header) == 1u) {
+			cursor.offset_dw++;
+			continue;
+		}
+		if (remaining_dw < 2u) {
+			stack.pop_back();
+			continue;
+		}
+		uint32_t packet_dw = KYTY_PM4_LEN(packet_header);
+		if (packet_dw < 2u || packet_dw > remaining_dw) {
+			stack.pop_back();
+			continue;
+		}
+		const auto  opcode     = (packet_header >> 8u) & 0xffu;
+		const auto* body       = packet + 1;
+		const auto  payload_dw = packet_dw - 1u;
+
+		switch (opcode) {
+			case Pm4::IT_SET_SH_REG: {
+				const auto reg_offset = body[0];
+				if (reg_offset != Pm4::SH_NOP && reg_offset < Pm4::SH_NUM) {
+					for (uint32_t i = 1u; i < payload_dw; i++) {
+						ApplyComputeShRegister(cs_regs, reg_offset + (i - 1u), body[i]);
+					}
+				}
+				break;
+			}
+			case Pm4::IT_SET_SH_REG_INDIRECT: {
+				if (packet_dw == 5u) {
+					const uint64_t addr = (static_cast<uint64_t>(body[0]) & 0xfffffffcu) |
+					                      (static_cast<uint64_t>(body[1]) << 32u);
+					const uint32_t count = body[3] & 0x3fffu;
+					const uint64_t bytes = static_cast<uint64_t>(count) * 8u;
+					if (addr != 0 && count != 0 && m_renderer.IsMapped(addr, bytes)) {
+						indirect_pairs.resize(static_cast<size_t>(count) * 2u);
+						if (LibKernel::Memory::TryReadBacking(addr, indirect_pairs.data(), bytes)) {
+							for (uint32_t i = 0; i < count; i++) {
+								const auto raw_offset = indirect_pairs[i * 2u];
+								if (raw_offset == 0xffffffffu) {
+									continue;
+								}
+								ApplyComputeShRegister(cs_regs, raw_offset,
+								                       indirect_pairs[i * 2u + 1u]);
+							}
+						}
+					}
+				}
+				break;
+			}
+			case Pm4::IT_SET_UCONFIG_REG:
+			case Pm4::IT_SET_UCONFIG_REG_INDEX: {
+				if (payload_dw >= 2u && (KYTY_PM4_R(packet_header) == 1u || IsAsyncComputeQueue()) &&
+				    body[0] == Pm4::SQ_THREAD_TRACE_USERDATA_2) {
+					const auto tag = body[1] & 0xff000000u;
+					if (tag == Pm4::USERDATA_TAG_FLIP && remaining_dw >= Pm4::FLIP_PACKET_DW) {
+						packet_dw = Pm4::FLIP_PACKET_DW;
+					} else if (tag == Pm4::USERDATA_TAG_WAIT_FLIP_DONE &&
+					           remaining_dw >= Pm4::WAIT_FLIP_DONE_PACKET_DW) {
+						packet_dw = Pm4::WAIT_FLIP_DONE_PACKET_DW;
+					} else if (tag == Pm4::USERDATA_TAG_RESET_QUEUE &&
+					           (body[1] & Pm4::ResetQueueOp::ShState) != 0) {
+						cs_regs = {};
+					}
+				}
+				break;
+			}
+			case Pm4::IT_INDIRECT_BUFFER: {
+				if (packet_dw == 4u) {
+					const uint64_t ib_addr =
+					    (body[0] & ~0x3u) | (static_cast<uint64_t>(body[1]) << 32u);
+					const uint32_t ib_dw = body[2] & 0xfffffu;
+					const bool     chain = (body[2] & (1u << 20u)) != 0;
+					cursor.offset_dw += packet_dw;
+					const uint64_t ib_bytes = static_cast<uint64_t>(ib_dw) * sizeof(uint32_t);
+					if (ib_addr != 0 && ib_dw != 0 && ib_dw <= 0x40000u &&
+					    m_renderer.IsMapped(ib_addr, ib_bytes)) {
+						std::vector<uint32_t> ib_copy(ib_dw);
+						if (LibKernel::Memory::TryReadBacking(ib_addr, ib_copy.data(), ib_bytes)) {
+							if (chain) {
+								cursor.owned     = std::move(ib_copy);
+								cursor.external  = {};
+								cursor.offset_dw = 0u;
+							} else if (stack.size() < MaxIbDepth) {
+								stack.push_back({std::move(ib_copy), {}, 0u});
+							}
+						}
+					}
+					continue;
+				}
+				break;
+			}
+			case Pm4::IT_DISPATCH_DIRECT: {
+				if (packet_dw == 5u && cs_regs.data_addr != 0) {
+					const uint32_t mode = body[3];
+					auto           spec = cs_regs;
+					spec.wave_size      = Pm4::ComputeWaveSize(mode);
+					const bool use_thread_dims =
+					    (mode & Pm4::COMPUTE_DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS) != 0;
+					discovered.push_back({spec, use_thread_dims});
+				}
+				break;
+			}
+			case Pm4::IT_DISPATCH_INDIRECT: {
+				if ((packet_dw == 3u || packet_dw == 4u) && cs_regs.data_addr != 0) {
+					const uint32_t mode = (packet_dw == 4u) ? body[2] : body[1];
+					auto           spec = cs_regs;
+					spec.wave_size      = Pm4::ComputeWaveSize(mode);
+					const bool use_thread_dims =
+					    (mode & Pm4::COMPUTE_DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS) != 0;
+					discovered.push_back({spec, use_thread_dims});
+				}
+				break;
+			}
+			default: break;
+		}
+		cursor.offset_dw += packet_dw;
+	}
+
+	if (discovered.empty()) {
+		return;
+	}
+	Common::LockGuard lock(m_renderer.GetMutex());
+	auto&             cache         = m_renderer.GetPipelineCache();
+	const bool        async_compute = IsAsyncComputeQueue();
+	for (const auto& req: discovered) {
+		cache.PrefetchComputeProgram(req.cs_regs, req.dispatch_thread_dimensions, async_compute);
+	}
 }
 
 void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
@@ -879,8 +1156,12 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 void CommandProcessor::DispatchDirect(uint32_t thread_group_x, uint32_t thread_group_y,
                                       uint32_t thread_group_z, uint32_t mode) {
 	m_sh_ctx.SetCsWaveSize(Pm4::ComputeWaveSize(mode));
-	m_renderer.GetRenderExecutor().DispatchDirect(CurrentBuffer(), thread_group_x, thread_group_y,
-	                                              thread_group_z, mode, IsAsyncComputeQueue());
+	const bool allow_async = g_current_execution != nullptr;
+	if (!m_renderer.GetRenderExecutor().DispatchDirect(CurrentBuffer(), thread_group_x,
+	                                                   thread_group_y, thread_group_z, mode,
+	                                                   IsAsyncComputeQueue(), allow_async)) {
+		SuspendPm4ForShader();
+	}
 }
 
 void CommandProcessor::ProcessPssr(const Pssr::Request& request) {
@@ -897,8 +1178,11 @@ void CommandProcessor::DispatchIndirect(uint64_t args_addr, uint32_t mode) {
 		return;
 	}
 	m_sh_ctx.SetCsWaveSize(Pm4::ComputeWaveSize(mode));
-	m_renderer.GetRenderExecutor().DispatchIndirect(CurrentBuffer(), args_addr, mode,
-	                                                IsAsyncComputeQueue());
+	const bool allow_async = g_current_execution != nullptr;
+	if (!m_renderer.GetRenderExecutor().DispatchIndirect(CurrentBuffer(), args_addr, mode,
+	                                                     IsAsyncComputeQueue(), allow_async)) {
+		SuspendPm4ForShader();
+	}
 }
 
 void CommandProcessor::DrawIndexAuto(DrawAutoArgs args) {

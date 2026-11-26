@@ -36,6 +36,7 @@ struct IndirectDrawRegisters {
 class Pm4Execution {
 public:
 	[[nodiscard]] bool MadeProgress() const noexcept { return m_made_progress; }
+	[[nodiscard]] bool SuspendedForShader() const noexcept { return m_suspended_for_shader; }
 
 private:
 	friend class CommandProcessor;
@@ -47,9 +48,10 @@ private:
 
 	std::vector<BufferCursor> m_buffer_stack;
 	std::span<const uint32_t> m_next_buffer;
-	bool                      m_chain         = false;
-	bool                      m_suspended     = false;
-	bool                      m_made_progress = false;
+	bool                      m_chain                = false;
+	bool                      m_suspended            = false;
+	bool                      m_suspended_for_shader = false;
+	bool                      m_made_progress        = false;
 };
 
 class CommandProcessor {
@@ -113,6 +115,7 @@ public:
 	[[nodiscard]] bool ShouldSkipPredicatedPackets() const { return m_predicate_skip; }
 
 	Pm4ProcessResult Process(Pm4Execution& execution, std::span<const uint32_t> commands);
+	void             PrefetchComputeShaders(std::span<const uint32_t> commands);
 	void             ProcessIndirectBuffer(std::span<const uint32_t> commands, bool chain);
 
 	[[nodiscard]] bool IsAsyncComputeQueue() const { return m_interrupt_event_id >= 0x20; }
@@ -120,6 +123,7 @@ public:
 private:
 	void ProcessPm4(Pm4Execution& execution);
 	void SuspendPm4();
+	void SuspendPm4ForShader();
 	void                CountDraw();
 	uint32_t            NumInstances();
 	const void*         IndexAddress(uint32_t first_index) const;

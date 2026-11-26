@@ -141,10 +141,11 @@ public:
 	~RenderExecutor();
 	KYTY_CLASS_NO_COPY(RenderExecutor);
 
-	void DispatchDirect(CommandBuffer& buffer, uint32_t thread_group_x, uint32_t thread_group_y,
-	                    uint32_t thread_group_z, uint32_t mode, bool async_compute);
-	void DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr, uint32_t mode,
-	                      bool async_compute);
+	bool DispatchDirect(CommandBuffer& buffer, uint32_t thread_group_x, uint32_t thread_group_y,
+	                    uint32_t thread_group_z, uint32_t mode, bool async_compute,
+	                    bool allow_async = false);
+	bool DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr, uint32_t mode,
+	                      bool async_compute, bool allow_async = false);
 	void ProcessPssr(CommandBuffer& buffer, const Pssr::Request& request);
 
 	void PrepareBindings(const ShaderStageRuntime& runtime, PreparedBindings& prepared);
