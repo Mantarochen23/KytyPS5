@@ -14,7 +14,10 @@
 #include <array>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <span>
+#include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -60,6 +63,30 @@ public:
 		           ? offset
 		           : offset - LOWER_ADDRESS_SIZE + LibKernel::Memory::kExtendedMemoryBase;
 	}
+
+	struct BdaTableShadowEntry {
+		vk::DeviceAddress device_address = 0;
+		BufferId          buffer_id {};
+		uint64_t          guest_address = 0;
+	};
+
+	class BdaTableValidator {
+	public:
+		[[nodiscard]] std::optional<std::string> ValidateWrite(
+		    BufferId id, uint64_t cpu_address, uint64_t buffer_size,
+		    vk::DeviceAddress device_address, bool is_deleted, uint64_t table_offset,
+		    std::span<const vk::DeviceAddress> entries);
+		[[nodiscard]] std::optional<std::string> ValidateClear(
+		    BufferId id, uint64_t cpu_address, uint64_t buffer_size,
+		    vk::DeviceAddress device_address, uint64_t table_offset, uint64_t size_pages);
+		[[nodiscard]] std::optional<std::string> ValidateErase(BufferId id, bool is_deleted) const;
+		[[nodiscard]] size_t ActivePageCount() const noexcept { return m_entries.size(); }
+		[[nodiscard]] size_t TrackedBufferCount() const noexcept { return m_buffer_pages.size(); }
+
+	private:
+		std::unordered_map<uint64_t, BdaTableShadowEntry> m_entries;
+		std::unordered_map<uint32_t, uint64_t>            m_buffer_pages;
+	};
 
 	BufferCache(GraphicContext& graphics, CommandScheduler& scheduler, PageManager& page_manager,
 	            TextureCache& texture_cache);
@@ -153,6 +180,7 @@ private:
 	template <bool insert>
 	void ChangeRegister(BufferId id);
 	void DeleteBuffer(BufferId id);
+	void EraseBufferSlot(BufferId id);
 	[[nodiscard]] bool SynchronizeBuffer(Buffer& buffer, uint64_t vaddr, uint64_t size,
 	                                     bool is_written, bool is_texel_buffer);
 	void UploadCopies(std::span<const BufferUpload> uploads, std::span<vk::BufferCopy> copies,
@@ -189,6 +217,8 @@ private:
 	uint64_t m_trigger_gc_memory  = 1ull * 1024 * 1024 * 1024;
 	uint64_t m_critical_gc_memory = 2ull * 1024 * 1024 * 1024;
 	uint64_t m_gc_tick            = 0;
+	bool     m_validate_bda_table = false;
+	BdaTableValidator m_bda_table_validator;
 };
 
 } // namespace Libs::Graphics
