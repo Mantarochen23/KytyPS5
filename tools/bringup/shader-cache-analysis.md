@@ -137,7 +137,7 @@ validation invariants (`ValidateProgram`), and exact fold / resource-tracking se
 
 ## 6. Build and Verification Steps (Linux / RADV)
 
-Run on the Linux/RADV test machine from a checkout of `neon/t5-shader-cache-async`:
+Run on the Linux/RADV test machine from a checkout of the async translation branch:
 
 ```bash
 # 1. Build emulator and IR/recompiler test targets

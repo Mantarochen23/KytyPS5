@@ -23,7 +23,7 @@ Commits on `bringup` are kept one topic each, so a single one can be offered ups
 
 Tag `first-loading-screen-2026-11-26` = the build that first showed the loading screen.
 
-## Build (Bosie)
+## Build
 
     cmake -S . -B _Build/linux-debug -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
       -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DKYTY_BUILD_LAUNCHER=OFF
@@ -81,4 +81,4 @@ The script refuses to start while another sandboxed run holds the GPU.
 4. Run again with the same state folder (warm pipeline cache) and compare `triage.json`.
 
 Known gap: the GPU test harness needs `robustStorageBufferAccessSizeAlignment == 1`, which RADV
-does not report, so the shader test cases cannot run on Bosie yet.
+does not report, so the shader test cases cannot run on the test machine yet.
