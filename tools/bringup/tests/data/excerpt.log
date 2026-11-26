@@ -1,0 +1,2000 @@
+@@T 1
+@@T 6
+@@T 7
+Async shader compile: 12 worker threads
+@@T 8
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000057 CFG BuildGraph blocks=1 loops=0 back_edges=0 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=1
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000058 CFG BuildGraph blocks=1 loops=0 back_edges=0 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000057 CFG Structurize blocks=1 loops=0 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=1
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000058 CFG Structurize blocks=1 loops=0 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000058 IR TranslateProgram blocks=2 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000057 IR TranslateProgram blocks=2 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000059 CFG BuildGraph blocks=1 loops=0 back_edges=0 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=1
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000059 CFG Structurize blocks=1 loops=0 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000059 IR TranslateProgram blocks=2 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000005a CFG BuildGraph blocks=7 loops=1 back_edges=1 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=8
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000005a CFG Structurize blocks=8 loops=1 elapsed_ms=1
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000005a IR TranslateProgram blocks=9 elapsed_ms=1
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000005b CFG BuildGraph blocks=5 loops=0 back_edges=0 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=5
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000005b CFG Structurize blocks=5 loops=0 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000005c CFG BuildGraph blocks=3 loops=0 back_edges=0 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=3
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000005c CFG Structurize blocks=3 loops=0 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000005b IR TranslateProgram blocks=6 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000005c IR TranslateProgram blocks=4 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000005d CFG BuildGraph blocks=41 loops=1 back_edges=1 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=55
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000005d CFG Structurize blocks=55 loops=1 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000005e CFG BuildGraph blocks=41 loops=1 back_edges=1 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=55
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000005e CFG Structurize blocks=55 loops=1 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000005f CFG BuildGraph blocks=165 loops=3 back_edges=3 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000060 CFG BuildGraph blocks=165 loops=3 back_edges=3 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=187
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000005f CFG Structurize blocks=187 loops=3 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=187
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000060 CFG Structurize blocks=187 loops=3 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000005d IR TranslateProgram blocks=56 elapsed_ms=1
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000005e IR TranslateProgram blocks=56 elapsed_ms=1
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000061 CFG BuildGraph blocks=8 loops=0 back_edges=0 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=8
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000061 CFG Structurize blocks=8 loops=0 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000061 IR TranslateProgram blocks=9 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000062 CFG BuildGraph blocks=45 loops=2 back_edges=2 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=52
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000062 CFG Structurize blocks=52 loops=1 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000063 CFG BuildGraph blocks=57 loops=2 back_edges=2 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=64
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000063 CFG Structurize blocks=64 loops=1 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000062 IR TranslateProgram blocks=53 elapsed_ms=1
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000005f IR TranslateProgram blocks=188 elapsed_ms=4
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000063 IR TranslateProgram blocks=65 elapsed_ms=2
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000064 CFG BuildGraph blocks=45 loops=3 back_edges=3 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000065 CFG BuildGraph blocks=18 loops=3 back_edges=3 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=23
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000065 CFG Structurize blocks=23 loops=3 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=51
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000064 CFG Structurize blocks=51 loops=3 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000064 IR TranslateProgram blocks=52 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000065 IR TranslateProgram blocks=24 elapsed_ms=1
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000066 CFG BuildGraph blocks=26 loops=1 back_edges=1 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000067 CFG BuildGraph blocks=29 loops=2 back_edges=2 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=28
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000066 CFG Structurize blocks=28 loops=1 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=33
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000068 CFG BuildGraph blocks=26 loops=1 back_edges=1 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000067 CFG Structurize blocks=33 loops=2 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=28
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000068 CFG Structurize blocks=28 loops=1 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000069 CFG BuildGraph blocks=19 loops=1 back_edges=1 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000066 IR TranslateProgram blocks=29 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=21
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000069 CFG Structurize blocks=21 loops=1 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000006a CFG BuildGraph blocks=19 loops=1 back_edges=1 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000006b CFG BuildGraph blocks=19 loops=1 back_edges=1 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=21
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000060 IR TranslateProgram blocks=188 elapsed_ms=9
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000006a CFG Structurize blocks=21 loops=1 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=21
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000006b CFG Structurize blocks=21 loops=1 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000006c CFG BuildGraph blocks=19 loops=1 back_edges=1 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000067 IR TranslateProgram blocks=34 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=21
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000006c CFG Structurize blocks=21 loops=1 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000069 IR TranslateProgram blocks=22 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000006b IR TranslateProgram blocks=22 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000068 IR TranslateProgram blocks=29 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000006a IR TranslateProgram blocks=22 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000006c IR TranslateProgram blocks=22 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000006d CFG BuildGraph blocks=27 loops=3 back_edges=3 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=32
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000006d CFG Structurize blocks=32 loops=3 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000006e CFG BuildGraph blocks=25 loops=3 back_edges=3 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=30
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000006e CFG Structurize blocks=30 loops=3 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000006d IR TranslateProgram blocks=33 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000006e IR TranslateProgram blocks=31 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000006f CFG BuildGraph blocks=168 loops=21 back_edges=21 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000070 CFG BuildGraph blocks=147 loops=21 back_edges=21 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=210
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000006f CFG Structurize blocks=210 loops=21 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=188
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000070 CFG Structurize blocks=188 loops=21 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000071 CFG BuildGraph blocks=162 loops=21 back_edges=21 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000072 CFG BuildGraph blocks=147 loops=16 back_edges=16 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=202
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000071 CFG Structurize blocks=202 loops=21 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=175
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000072 CFG Structurize blocks=175 loops=16 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000073 CFG BuildGraph blocks=168 loops=16 back_edges=16 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000074 CFG BuildGraph blocks=162 loops=16 back_edges=16 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=197
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000073 CFG Structurize blocks=197 loops=16 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=189
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000074 CFG Structurize blocks=189 loops=16 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000075 CFG BuildGraph blocks=154 loops=16 back_edges=16 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=181
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000075 CFG Structurize blocks=181 loops=16 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000076 CFG BuildGraph blocks=154 loops=21 back_edges=21 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=194
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000076 CFG Structurize blocks=194 loops=21 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000077 CFG BuildGraph blocks=125 loops=5 back_edges=5 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000078 CFG BuildGraph blocks=5 loops=0 back_edges=0 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=5
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000078 CFG Structurize blocks=5 loops=0 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=137
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000077 CFG Structurize blocks=137 loops=5 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000078 IR TranslateProgram blocks=6 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000079 CFG BuildGraph blocks=5 loops=0 back_edges=0 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=5
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000079 CFG Structurize blocks=5 loops=0 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000079 IR TranslateProgram blocks=6 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000007a CFG BuildGraph blocks=8 loops=1 back_edges=1 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=11
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000007a CFG Structurize blocks=11 loops=1 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000007a IR TranslateProgram blocks=12 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000007b CFG BuildGraph blocks=8 loops=1 back_edges=1 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=11
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000007b CFG Structurize blocks=11 loops=1 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000007b IR TranslateProgram blocks=12 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000007c CFG BuildGraph blocks=3 loops=0 back_edges=0 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=3
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000007c CFG Structurize blocks=3 loops=0 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000007c IR TranslateProgram blocks=4 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000007d CFG BuildGraph blocks=68 loops=3 back_edges=3 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=72
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000007d CFG Structurize blocks=72 loops=3 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000007d IR TranslateProgram blocks=73 elapsed_ms=0
+ShaderRecompiler CS read-lane elimination: reads=0 reductions=2
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000077 IR TranslateProgram blocks=138 elapsed_ms=6
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000007e CFG BuildGraph blocks=11 loops=0 back_edges=0 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=11
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000007e CFG Structurize blocks=11 loops=0 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000007e IR TranslateProgram blocks=12 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000007f CFG BuildGraph blocks=56 loops=1 back_edges=1 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=62
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000007f CFG Structurize blocks=62 loops=1 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000070 IR TranslateProgram blocks=189 elapsed_ms=16
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000007f IR TranslateProgram blocks=63 elapsed_ms=0
+ShaderRecompiler CS read-lane elimination: reads=0 reductions=1
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000076 IR TranslateProgram blocks=195 elapsed_ms=17
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000075 IR TranslateProgram blocks=182 elapsed_ms=18
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000071 IR TranslateProgram blocks=203 elapsed_ms=20
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000006f IR TranslateProgram blocks=211 elapsed_ms=20
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000073 IR TranslateProgram blocks=198 elapsed_ms=20
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000072 IR TranslateProgram blocks=176 elapsed_ms=20
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000074 IR TranslateProgram blocks=190 elapsed_ms=21
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000080 CFG BuildGraph blocks=7 loops=1 back_edges=1 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=9
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000080 CFG Structurize blocks=9 loops=1 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000080 IR TranslateProgram blocks=10 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000081 CFG BuildGraph blocks=11 loops=1 back_edges=1 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=13
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000081 CFG Structurize blocks=13 loops=1 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000081 IR TranslateProgram blocks=14 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000082 CFG BuildGraph blocks=9 loops=0 back_edges=0 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=9
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000082 CFG Structurize blocks=9 loops=0 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000082 IR TranslateProgram blocks=10 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000083 CFG BuildGraph blocks=395 loops=5 back_edges=5 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000084 CFG BuildGraph blocks=37 loops=4 back_edges=4 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=48
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000084 CFG Structurize blocks=48 loops=4 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000084 IR TranslateProgram blocks=49 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=444
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000083 CFG Structurize blocks=444 loops=5 elapsed_ms=1
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000083 IR TranslateProgram blocks=445 elapsed_ms=8
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000085 CFG BuildGraph blocks=12 loops=0 back_edges=0 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=13
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000085 CFG Structurize blocks=13 loops=0 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000085 IR TranslateProgram blocks=14 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000086 CFG BuildGraph blocks=143 loops=4 back_edges=4 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=171
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000086 CFG Structurize blocks=171 loops=4 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000086 IR TranslateProgram blocks=172 elapsed_ms=1
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000087 CFG BuildGraph blocks=9 loops=0 back_edges=0 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=9
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000087 CFG Structurize blocks=9 loops=0 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000087 IR TranslateProgram blocks=10 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000088 CFG BuildGraph blocks=39 loops=1 back_edges=1 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=45
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000088 CFG Structurize blocks=45 loops=1 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000088 IR TranslateProgram blocks=46 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000089 CFG BuildGraph blocks=31 loops=1 back_edges=1 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=35
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000089 CFG Structurize blocks=35 loops=1 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000089 IR TranslateProgram blocks=36 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000008a CFG BuildGraph blocks=19 loops=0 back_edges=0 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=24
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000008a CFG Structurize blocks=24 loops=0 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000008a IR TranslateProgram blocks=25 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000008b CFG BuildGraph blocks=20 loops=0 back_edges=0 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=26
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000008b CFG Structurize blocks=26 loops=0 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000008b IR TranslateProgram blocks=27 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000008c CFG BuildGraph blocks=16 loops=0 back_edges=0 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=20
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000008c CFG Structurize blocks=20 loops=0 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000008c IR TranslateProgram blocks=21 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000008d CFG BuildGraph blocks=15 loops=0 back_edges=0 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=18
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000008d CFG Structurize blocks=18 loops=0 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000008d IR TranslateProgram blocks=19 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000008e CFG BuildGraph blocks=56 loops=1 back_edges=1 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=62
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000008e CFG Structurize blocks=62 loops=1 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000008f CFG BuildGraph blocks=128 loops=4 back_edges=4 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=159
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000008f CFG Structurize blocks=159 loops=4 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000008e IR TranslateProgram blocks=63 elapsed_ms=1
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000008f IR TranslateProgram blocks=160 elapsed_ms=1
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000090 CFG BuildGraph blocks=70 loops=2 back_edges=2 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=80
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000090 CFG Structurize blocks=80 loops=2 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000091 CFG BuildGraph blocks=62 loops=2 back_edges=2 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=74
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000091 CFG Structurize blocks=74 loops=2 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000090 IR TranslateProgram blocks=81 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000091 IR TranslateProgram blocks=75 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000092 CFG BuildGraph blocks=138 loops=1 back_edges=1 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=160
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000092 CFG Structurize blocks=160 loops=1 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000092 IR TranslateProgram blocks=161 elapsed_ms=2
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000093 CFG BuildGraph blocks=134 loops=1 back_edges=1 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=156
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000093 CFG Structurize blocks=156 loops=1 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000094 CFG BuildGraph blocks=138 loops=1 back_edges=1 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=160
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000094 CFG Structurize blocks=160 loops=1 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000093 IR TranslateProgram blocks=157 elapsed_ms=3
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000094 IR TranslateProgram blocks=161 elapsed_ms=3
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000095 CFG BuildGraph blocks=134 loops=1 back_edges=1 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=156
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000095 CFG Structurize blocks=156 loops=1 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000095 IR TranslateProgram blocks=157 elapsed_ms=1
+	 flip_arg             = 0
+Async: 54 translating, 0 compiling, 51 waiting (oldest 0 s), 0 pipelines, 42 queued, 0 skipped/2s, 0/0 redrawn; workers 12/12 busy, 0.0 jobs/s, pump 0.2 ms (worst 0.2 ms, 146 applied, 0 backlog); stages: requested 200, translating 54, translated 51 (failed 0), module-compiling 0 of 0 jobs, modules ready 0 (speculative 0, lost 0, failed 0), pipeline-compiling 0 of 0 jobs, pipelines ready 0 (failed 0), expired 0, wanted 0
+[store] written=0 pending=0 failed=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000096 CFG BuildGraph blocks=89 loops=2 back_edges=2 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=95
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000096 CFG Structurize blocks=95 loops=2 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000096 IR TranslateProgram blocks=96 elapsed_ms=1
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000097 CFG BuildGraph blocks=79 loops=2 back_edges=2 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=88
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000097 CFG Structurize blocks=88 loops=2 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000097 IR TranslateProgram blocks=89 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000098 CFG BuildGraph blocks=98 loops=3 back_edges=3 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=107
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000098 CFG Structurize blocks=107 loops=3 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000099 CFG BuildGraph blocks=82 loops=2 back_edges=2 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=88
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000099 CFG Structurize blocks=88 loops=2 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000098 IR TranslateProgram blocks=108 elapsed_ms=1
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000099 IR TranslateProgram blocks=89 elapsed_ms=1
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000009a CFG BuildGraph blocks=36 loops=0 back_edges=0 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=38
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000009a CFG Structurize blocks=38 loops=0 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000009a IR TranslateProgram blocks=39 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000009b CFG BuildGraph blocks=26 loops=0 back_edges=0 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=30
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000009b CFG Structurize blocks=30 loops=0 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000009b IR TranslateProgram blocks=31 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000009c CFG BuildGraph blocks=35 loops=0 back_edges=0 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=38
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000009c CFG Structurize blocks=38 loops=0 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000009d CFG BuildGraph blocks=186 loops=4 back_edges=4 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=210
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000009d CFG Structurize blocks=210 loops=4 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000009c IR TranslateProgram blocks=39 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000009e CFG BuildGraph blocks=53 loops=3 back_edges=3 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=65
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000009e CFG Structurize blocks=65 loops=3 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000009e IR TranslateProgram blocks=66 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000009d IR TranslateProgram blocks=211 elapsed_ms=5
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000009f CFG BuildGraph blocks=35 loops=1 back_edges=1 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=44
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000009f CFG Structurize blocks=44 loops=1 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000009f IR TranslateProgram blocks=45 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000a0 CFG BuildGraph blocks=56 loops=3 back_edges=3 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=69
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000a0 CFG Structurize blocks=69 loops=3 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000a0 IR TranslateProgram blocks=70 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000a1 CFG BuildGraph blocks=49 loops=1 back_edges=1 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=60
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000a1 CFG Structurize blocks=60 loops=1 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000a1 IR TranslateProgram blocks=61 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000a2 CFG BuildGraph blocks=166 loops=2 back_edges=2 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000a3 CFG BuildGraph blocks=79 loops=0 back_edges=0 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=188
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000a2 CFG Structurize blocks=188 loops=2 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=79
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000a3 CFG Structurize blocks=79 loops=0 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000a3 IR TranslateProgram blocks=80 elapsed_ms=2
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000a2 IR TranslateProgram blocks=189 elapsed_ms=3
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000a4 CFG BuildGraph blocks=20 loops=0 back_edges=0 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=21
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000a4 CFG Structurize blocks=21 loops=0 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000a4 IR TranslateProgram blocks=22 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000a5 CFG BuildGraph blocks=20 loops=0 back_edges=0 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=21
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000a5 CFG Structurize blocks=21 loops=0 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000a5 IR TranslateProgram blocks=22 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000a6 CFG BuildGraph blocks=20 loops=0 back_edges=0 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=21
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000a6 CFG Structurize blocks=21 loops=0 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000a7 CFG BuildGraph blocks=14 loops=0 back_edges=0 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=14
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000a7 CFG Structurize blocks=14 loops=0 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000a7 IR TranslateProgram blocks=15 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000a6 IR TranslateProgram blocks=22 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000a8 CFG BuildGraph blocks=5 loops=0 back_edges=0 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=5
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000a8 CFG Structurize blocks=5 loops=0 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000a8 IR TranslateProgram blocks=6 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000a9 CFG BuildGraph blocks=242 loops=3 back_edges=3 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=269
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000a9 CFG Structurize blocks=269 loops=3 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000aa CFG BuildGraph blocks=22 loops=4 back_edges=4 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=30
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000aa CFG Structurize blocks=30 loops=4 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000aa IR TranslateProgram blocks=31 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000ab CFG BuildGraph blocks=7 loops=0 back_edges=0 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=9
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000ab CFG Structurize blocks=9 loops=0 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000ab IR TranslateProgram blocks=10 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000ac CFG BuildGraph blocks=3 loops=0 back_edges=0 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=3
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000ac CFG Structurize blocks=3 loops=0 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000ac IR TranslateProgram blocks=4 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000ad CFG BuildGraph blocks=11 loops=0 back_edges=0 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=15
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000ad CFG Structurize blocks=15 loops=0 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000ad IR TranslateProgram blocks=16 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000ae CFG BuildGraph blocks=32 loops=4 back_edges=4 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=39
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000ae CFG Structurize blocks=39 loops=4 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000ae IR TranslateProgram blocks=40 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000af CFG BuildGraph blocks=44 loops=6 back_edges=6 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=53
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000af CFG Structurize blocks=53 loops=6 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000af IR TranslateProgram blocks=54 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000b0 CFG BuildGraph blocks=18 loops=4 back_edges=4 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=24
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000b0 CFG Structurize blocks=24 loops=4 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000b0 IR TranslateProgram blocks=25 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000a9 IR TranslateProgram blocks=270 elapsed_ms=9
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000b1 CFG BuildGraph blocks=68 loops=3 back_edges=3 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=72
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000b1 CFG Structurize blocks=72 loops=3 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000b1 IR TranslateProgram blocks=73 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000b2 CFG BuildGraph blocks=3 loops=1 back_edges=1 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=4
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000b2 CFG Structurize blocks=4 loops=1 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000b2 IR TranslateProgram blocks=5 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000b3 CFG BuildGraph blocks=1 loops=0 back_edges=0 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=1
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000b3 CFG Structurize blocks=1 loops=0 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000b3 IR TranslateProgram blocks=2 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000b4 CFG BuildGraph blocks=10 loops=1 back_edges=1 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=13
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000b4 CFG Structurize blocks=13 loops=1 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000b4 IR TranslateProgram blocks=14 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000b5 CFG BuildGraph blocks=10 loops=1 back_edges=1 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=13
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000b5 CFG Structurize blocks=13 loops=1 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000b5 IR TranslateProgram blocks=14 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000b6 CFG BuildGraph blocks=95 loops=5 back_edges=5 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=107
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000b6 CFG Structurize blocks=107 loops=5 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000b7 CFG BuildGraph blocks=6 loops=0 back_edges=0 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=7
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000b7 CFG Structurize blocks=7 loops=0 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000b7 IR TranslateProgram blocks=8 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000b8 CFG BuildGraph blocks=128 loops=21 back_edges=21 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=168
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000b8 CFG Structurize blocks=168 loops=21 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000b6 IR TranslateProgram blocks=108 elapsed_ms=3
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000b8 IR TranslateProgram blocks=169 elapsed_ms=7
+@@T 9
+	 flip_arg             = 16
+	 flip_arg             = 32
+@@T 10
+	 flip_arg             = 48
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000ba CFG BuildGraph blocks=7 loops=0 back_edges=0 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000bb CFG BuildGraph blocks=5 loops=0 back_edges=0 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000bc CFG BuildGraph blocks=31 loops=0 back_edges=0 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=5
+ShaderRecompiler CS structured CFG success: blocks=9
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000ba CFG Structurize blocks=9 loops=0 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000bd CFG BuildGraph blocks=5 loops=0 back_edges=0 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000bb CFG Structurize blocks=5 loops=0 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000be CFG BuildGraph blocks=3 loops=0 back_edges=0 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=5
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000bd CFG Structurize blocks=5 loops=0 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=3
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000be CFG Structurize blocks=3 loops=0 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000bf CFG BuildGraph blocks=13 loops=0 back_edges=0 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=32
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000bc CFG Structurize blocks=32 loops=0 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=15
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000bf CFG Structurize blocks=15 loops=0 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000c0 CFG BuildGraph blocks=50 loops=2 back_edges=2 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000c1 CFG BuildGraph blocks=50 loops=2 back_edges=2 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=55
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000c0 CFG Structurize blocks=55 loops=2 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000c2 CFG BuildGraph blocks=87 loops=2 back_edges=2 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=55
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000c1 CFG Structurize blocks=55 loops=2 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=90
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000c2 CFG Structurize blocks=90 loops=2 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000c3 CFG BuildGraph blocks=85 loops=7 back_edges=7 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=99
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000c3 CFG Structurize blocks=99 loops=7 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000ba IR TranslateProgram blocks=10 elapsed_ms=1
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000bc IR TranslateProgram blocks=33 elapsed_ms=2
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000bb IR TranslateProgram blocks=6 elapsed_ms=2
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000bd IR TranslateProgram blocks=6 elapsed_ms=2
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000be IR TranslateProgram blocks=4 elapsed_ms=2
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000c0 IR TranslateProgram blocks=56 elapsed_ms=3
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000bf IR TranslateProgram blocks=16 elapsed_ms=4
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000c1 IR TranslateProgram blocks=56 elapsed_ms=4
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000c4 CFG BuildGraph blocks=61 loops=4 back_edges=4 elapsed_ms=1
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000c5 CFG BuildGraph blocks=28 loops=0 back_edges=0 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=31
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000c5 CFG Structurize blocks=31 loops=0 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000c6 CFG BuildGraph blocks=81 loops=7 back_edges=7 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000c2 IR TranslateProgram blocks=91 elapsed_ms=7
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000c7 CFG BuildGraph blocks=656 loops=44 back_edges=44 elapsed_ms=3
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000c8 CFG BuildGraph blocks=725 loops=50 back_edges=50 elapsed_ms=4
+ShaderRecompiler CS structured CFG success: blocks=97
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000c6 CFG Structurize blocks=97 loops=7 elapsed_ms=2
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000c5 IR TranslateProgram blocks=32 elapsed_ms=4
+ShaderRecompiler CS structured CFG success: blocks=72
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000c4 CFG Structurize blocks=72 loops=4 elapsed_ms=6
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000c9 CFG BuildGraph blocks=754 loops=43 back_edges=43 elapsed_ms=5
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000c3 IR TranslateProgram blocks=100 elapsed_ms=12
+ShaderRecompiler CS structured CFG success: blocks=774
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000c7 CFG Structurize blocks=774 loops=44 elapsed_ms=7
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000ca CFG BuildGraph blocks=687 loops=37 back_edges=37 elapsed_ms=3
+ShaderRecompiler CS structured CFG success: blocks=877
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000c8 CFG Structurize blocks=877 loops=50 elapsed_ms=9
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000cb CFG BuildGraph blocks=28 loops=0 back_edges=0 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=31
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000cb CFG Structurize blocks=31 loops=0 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000c4 IR TranslateProgram blocks=73 elapsed_ms=15
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000cb IR TranslateProgram blocks=32 elapsed_ms=5
+ShaderRecompiler CS structured CFG success: blocks=817
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000ca CFG Structurize blocks=817 loops=37 elapsed_ms=10
+ShaderRecompiler CS structured CFG success: blocks=918
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000c9 CFG Structurize blocks=918 loops=43 elapsed_ms=13
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000c6 IR TranslateProgram blocks=98 elapsed_ms=15
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000cc CFG BuildGraph blocks=26 loops=0 back_edges=0 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=29
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000cc CFG Structurize blocks=29 loops=0 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000cd CFG BuildGraph blocks=13 loops=0 back_edges=0 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=13
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000cd CFG Structurize blocks=13 loops=0 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000cd IR TranslateProgram blocks=14 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000ce CFG BuildGraph blocks=9 loops=2 back_edges=2 elapsed_ms=2
+ShaderRecompiler CS structured CFG success: blocks=13
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000ce CFG Structurize blocks=13 loops=2 elapsed_ms=2
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000ce IR TranslateProgram blocks=14 elapsed_ms=2
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000cf CFG BuildGraph blocks=164 loops=5 back_edges=5 elapsed_ms=2
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000cc IR TranslateProgram blocks=30 elapsed_ms=10
+ShaderRecompiler CS structured CFG success: blocks=204
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000cf CFG Structurize blocks=204 loops=5 elapsed_ms=4
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000d0 CFG BuildGraph blocks=155 loops=14 back_edges=14 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=216
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000d0 CFG Structurize blocks=216 loops=8 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000d1 CFG BuildGraph blocks=190 loops=7 back_edges=7 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=226
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000d1 CFG Structurize blocks=226 loops=7 elapsed_ms=2
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000d0 IR TranslateProgram blocks=217 elapsed_ms=6
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000d2 CFG BuildGraph blocks=23 loops=1 back_edges=1 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000d1 IR TranslateProgram blocks=227 elapsed_ms=8
+ShaderRecompiler CS structured CFG success: blocks=27
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000d2 CFG Structurize blocks=27 loops=1 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000d2 IR TranslateProgram blocks=28 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000cf IR TranslateProgram blocks=205 elapsed_ms=16
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000c9 IR TranslateProgram blocks=919 elapsed_ms=42
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000d3 CFG BuildGraph blocks=418 loops=24 back_edges=24 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=537
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000d3 CFG Structurize blocks=537 loops=12 elapsed_ms=1
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000d4 CFG BuildGraph blocks=13 loops=1 back_edges=1 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=16
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000d4 CFG Structurize blocks=16 loops=1 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000d4 IR TranslateProgram blocks=17 elapsed_ms=1
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000d5 CFG BuildGraph blocks=18 loops=2 back_edges=2 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=25
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000d5 CFG Structurize blocks=25 loops=2 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000d5 IR TranslateProgram blocks=26 elapsed_ms=1
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000d6 CFG BuildGraph blocks=6 loops=0 back_edges=0 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=7
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000d6 CFG Structurize blocks=7 loops=0 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000d6 IR TranslateProgram blocks=8 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000d3 IR TranslateProgram blocks=538 elapsed_ms=9
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000d7 CFG BuildGraph blocks=27 loops=2 back_edges=2 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=34
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000d7 CFG Structurize blocks=34 loops=2 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000d8 CFG BuildGraph blocks=134 loops=13 back_edges=13 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=162
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000d8 CFG Structurize blocks=162 loops=13 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000d7 IR TranslateProgram blocks=35 elapsed_ms=7
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000d8 IR TranslateProgram blocks=163 elapsed_ms=3
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000d9 CFG BuildGraph blocks=626 loops=33 back_edges=33 elapsed_ms=2
+ShaderRecompiler CS structured CFG success: blocks=745
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000d9 CFG Structurize blocks=745 loops=33 elapsed_ms=4
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000da CFG BuildGraph blocks=675 loops=37 back_edges=37 elapsed_ms=9
+ShaderRecompiler CS structured CFG success: blocks=807
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000da CFG Structurize blocks=807 loops=37 elapsed_ms=14
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000c7 IR TranslateProgram blocks=775 elapsed_ms=94
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000c8 IR TranslateProgram blocks=878 elapsed_ms=96
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000db CFG BuildGraph blocks=413 loops=9 back_edges=9 elapsed_ms=1
+ShaderRecompiler CS structured CFG success: blocks=470
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000db CFG Structurize blocks=470 loops=9 elapsed_ms=2
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000dc CFG BuildGraph blocks=936 loops=37 back_edges=37 elapsed_ms=2
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000dd CFG BuildGraph blocks=415 loops=9 back_edges=9 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=472
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000dd CFG Structurize blocks=472 loops=9 elapsed_ms=2
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000de CFG BuildGraph blocks=75 loops=3 back_edges=3 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=91
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000de CFG Structurize blocks=91 loops=3 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000df CFG BuildGraph blocks=370 loops=3 back_edges=3 elapsed_ms=1
+ShaderRecompiler CS structured CFG success: blocks=419
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000df CFG Structurize blocks=419 loops=3 elapsed_ms=2
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000de IR TranslateProgram blocks=92 elapsed_ms=2
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000ca IR TranslateProgram blocks=818 elapsed_ms=121
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000ca IR TranslateProgram blocks=818 elapsed_ms=121
+ShaderRecompiler CS structured CFG success: blocks=1072
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000dc CFG Structurize blocks=1072 loops=37 elapsed_ms=18
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000df IR TranslateProgram blocks=420 elapsed_ms=15
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000e0 CFG BuildGraph blocks=75 loops=2 back_edges=2 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=90
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000e0 CFG Structurize blocks=90 loops=2 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000e0 IR TranslateProgram blocks=91 elapsed_ms=2
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000db IR TranslateProgram blocks=471 elapsed_ms=37
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000e1 CFG BuildGraph blocks=943 loops=40 back_edges=40 elapsed_ms=3
+ShaderRecompiler CS structured CFG success: blocks=1089
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000e1 CFG Structurize blocks=1089 loops=40 elapsed_ms=7
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000dd IR TranslateProgram blocks=473 elapsed_ms=39
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000d9 IR TranslateProgram blocks=746 elapsed_ms=88
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000e2 CFG BuildGraph blocks=93 loops=3 back_edges=3 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=113
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000e2 CFG Structurize blocks=113 loops=3 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000e2 IR TranslateProgram blocks=114 elapsed_ms=5
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000da IR TranslateProgram blocks=808 elapsed_ms=110
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000da IR TranslateProgram blocks=808 elapsed_ms=110
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000dc IR TranslateProgram blocks=1073 elapsed_ms=97
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000e3 CFG BuildGraph blocks=93 loops=2 back_edges=2 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=112
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000e3 CFG Structurize blocks=112 loops=2 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000e3 IR TranslateProgram blocks=113 elapsed_ms=3
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000e1 IR TranslateProgram blocks=1090 elapsed_ms=92
+ShaderRecompiler CS read-lane elimination: reads=56 reductions=0
+ShaderRecompiler CS read-lane elimination: reads=79 reductions=0
+Async: 689 translating, 0 compiling, 128 waiting (oldest 2 s), 0 pipelines, 677 queued, 0 skipped/2s, 3/3 redrawn; workers 12/12 busy, 41.4 jobs/s, pump 6.7 ms (worst 3.0 ms, 84 applied, 0 backlog); stages: requested 919, translating 689, translated 128 (failed 0), module-compiling 0 of 0 jobs, modules ready 0 (speculative 0, lost 0, failed 0), pipeline-compiling 0 of 0 jobs, pipelines ready 0 (failed 0), expired 0, wanted 0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000e4 CFG BuildGraph blocks=97 loops=5 back_edges=5 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=117
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000e4 CFG Structurize blocks=117 loops=5 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000e4 IR TranslateProgram blocks=118 elapsed_ms=4
+ShaderRecompiler CS read-lane elimination: reads=61 reductions=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000e5 CFG BuildGraph blocks=150 loops=9 back_edges=9 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=184
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000e5 CFG Structurize blocks=184 loops=9 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000e5 IR TranslateProgram blocks=185 elapsed_ms=8
+ShaderRecompiler CS read-lane elimination: reads=506 reductions=7
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000e6 CFG BuildGraph blocks=656 loops=35 back_edges=35 elapsed_ms=2
+ShaderRecompiler CS structured CFG success: blocks=782
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000e6 CFG Structurize blocks=782 loops=35 elapsed_ms=5
+	 flip_arg             = 64
+ShaderRecompiler CS read-lane elimination: reads=24 reductions=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000e6 IR TranslateProgram blocks=783 elapsed_ms=52
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000e7 CFG BuildGraph blocks=111 loops=6 back_edges=6 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=142
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000e7 CFG Structurize blocks=142 loops=6 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000e7 IR TranslateProgram blocks=143 elapsed_ms=8
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000e8 CFG BuildGraph blocks=762 loops=43 back_edges=43 elapsed_ms=2
+ShaderRecompiler CS structured CFG success: blocks=926
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000e8 CFG Structurize blocks=926 loops=43 elapsed_ms=6
+ShaderRecompiler CS read-lane elimination: reads=390 reductions=5
+ShaderRecompiler CS read-lane elimination: reads=367 reductions=7
+ShaderRecompiler CS read-lane elimination: reads=540 reductions=5
+ShaderRecompiler CS read-lane elimination: reads=275 reductions=10
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000e9 CFG BuildGraph blocks=860 loops=47 back_edges=47 elapsed_ms=5
+ShaderRecompiler CS structured CFG success: blocks=1028
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000e9 CFG Structurize blocks=1028 loops=47 elapsed_ms=14
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000e8 IR TranslateProgram blocks=927 elapsed_ms=55
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000ea CFG BuildGraph blocks=125 loops=6 back_edges=6 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=158
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000ea CFG Structurize blocks=158 loops=6 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000ea IR TranslateProgram blocks=159 elapsed_ms=6
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000e9 IR TranslateProgram blocks=1029 elapsed_ms=78
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000eb CFG BuildGraph blocks=129 loops=6 back_edges=6 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=164
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000eb CFG Structurize blocks=164 loops=6 elapsed_ms=3
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000eb IR TranslateProgram blocks=165 elapsed_ms=8
+ShaderRecompiler CS read-lane elimination: reads=214 reductions=10
+ShaderRecompiler CS read-lane elimination: reads=627 reductions=5
+ShaderRecompiler CS read-lane elimination: reads=670 reductions=5
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000ec CFG BuildGraph blocks=143 loops=6 back_edges=6 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=180
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000ec CFG Structurize blocks=180 loops=6 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000ec IR TranslateProgram blocks=181 elapsed_ms=4
+@@T 11
+ShaderRecompiler CS read-lane elimination: reads=548 reductions=5
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000ed CFG BuildGraph blocks=79 loops=3 back_edges=3 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=97
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000ed CFG Structurize blocks=97 loops=3 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000ed IR TranslateProgram blocks=98 elapsed_ms=3
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000ee CFG BuildGraph blocks=79 loops=2 back_edges=2 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=96
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000ee CFG Structurize blocks=96 loops=2 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000ee IR TranslateProgram blocks=97 elapsed_ms=3
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000ef CFG BuildGraph blocks=111 loops=6 back_edges=6 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=129
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000ef CFG Structurize blocks=129 loops=6 elapsed_ms=1
+ShaderRecompiler CS read-lane elimination: reads=567 reductions=7
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000ef IR TranslateProgram blocks=130 elapsed_ms=7
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000f0 CFG BuildGraph blocks=97 loops=3 back_edges=3 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=119
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000f0 CFG Structurize blocks=119 loops=3 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000f0 IR TranslateProgram blocks=120 elapsed_ms=5
+ShaderRecompiler CS read-lane elimination: reads=54 reductions=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000f1 CFG BuildGraph blocks=29 loops=2 back_edges=2 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=33
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000f1 CFG Structurize blocks=33 loops=2 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000f1 IR TranslateProgram blocks=34 elapsed_ms=1
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000f2 CFG BuildGraph blocks=14 loops=1 back_edges=1 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=17
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000f2 CFG Structurize blocks=17 loops=1 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000f2 IR TranslateProgram blocks=18 elapsed_ms=1
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000f3 CFG BuildGraph blocks=14 loops=1 back_edges=1 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=17
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000f3 CFG Structurize blocks=17 loops=1 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000f3 IR TranslateProgram blocks=18 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000f4 CFG BuildGraph blocks=22 loops=0 back_edges=0 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=25
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000f4 CFG Structurize blocks=25 loops=0 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000f4 IR TranslateProgram blocks=26 elapsed_ms=1
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000f5 CFG BuildGraph blocks=28 loops=1 back_edges=1 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=33
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000f5 CFG Structurize blocks=33 loops=1 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000f5 IR TranslateProgram blocks=34 elapsed_ms=1
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000f6 CFG BuildGraph blocks=97 loops=2 back_edges=2 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000f7 CFG BuildGraph blocks=46 loops=1 back_edges=1 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=49
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000f7 CFG Structurize blocks=49 loops=1 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=118
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000f6 CFG Structurize blocks=118 loops=2 elapsed_ms=2
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000f6 IR TranslateProgram blocks=119 elapsed_ms=5
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000f7 IR TranslateProgram blocks=50 elapsed_ms=3
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000f8 CFG BuildGraph blocks=3 loops=0 back_edges=0 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=3
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000f8 CFG Structurize blocks=3 loops=0 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000f8 IR TranslateProgram blocks=4 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000f9 CFG BuildGraph blocks=163 loops=4 back_edges=4 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=173
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000f9 CFG Structurize blocks=173 loops=4 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000f9 IR TranslateProgram blocks=174 elapsed_ms=7
+	 flip_arg             = 80
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000fa CFG BuildGraph blocks=67 loops=3 back_edges=3 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=83
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000fa CFG Structurize blocks=83 loops=3 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000fa IR TranslateProgram blocks=84 elapsed_ms=1
+ShaderRecompiler CS read-lane elimination: reads=582 reductions=7
+ShaderRecompiler CS read-lane elimination: reads=13 reductions=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000fb CFG BuildGraph blocks=73 loops=5 back_edges=5 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=88
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000fb CFG Structurize blocks=88 loops=5 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000fb IR TranslateProgram blocks=89 elapsed_ms=2
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000fc CFG BuildGraph blocks=34 loops=1 back_edges=1 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=41
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000fc CFG Structurize blocks=41 loops=1 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000fc IR TranslateProgram blocks=42 elapsed_ms=2
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000fd CFG BuildGraph blocks=136 loops=0 back_edges=0 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=163
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000fd CFG Structurize blocks=163 loops=0 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000fd IR TranslateProgram blocks=164 elapsed_ms=5
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000fe CFG BuildGraph blocks=9 loops=2 back_edges=2 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=12
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000fe CFG Structurize blocks=12 loops=2 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000fe IR TranslateProgram blocks=13 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000ff CFG BuildGraph blocks=11 loops=2 back_edges=2 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=14
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000ff CFG Structurize blocks=14 loops=2 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000000ff IR TranslateProgram blocks=15 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000100 CFG BuildGraph blocks=35 loops=3 back_edges=3 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=41
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000100 CFG Structurize blocks=41 loops=3 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000100 IR TranslateProgram blocks=42 elapsed_ms=1
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000101 CFG BuildGraph blocks=775 loops=43 back_edges=43 elapsed_ms=2
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000102 CFG BuildGraph blocks=99 loops=5 back_edges=5 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=129
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000102 CFG Structurize blocks=129 loops=5 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=939
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000101 CFG Structurize blocks=939 loops=43 elapsed_ms=5
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000102 IR TranslateProgram blocks=130 elapsed_ms=3
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000103 CFG BuildGraph blocks=97 loops=3 back_edges=3 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=123
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000103 CFG Structurize blocks=123 loops=3 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000103 IR TranslateProgram blocks=124 elapsed_ms=2
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000104 CFG BuildGraph blocks=639 loops=35 back_edges=35 elapsed_ms=1
+ShaderRecompiler CS structured CFG success: blocks=765
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000104 CFG Structurize blocks=765 loops=35 elapsed_ms=4
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000101 IR TranslateProgram blocks=940 elapsed_ms=39
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000105 CFG BuildGraph blocks=120 loops=5 back_edges=5 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=155
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000105 CFG Structurize blocks=155 loops=5 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000105 IR TranslateProgram blocks=156 elapsed_ms=3
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000104 IR TranslateProgram blocks=766 elapsed_ms=29
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000106 CFG BuildGraph blocks=118 loops=3 back_edges=3 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=149
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000106 CFG Structurize blocks=149 loops=3 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000106 IR TranslateProgram blocks=150 elapsed_ms=3
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000107 CFG BuildGraph blocks=121 loops=7 back_edges=7 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=155
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000107 CFG Structurize blocks=155 loops=7 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000107 IR TranslateProgram blocks=156 elapsed_ms=3
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000108 CFG BuildGraph blocks=224 loops=15 back_edges=15 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=285
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000108 CFG Structurize blocks=285 loops=15 elapsed_ms=0
+[0mShaderRecompiler CS phase end: hash = 0xaaaa000000000108 IR TranslateProgram blocks=286 elapsed_ms=12
+ShaderRecompiler CS read-lane elimination: reads=55 reductions=0
+ShaderRecompiler CS read-lane elimination: reads=550 reductions=5
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000117 CFG BuildGraph blocks=145 loops=11 back_edges=11 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=196
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000117 CFG Structurize blocks=196 loops=11 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000117 IR TranslateProgram blocks=197 elapsed_ms=6
+ShaderRecompiler CS read-lane elimination: reads=530 reductions=7
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000120 CFG BuildGraph blocks=109 loops=6 back_edges=6 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=127
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000120 CFG Structurize blocks=127 loops=6 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000121 CFG BuildGraph blocks=153 loops=10 back_edges=10 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=204
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000121 CFG Structurize blocks=204 loops=10 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000120 IR TranslateProgram blocks=128 elapsed_ms=5
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000121 IR TranslateProgram blocks=205 elapsed_ms=6
+ShaderRecompiler CS read-lane elimination: reads=54 reductions=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000124 CFG BuildGraph blocks=47 loops=4 back_edges=4 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=55
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000124 CFG Structurize blocks=55 loops=4 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000125 CFG BuildGraph blocks=14 loops=1 back_edges=1 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=17
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000125 CFG Structurize blocks=17 loops=1 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000125 IR TranslateProgram blocks=18 elapsed_ms=1
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000124 IR TranslateProgram blocks=56 elapsed_ms=2
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000126 CFG BuildGraph blocks=30 loops=1 back_edges=1 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=33
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000126 CFG Structurize blocks=33 loops=1 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000126 IR TranslateProgram blocks=34 elapsed_ms=1
+ShaderRecompiler CS read-lane elimination: reads=85 reductions=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000127 CFG BuildGraph blocks=145 loops=0 back_edges=0 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000128 CFG BuildGraph blocks=184 loops=6 back_edges=6 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=178
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000127 CFG Structurize blocks=178 loops=0 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=225
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000128 CFG Structurize blocks=225 loops=6 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000127 IR TranslateProgram blocks=179 elapsed_ms=5
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000128 IR TranslateProgram blocks=226 elapsed_ms=6
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000129 CFG BuildGraph blocks=160 loops=10 back_edges=10 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=214
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000129 CFG Structurize blocks=214 loops=10 elapsed_ms=1
+[0mShaderRecompiler CS phase end: hash = 0xaaaa00000000012e CFG BuildGraph blocks=708 loops=37 back_edges=37 elapsed_ms=2
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000129 IR TranslateProgram blocks=215 elapsed_ms=7
+ShaderRecompiler CS structured CFG success: blocks=838
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000012e CFG Structurize blocks=838 loops=37 elapsed_ms=5
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000012e IR TranslateProgram blocks=839 elapsed_ms=30
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000012f CFG BuildGraph blocks=116 loops=0 back_edges=0 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=143
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000012f CFG Structurize blocks=143 loops=0 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000012f IR TranslateProgram blocks=144 elapsed_ms=6
+	 flip_arg             = 96
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000135 CFG BuildGraph blocks=97 loops=0 back_edges=0 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=130
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000135 CFG Structurize blocks=130 loops=0 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000135 IR TranslateProgram blocks=131 elapsed_ms=3
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000136 CFG BuildGraph blocks=328 loops=9 back_edges=9 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=383
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000136 CFG Structurize blocks=383 loops=9 elapsed_ms=2
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000137 CFG BuildGraph blocks=174 loops=10 back_edges=10 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=230
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000137 CFG Structurize blocks=230 loops=10 elapsed_ms=1
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000137 IR TranslateProgram blocks=231 elapsed_ms=7
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000136 IR TranslateProgram blocks=384 elapsed_ms=12
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000139 CFG BuildGraph blocks=969 loops=52 back_edges=52 elapsed_ms=3
+ShaderRecompiler CS structured CFG success: blocks=1161
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000139 CFG Structurize blocks=1161 loops=52 elapsed_ms=7
+[0mShaderRecompiler CS phase end: hash = 0xaaaa000000000139 IR TranslateProgram blocks=1162 elapsed_ms=30
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000013a CFG BuildGraph blocks=375 loops=15 back_edges=15 elapsed_ms=1
+ShaderRecompiler CS structured CFG success: blocks=443
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000013a CFG Structurize blocks=443 loops=15 elapsed_ms=2
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000013a IR TranslateProgram blocks=444 elapsed_ms=13
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000147 CFG BuildGraph blocks=112 loops=5 back_edges=5 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=145
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000147 CFG Structurize blocks=145 loops=5 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000147 IR TranslateProgram blocks=146 elapsed_ms=4
+[0mShaderRecompiler CS phase end: hash = 0xaaaa000000000148 CFG BuildGraph blocks=336 loops=9 back_edges=9 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=396
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000148 CFG Structurize blocks=396 loops=9 elapsed_ms=2
+[0mShaderRecompiler CS phase end: hash = 0xaaaa000000000148 IR TranslateProgram blocks=397 elapsed_ms=9
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000014a CFG BuildGraph blocks=110 loops=3 back_edges=3 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=139
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000014a CFG Structurize blocks=139 loops=3 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000014b CFG BuildGraph blocks=327 loops=9 back_edges=9 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=381
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000014b CFG Structurize blocks=381 loops=9 elapsed_ms=1
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000014a IR TranslateProgram blocks=140 elapsed_ms=4
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000014b IR TranslateProgram blocks=382 elapsed_ms=11
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000150 CFG BuildGraph blocks=133 loops=5 back_edges=5 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=171
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000150 CFG Structurize blocks=171 loops=5 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000150 IR TranslateProgram blocks=172 elapsed_ms=6
+ShaderRecompiler CS read-lane elimination: reads=661 reductions=5
+@@T 12
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000015d CFG BuildGraph blocks=131 loops=3 back_edges=3 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=165
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000015d CFG Structurize blocks=165 loops=3 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000015e CFG BuildGraph blocks=900 loops=46 back_edges=46 elapsed_ms=3
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000015d IR TranslateProgram blocks=166 elapsed_ms=5
+[0mShaderRecompiler CS structured CFG success: blocks=1054
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000015e CFG Structurize blocks=1054 loops=46 elapsed_ms=7
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000161 CFG BuildGraph blocks=383 loops=15 back_edges=15 elapsed_ms=1
+ShaderRecompiler CS structured CFG success: blocks=451
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000161 CFG Structurize blocks=451 loops=15 elapsed_ms=2
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000161 IR TranslateProgram blocks=452 elapsed_ms=10
+ShaderRecompiler CS read-lane elimination: reads=532 reductions=7
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000015e IR TranslateProgram blocks=1055 elapsed_ms=41
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000162 CFG BuildGraph blocks=340 loops=9 back_edges=9 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=400
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000162 CFG Structurize blocks=400 loops=9 elapsed_ms=1
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000162 IR TranslateProgram blocks=401 elapsed_ms=10
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000163 CFG BuildGraph blocks=124 loops=10 back_edges=10 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=156
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000163 CFG Structurize blocks=156 loops=10 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000163 IR TranslateProgram blocks=157 elapsed_ms=7
+ShaderRecompiler CS read-lane elimination: reads=38 reductions=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000164 CFG BuildGraph blocks=11 loops=3 back_edges=3 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=17
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000164 CFG Structurize blocks=17 loops=3 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000164 IR TranslateProgram blocks=18 elapsed_ms=1
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000165 CFG BuildGraph blocks=16 loops=3 back_edges=3 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=21
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000165 CFG Structurize blocks=21 loops=3 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000165 IR TranslateProgram blocks=22 elapsed_ms=1
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000166 CFG BuildGraph blocks=31 loops=7 back_edges=7 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=39
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000166 CFG Structurize blocks=39 loops=7 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000166 IR TranslateProgram blocks=40 elapsed_ms=1
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000167 CFG BuildGraph blocks=25 loops=1 back_edges=1 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=29
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000167 CFG Structurize blocks=29 loops=1 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000167 IR TranslateProgram blocks=30 elapsed_ms=1
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000168 CFG BuildGraph blocks=25 loops=1 back_edges=1 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=29
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000168 CFG Structurize blocks=29 loops=1 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000168 IR TranslateProgram blocks=30 elapsed_ms=1
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000169 CFG BuildGraph blocks=25 loops=1 back_edges=1 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=29
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000169 CFG Structurize blocks=29 loops=1 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000169 IR TranslateProgram blocks=30 elapsed_ms=1
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000016a CFG BuildGraph blocks=327 loops=9 back_edges=9 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=381
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000016a CFG Structurize blocks=381 loops=9 elapsed_ms=1
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000016b CFG BuildGraph blocks=25 loops=1 back_edges=1 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=29
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000016b CFG Structurize blocks=29 loops=1 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000016b IR TranslateProgram blocks=30 elapsed_ms=1
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000016a IR TranslateProgram blocks=382 elapsed_ms=12
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000016c CFG BuildGraph blocks=37 loops=0 back_edges=0 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=39
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000016c CFG Structurize blocks=39 loops=0 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000016c IR TranslateProgram blocks=40 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000016d CFG BuildGraph blocks=37 loops=0 back_edges=0 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=39
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000016d CFG Structurize blocks=39 loops=0 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000016d IR TranslateProgram blocks=40 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000016e CFG BuildGraph blocks=972 loops=52 back_edges=52 elapsed_ms=3
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000016f CFG BuildGraph blocks=75 loops=2 back_edges=2 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=84
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000016f CFG Structurize blocks=84 loops=2 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=1163
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000016e CFG Structurize blocks=1163 loops=52 elapsed_ms=7
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000016f IR TranslateProgram blocks=85 elapsed_ms=4
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000170 CFG BuildGraph blocks=376 loops=15 back_edges=15 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=445
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000170 CFG Structurize blocks=445 loops=15 elapsed_ms=2
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000171 CFG BuildGraph blocks=166 loops=5 back_edges=5 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=174
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000171 CFG Structurize blocks=174 loops=5 elapsed_ms=0
+	 flip_arg             = 112
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000170 IR TranslateProgram blocks=446 elapsed_ms=14
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000171 IR TranslateProgram blocks=175 elapsed_ms=5
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000172 CFG BuildGraph blocks=337 loops=9 back_edges=9 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000173 CFG BuildGraph blocks=116 loops=0 back_edges=0 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=143
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000173 CFG Structurize blocks=143 loops=0 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=398
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000172 CFG Structurize blocks=398 loops=9 elapsed_ms=2
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000173 IR TranslateProgram blocks=144 elapsed_ms=6
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000016e IR TranslateProgram blocks=1164 elapsed_ms=59
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000172 IR TranslateProgram blocks=399 elapsed_ms=13
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000174 CFG BuildGraph blocks=21 loops=2 back_edges=2 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=26
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000174 CFG Structurize blocks=26 loops=2 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000174 IR TranslateProgram blocks=27 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000175 CFG BuildGraph blocks=23 loops=2 back_edges=2 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=28
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000175 CFG Structurize blocks=28 loops=2 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000175 IR TranslateProgram blocks=29 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000176 CFG BuildGraph blocks=9 loops=1 back_edges=1 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=11
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000176 CFG Structurize blocks=11 loops=1 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000176 IR TranslateProgram blocks=12 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000177 CFG BuildGraph blocks=23 loops=3 back_edges=3 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=30
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000177 CFG Structurize blocks=30 loops=3 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000177 IR TranslateProgram blocks=31 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000178 CFG BuildGraph blocks=25 loops=3 back_edges=3 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=32
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000178 CFG Structurize blocks=32 loops=3 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000178 IR TranslateProgram blocks=33 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000179 CFG BuildGraph blocks=225 loops=1 back_edges=1 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=247
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000179 CFG Structurize blocks=247 loops=1 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000179 IR TranslateProgram blocks=248 elapsed_ms=8
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000017a CFG BuildGraph blocks=688 loops=37 back_edges=37 elapsed_ms=2
+ShaderRecompiler CS structured CFG success: blocks=818
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000017a CFG Structurize blocks=818 loops=37 elapsed_ms=5
+ShaderRecompiler CS read-lane elimination: reads=528 reductions=5
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000017b CFG BuildGraph blocks=138 loops=6 back_edges=6 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=179
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000017b CFG Structurize blocks=179 loops=6 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000017b IR TranslateProgram blocks=180 elapsed_ms=5
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000017c CFG BuildGraph blocks=188 loops=0 back_edges=0 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=208
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000017c CFG Structurize blocks=208 loops=0 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000017a IR TranslateProgram blocks=819 elapsed_ms=44
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000017c IR TranslateProgram blocks=209 elapsed_ms=5
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000017d CFG BuildGraph blocks=452 loops=2 back_edges=2 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=495
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000017d CFG Structurize blocks=495 loops=2 elapsed_ms=1
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000017e CFG BuildGraph blocks=90 loops=0 back_edges=0 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=117
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000017e CFG Structurize blocks=117 loops=0 elapsed_ms=0
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000017e IR TranslateProgram blocks=118 elapsed_ms=4
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000180 CFG BuildGraph blocks=682 loops=41 back_edges=41 elapsed_ms=2
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000017d IR TranslateProgram blocks=496 elapsed_ms=20
+ShaderRecompiler CS structured CFG success: blocks=842
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000180 CFG Structurize blocks=842 loops=41 elapsed_ms=6
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000181 CFG BuildGraph blocks=608 loops=35 back_edges=35 elapsed_ms=1
+ShaderRecompiler CS structured CFG success: blocks=731
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000181 CFG Structurize blocks=731 loops=35 elapsed_ms=4
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000182 CFG BuildGraph blocks=375 loops=15 back_edges=15 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=443
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000182 CFG Structurize blocks=443 loops=15 elapsed_ms=2
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000183 CFG BuildGraph blocks=336 loops=9 back_edges=9 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=396
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000183 CFG Structurize blocks=396 loops=9 elapsed_ms=2
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000180 IR TranslateProgram blocks=843 elapsed_ms=27
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000181 IR TranslateProgram blocks=732 elapsed_ms=25
+[0mShaderRecompiler CS phase end: hash = 0xaaaa000000000182 IR TranslateProgram blocks=444 elapsed_ms=15
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000183 IR TranslateProgram blocks=397 elapsed_ms=12
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000185 CFG BuildGraph blocks=968 loops=52 back_edges=52 elapsed_ms=3
+ShaderRecompiler CS structured CFG success: blocks=1159
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000185 CFG Structurize blocks=1159 loops=52 elapsed_ms=8
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000185 IR TranslateProgram blocks=1160 elapsed_ms=35
+Async: 2151 translating, 0 compiling, 223 waiting (oldest 4 s), 0 pipelines, 2139 queued, 0 skipped/2s, 3/3 redrawn; workers 12/12 busy, 47.5 jobs/s, pump 2.8 ms (worst 1.1 ms, 95 applied, 0 backlog); stages: requested 2476, translating 2151, translated 223 (failed 0), module-compiling 0 of 0 jobs, modules ready 0 (speculative 0, lost 0, failed 0), pipeline-compiling 0 of 0 jobs, pipelines ready 0 (failed 0), expired 0, wanted 0
+ShaderRecompiler CS read-lane elimination: reads=502 reductions=7
+ShaderRecompiler CS read-lane elimination: reads=647 reductions=5
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000187 CFG BuildGraph blocks=902 loops=46 back_edges=46 elapsed_ms=3
+ShaderRecompiler CS structured CFG success: blocks=1056
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000187 CFG Structurize blocks=1056 loops=46 elapsed_ms=8
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000187 IR TranslateProgram blocks=1057 elapsed_ms=38
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000188 CFG BuildGraph blocks=901 loops=46 back_edges=46 elapsed_ms=4
+ShaderRecompiler CS structured CFG success: blocks=1056
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000188 CFG Structurize blocks=1056 loops=46 elapsed_ms=9
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000189 CFG BuildGraph blocks=188 loops=0 back_edges=0 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=208
+ShaderRecompiler CS phase end: hash = 0xaaaa000000000189 CFG Structurize blocks=208 loops=0 elapsed_ms=1
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000018a CFG BuildGraph blocks=327 loops=9 back_edges=9 elapsed_ms=0
+ShaderRecompiler CS structured CFG success: blocks=381
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000018a CFG Structurize blocks=381 loops=9 elapsed_ms=2
+ShaderRecompiler CS read-lane elimination: reads=513 reductions=5
+	 flip_arg             = 128
+@@T 13
+	 flip_arg             = 144
+@@T 14
+@@T 15
+@@T 16
+Async: 2046 translating, 0 compiling, 328 waiting (oldest 8 s), 0 pipelines, 1967 queued, 0 skipped/2s, 3/3 redrawn; workers 12/12 busy, 39.1 jobs/s, pump 5.1 ms (worst 2.6 ms, 105 applied, 67 backlog); stages: requested 2476, translating 2046, translated 328 (failed 0), module-compiling 0 of 0 jobs, modules ready 0 (speculative 0, lost 0, failed 0), pipeline-compiling 0 of 0 jobs, pipelines ready 0 (failed 0), expired 0, wanted 0
+	 flip_arg             = 160
+@@T 17
+	 flip_arg             = 176
+@@T 18
+	 flip_arg             = 192
+	 flip_arg             = 208
+Async: 1877 translating, 0 compiling, 497 waiting (oldest 10 s), 0 pipelines, 1865 queued, 0 skipped/2s, 3/4 redrawn; workers 12/12 busy, 50.7 jobs/s, pump 14.0 ms (worst 3.2 ms, 169 applied, 0 backlog); stages: requested 2476, translating 1877, translated 497 (failed 0), module-compiling 0 of 0 jobs, modules ready 0 (speculative 0, lost 0, failed 0), pipeline-compiling 0 of 0 jobs, pipelines ready 0 (failed 0), expired 0, wanted 0
+@@T 19
+	 flip_arg             = 224
+	 flip_arg             = 240
+@@T 20
+	 flip_arg             = 256
+	 flip_arg             = 272
+Async: 1781 translating, 0 compiling, 593 waiting (oldest 12 s), 0 pipelines, 1769 queued, 0 skipped/2s, 4/5 redrawn; workers 12/12 busy, 48.0 jobs/s, pump 13.7 ms (worst 5.1 ms, 96 applied, 0 backlog); stages: requested 2476, translating 1781, translated 593 (failed 0), module-compiling 0 of 0 jobs, modules ready 0 (speculative 0, lost 0, failed 0), pipeline-compiling 0 of 0 jobs, pipelines ready 0 (failed 0), expired 0, wanted 0
+@@T 21
+	 flip_arg             = 288
+	 flip_arg             = 304
+@@T 22
+	 flip_arg             = 320
+	 flip_arg             = 336
+Async: 1720 translating, 0 compiling, 654 waiting (oldest 14 s), 0 pipelines, 1708 queued, 0 skipped/2s, 4/5 redrawn; workers 12/12 busy, 30.0 jobs/s, pump 2.6 ms (worst 0.5 ms, 61 applied, 0 backlog); stages: requested 2476, translating 1720, translated 654 (failed 0), module-compiling 0 of 0 jobs, modules ready 0 (speculative 0, lost 0, failed 0), pipeline-compiling 0 of 0 jobs, pipelines ready 0 (failed 0), expired 0, wanted 0
+@@T 23
+	 flip_arg             = 352
+@@T 24
+	 flip_arg             = 368
+Async: 1688 translating, 0 compiling, 686 waiting (oldest 16 s), 0 pipelines, 1676 queued, 0 skipped/2s, 4/5 redrawn; workers 12/12 busy, 16.0 jobs/s, pump 1.0 ms (worst 0.2 ms, 32 applied, 0 backlog); stages: requested 2476, translating 1688, translated 686 (failed 0), module-compiling 0 of 0 jobs, modules ready 0 (speculative 0, lost 0, failed 0), pipeline-compiling 0 of 0 jobs, pipelines ready 0 (failed 0), expired 0, wanted 0
+@@T 25
+	 flip_arg             = 384
+	 flip_arg             = 400
+@@T 26
+	 flip_arg             = 416
+	 flip_arg             = 432
+Async: 1641 translating, 0 compiling, 733 waiting (oldest 18 s), 0 pipelines, 1629 queued, 0 skipped/2s, 4/5 redrawn; workers 12/12 busy, 23.5 jobs/s, pump 1.2 ms (worst 0.1 ms, 47 applied, 0 backlog); stages: requested 2476, translating 1641, translated 733 (failed 0), module-compiling 0 of 0 jobs, modules ready 0 (speculative 0, lost 0, failed 0), pipeline-compiling 0 of 0 jobs, pipelines ready 0 (failed 0), expired 0, wanted 0
+@@T 27
+	 flip_arg             = 448
+	 flip_arg             = 464
+@@T 28
+	 flip_arg             = 480
+@@T 29
+	 flip_arg             = 496
+	 flip_arg             = 512
+@@T 30
+	 flip_arg             = 528
+	 flip_arg             = 544
+@@T 31
+Async: 1568 translating, 0 compiling, 806 waiting (oldest 22 s), 0 pipelines, 1556 queued, 0 skipped/2s, 4/5 redrawn; workers 12/12 busy, 22.0 jobs/s, pump 3.7 ms (worst 1.4 ms, 44 applied, 0 backlog); stages: requested 2476, translating 1568, translated 806 (failed 0), module-compiling 0 of 0 jobs, modules ready 0 (speculative 0, lost 0, failed 0), pipeline-compiling 0 of 0 jobs, pipelines ready 0 (failed 0), expired 0, wanted 0
+	 flip_arg             = 560
+	 flip_arg             = 576
+@@T 32
+	 flip_arg             = 592
+	 flip_arg             = 608
+@@T 33
+	 flip_arg             = 624
+	 flip_arg             = 640
+@@T 34
+	 flip_arg             = 656
+	 flip_arg             = 672
+@@T 35
+Async: 1485 translating, 0 compiling, 889 waiting (oldest 26 s), 0 pipelines, 1473 queued, 0 skipped/2s, 4/5 redrawn; workers 12/12 busy, 25.5 jobs/s, pump 8.6 ms (worst 2.7 ms, 51 applied, 0 backlog); stages: requested 2476, translating 1485, translated 889 (failed 0), module-compiling 0 of 0 jobs, modules ready 0 (speculative 0, lost 0, failed 0), pipeline-compiling 0 of 0 jobs, pipelines ready 0 (failed 0), expired 0, wanted 0
+	 flip_arg             = 688
+@@T 36
+	 flip_arg             = 704
+	 flip_arg             = 720
+@@T 37
+Async: 1430 translating, 0 compiling, 944 waiting (oldest 28 s), 0 pipelines, 1418 queued, 0 skipped/2s, 3/5 redrawn; workers 12/12 busy, 27.3 jobs/s, pump 13.1 ms (worst 3.3 ms, 55 applied, 0 backlog); stages: requested 2476, translating 1430, translated 944 (failed 0), module-compiling 0 of 0 jobs, modules ready 0 (speculative 0, lost 0, failed 0), pipeline-compiling 0 of 0 jobs, pipelines ready 0 (failed 0), expired 0, wanted 0
+	 flip_arg             = 736
+	 flip_arg             = 752
+@@T 38
+	 flip_arg             = 768
+[store] written=0 pending=0 failed=0
+	 flip_arg             = 784
+@@T 39
+Async: 1387 translating, 0 compiling, 987 waiting (oldest 31 s), 0 pipelines, 1375 queued, 0 skipped/2s, 3/5 redrawn; workers 12/12 busy, 21.5 jobs/s, pump 4.0 ms (worst 1.8 ms, 43 applied, 0 backlog); stages: requested 2476, translating 1387, translated 987 (failed 0), module-compiling 0 of 0 jobs, modules ready 0 (speculative 0, lost 0, failed 0), pipeline-compiling 0 of 0 jobs, pipelines ready 0 (failed 0), expired 0, wanted 0
+	 flip_arg             = 800
+	 flip_arg             = 816
+@@T 40
+	 flip_arg             = 832
+	 flip_arg             = 848
+@@T 41
+Async: 1330 translating, 0 compiling, 1044 waiting (oldest 33 s), 0 pipelines, 1318 queued, 0 skipped/2s, 3/5 redrawn; workers 12/12 busy, 28.1 jobs/s, pump 3.8 ms (worst 0.8 ms, 57 applied, 0 backlog); stages: requested 2476, translating 1330, translated 1044 (failed 0), module-compiling 0 of 0 jobs, modules ready 0 (speculative 0, lost 0, failed 0), pipeline-compiling 0 of 0 jobs, pipelines ready 0 (failed 0), expired 0, wanted 0
+	 flip_arg             = 864
+	 flip_arg             = 880
+@@T 42
+	 flip_arg             = 896
+@@T 43
+	 flip_arg             = 912
+Async: 1264 translating, 0 compiling, 1110 waiting (oldest 35 s), 0 pipelines, 1252 queued, 0 skipped/2s, 3/5 redrawn; workers 12/12 busy, 32.9 jobs/s, pump 16.0 ms (worst 6.1 ms, 66 applied, 0 backlog); stages: requested 2476, translating 1264, translated 1110 (failed 0), module-compiling 0 of 0 jobs, modules ready 0 (speculative 0, lost 0, failed 0), pipeline-compiling 0 of 0 jobs, pipelines ready 0 (failed 0), expired 0, wanted 0
+	 flip_arg             = 928
+@@T 44
+	 flip_arg             = 944
+	 flip_arg             = 960
+@@T 45
+Async: 1199 translating, 0 compiling, 1175 waiting (oldest 37 s), 0 pipelines, 1187 queued, 0 skipped/2s, 3/5 redrawn; workers 12/12 busy, 32.5 jobs/s, pump 10.4 ms (worst 4.0 ms, 65 applied, 0 backlog); stages: requested 2476, translating 1199, translated 1175 (failed 0), module-compiling 0 of 0 jobs, modules ready 0 (speculative 0, lost 0, failed 0), pipeline-compiling 0 of 0 jobs, pipelines ready 0 (failed 0), expired 0, wanted 0
+	 flip_arg             = 976
+	 flip_arg             = 992
+@@T 46
+	 flip_arg             = 1008
+	 flip_arg             = 1024
+@@T 47
+Async: 1147 translating, 0 compiling, 1227 waiting (oldest 39 s), 0 pipelines, 1135 queued, 0 skipped/2s, 3/5 redrawn; workers 12/12 busy, 25.7 jobs/s, pump 2.2 ms (worst 0.6 ms, 52 applied, 0 backlog); stages: requested 2476, translating 1147, translated 1227 (failed 0), module-compiling 0 of 0 jobs, modules ready 0 (speculative 0, lost 0, failed 0), pipeline-compiling 0 of 0 jobs, pipelines ready 0 (failed 0), expired 0, wanted 0
+	 flip_arg             = 1040
+	 flip_arg             = 1056
+@@T 48
+ShaderRecompiler PS translation end: hash = 0xaaaa000000000b54 outcome=emitted (async)
+ShaderRecompiler PS translation end: hash = 0xaaaa000000000b55 outcome=emitted (async)
+ShaderRecompiler VS translation end: hash = 0xaaaa000000000b57 outcome=emitted (async)
+	 flip_arg             = 1072
+	 flip_arg             = 1088
+@@T 49
+ShaderRecompiler PS translation end: hash = 0xaaaa000000000b71 outcome=emitted (async)
+ShaderRecompiler VS translation end: hash = 0xaaaa000000000b72 outcome=emitted (async)
+	 flip_arg             = 1104
+ShaderRecompiler PS translation end: hash = 0xaaaa000000000b79 outcome=emitted
+ShaderRecompiler PS translation end: hash = 0xaaaa000000000b7a outcome=emitted
+ShaderRecompiler PS translation end: hash = 0xaaaa000000000b7b outcome=emitted (async)
+[0mShaderRecompiler PS translation end: hash = 0xaaaa000000000b7c outcome=emitted (async)
+ShaderRecompiler PS translation end: hash = 0xaaaa000000000b7d outcome=emitted (async)
+ShaderRecompiler PS translation end: hash = 0xaaaa000000000b7e outcome=emitted (async)
+ShaderRecompiler VS translation end: hash = 0xaaaa000000000b83 outcome=emitted (async)
+ShaderRecompiler VS translation end: hash = 0xaaaa000000000b81 outcome=emitted (async)
+ShaderRecompiler VS translation end: hash = 0xaaaa000000000b80 outcome=emitted (async)
+ShaderRecompiler VS translation end: hash = 0xaaaa000000000b82 outcome=emitted (async)
+ShaderRecompiler VS translation end: hash = 0xaaaa000000000b7f outcome=emitted (async)
+	 flip_arg             = 1120
+@@T 50
+	 flip_arg             = 1136
+@@T 51
+	 flip_arg             = 1152
+Async: 1060 translating, 0 compiling, 1316 waiting (oldest 43 s), 0 pipelines, 1048 queued, 125 skipped/2s, 4/6 redrawn; workers 12/12 busy, 30.3 jobs/s, pump 2.3 ms (worst 0.4 ms, 61 applied, 0 backlog); stages: requested 2492, translating 1060, translated 1330 (failed 0), module-compiling 0 of 14 jobs, modules ready 14 (speculative 0, lost 0, failed 0), pipeline-compiling 0 of 8 jobs, pipelines ready 8 (failed 0), expired 0, wanted 1
+Async STALL: the render thread built 24 ms in 2 s (worst 15 ms): targets not yet redrawn 24 ms (2 shaders, 2 pipelines)
+ShaderRecompiler PS translation end: hash = 0xaaaa000000000b9f outcome=emitted (async)
+ShaderRecompiler VS translation end: hash = 0xaaaa000000000ba0 outcome=emitted (async)
+	 flip_arg             = 1168
+@@T 52
+	 flip_arg             = 1184
+	 flip_arg             = 1200
+@@T 53
+Async: 1008 translating, 0 compiling, 1366 waiting (oldest 45 s), 0 pipelines, 996 queued, 4 skipped/2s, 4/6 redrawn; workers 12/12 busy, 27.5 jobs/s, pump 5.9 ms (worst 2.7 ms, 55 applied, 0 backlog); stages: requested 2492, translating 1008, translated 1382 (failed 0), module-compiling 0 of 16 jobs, modules ready 16 (speculative 0, lost 0, failed 0), pipeline-compiling 0 of 9 jobs, pipelines ready 9 (failed 0), expired 0, wanted 0
+	 flip_arg             = 1216
+	 flip_arg             = 1232
+@@T 54
+	 flip_arg             = 1248
+	 flip_arg             = 1264
+@@T 55
+	 flip_arg             = 1280
+	 flip_arg             = 1296
+@@T 56
+	 flip_arg             = 1312
+	 flip_arg             = 1328
+@@T 57
+Async: 937 translating, 0 compiling, 1437 waiting (oldest 49 s), 0 pipelines, 925 queued, 0 skipped/2s, 3/6 redrawn; workers 12/12 busy, 19.0 jobs/s, pump 7.9 ms (worst 2.8 ms, 38 applied, 0 backlog); stages: requested 2492, translating 937, translated 1453 (failed 0), module-compiling 0 of 16 jobs, modules ready 16 (speculative 0, lost 0, failed 0), pipeline-compiling 0 of 9 jobs, pipelines ready 9 (failed 0), expired 0, wanted 0
+	 flip_arg             = 1344
+	 flip_arg             = 1360
+@@T 58
+	 flip_arg             = 1376
+@@T 59
+	 flip_arg             = 1392
+	 flip_arg             = 1408
+@@T 60
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000010f9 IR TranslateProgram blocks=920 elapsed_ms=148
+	 flip_arg             = 1424
+	 flip_arg             = 1440
+@@T 61
+Async: 863 translating, 0 compiling, 1511 waiting (oldest 53 s), 0 pipelines, 851 queued, 0 skipped/2s, 3/6 redrawn; workers 12/12 busy, 19.4 jobs/s, pump 7.1 ms (worst 4.6 ms, 39 applied, 0 backlog); stages: requested 2492, translating 863, translated 1527 (failed 0), module-compiling 0 of 16 jobs, modules ready 16 (speculative 0, lost 0, failed 0), pipeline-compiling 0 of 9 jobs, pipelines ready 9 (failed 0), expired 0, wanted 0
+	 flip_arg             = 1456
+	 flip_arg             = 1472
+@@T 62
+	 flip_arg             = 1488
+	 flip_arg             = 1504
+@@T 63
+	 flip_arg             = 1520
+	 flip_arg             = 1536
+@@T 64
+	 flip_arg             = 1552
+@@T 65
+	 flip_arg             = 1568
+Async: 800 translating, 0 compiling, 1574 waiting (oldest 57 s), 0 pipelines, 788 queued, 0 skipped/2s, 3/6 redrawn; workers 12/12 busy, 15.5 jobs/s, pump 1.8 ms (worst 0.9 ms, 31 applied, 0 backlog); stages: requested 2492, translating 800, translated 1590 (failed 0), module-compiling 0 of 16 jobs, modules ready 16 (speculative 0, lost 0, failed 0), pipeline-compiling 0 of 9 jobs, pipelines ready 9 (failed 0), expired 0, wanted 0
+	 flip_arg             = 1584
+@@T 66
+	 flip_arg             = 1600
+	 flip_arg             = 1616
+@@T 67
+	 flip_arg             = 1632
+Async: 775 translating, 0 compiling, 1599 waiting (oldest 59 s), 0 pipelines, 763 queued, 0 skipped/2s, 3/6 redrawn; workers 12/12 busy, 12.4 jobs/s, pump 18.2 ms (worst 6.0 ms, 25 applied, 0 backlog); stages: requested 2492, translating 775, translated 1615 (failed 0), module-compiling 0 of 16 jobs, modules ready 16 (speculative 0, lost 0, failed 0), pipeline-compiling 0 of 9 jobs, pipelines ready 9 (failed 0), expired 0, wanted 0
+	 flip_arg             = 1648
+@@T 68
+	 flip_arg             = 1664
+	 flip_arg             = 1680
+@@T 69
+Async: 742 translating, 0 compiling, 1542 waiting (oldest 60 s), 0 pipelines, 731 queued, 0 skipped/2s, 3/6 redrawn; workers 12/12 busy, 16.4 jobs/s, pump 0.8 ms (worst 0.1 ms, 33 applied, 0 backlog); stages: requested 2492, translating 742, translated 1648 (failed 0), module-compiling 0 of 16 jobs, modules ready 16 (speculative 0, lost 0, failed 0), pipeline-compiling 0 of 9 jobs, pipelines ready 9 (failed 0), expired 90, wanted 0
+	 flip_arg             = 1696
+	 flip_arg             = 1712
+@@T 70
+	 flip_arg             = 1728
+	 flip_arg             = 1744
+@@T 71
+	 flip_arg             = 1760
+	 flip_arg             = 1776
+@@T 72
+	 flip_arg             = 1792
+@@T 73
+	 flip_arg             = 1808
+Async: 666 translating, 0 compiling, 1477 waiting (oldest 60 s), 0 pipelines, 655 queued, 0 skipped/2s, 3/6 redrawn; workers 12/12 busy, 23.5 jobs/s, pump 10.2 ms (worst 2.6 ms, 46 applied, 0 backlog); stages: requested 2492, translating 666, translated 1724 (failed 0), module-compiling 0 of 16 jobs, modules ready 16 (speculative 0, lost 0, failed 0), pipeline-compiling 0 of 9 jobs, pipelines ready 9 (failed 0), expired 231, wanted 0
+	 flip_arg             = 1824
+@@T 74
+	 flip_arg             = 1840
+	 flip_arg             = 1856
+@@T 75
+	 flip_arg             = 1872
+	 flip_arg             = 1888
+@@T 76
+	 flip_arg             = 1904
+	 flip_arg             = 1920
+@@T 77
+Async: 575 translating, 0 compiling, 1396 waiting (oldest 60 s), 0 pipelines, 564 queued, 0 skipped/2s, 3/6 redrawn; workers 12/12 busy, 32.2 jobs/s, pump 21.6 ms (worst 6.0 ms, 64 applied, 0 backlog); stages: requested 2492, translating 575, translated 1815 (failed 0), module-compiling 0 of 16 jobs, modules ready 16 (speculative 0, lost 0, failed 0), pipeline-compiling 0 of 9 jobs, pipelines ready 9 (failed 0), expired 403, wanted 0
+	 flip_arg             = 1936
+	 flip_arg             = 1952
+@@T 78
+	 flip_arg             = 1968
+[0mShaderRecompiler CS phase end: hash = 0xaaaa000000001615 IR TranslateProgram blocks=761 elapsed_ms=100
+	 flip_arg             = 1984
+@@T 79
+Async: 469 translating, 0 compiling, 1402 waiting (oldest 60 s), 0 pipelines, 459 queued, 0 skipped/2s, 3/6 redrawn; workers 12/12 busy, 52.8 jobs/s, pump 23.2 ms (worst 3.9 ms, 106 applied, 0 backlog); stages: requested 2492, translating 469, translated 1921 (failed 0), module-compiling 0 of 16 jobs, modules ready 16 (speculative 0, lost 0, failed 0), pipeline-compiling 0 of 9 jobs, pipelines ready 9 (failed 0), expired 503, wanted 0
+	 flip_arg             = 2000
+@@T 80
+	 flip_arg             = 2016
+	 flip_arg             = 2032
+@@T 81
+	 flip_arg             = 2048
+Async: 360 translating, 0 compiling, 1410 waiting (oldest 60 s), 0 pipelines, 349 queued, 0 skipped/2s, 3/6 redrawn; workers 12/12 busy, 54.8 jobs/s, pump 29.7 ms (worst 7.0 ms, 109 applied, 0 backlog); stages: requested 2492, translating 360, translated 2030 (failed 0), module-compiling 0 of 16 jobs, modules ready 16 (speculative 0, lost 0, failed 0), pipeline-compiling 0 of 9 jobs, pipelines ready 9 (failed 0), expired 604, wanted 0
+	 flip_arg             = 2064
+@@T 82
+	 flip_arg             = 2080
+	 flip_arg             = 2096
+@@T 83
+	 flip_arg             = 2112
+Async: 285 translating, 0 compiling, 1430 waiting (oldest 59 s), 0 pipelines, 274 queued, 0 skipped/2s, 3/6 redrawn; workers 12/12 busy, 38.0 jobs/s, pump 14.3 ms (worst 4.0 ms, 75 applied, 0 backlog); stages: requested 2492, translating 285, translated 2105 (failed 0), module-compiling 0 of 16 jobs, modules ready 16 (speculative 0, lost 0, failed 0), pipeline-compiling 0 of 9 jobs, pipelines ready 9 (failed 0), expired 659, wanted 0
+	 flip_arg             = 2128
+@@T 84
+	 flip_arg             = 2144
+	 flip_arg             = 2160
+@@T 85
+ShaderRecompiler CS phase end: hash = 0xaaaa000000001907 IR TranslateProgram blocks=875 elapsed_ms=143
+	 flip_arg             = 2176
+ShaderRecompiler CS phase end: hash = 0xaaaa000000001915 IR TranslateProgram blocks=858 elapsed_ms=111
+	 flip_arg             = 2192
+@@T 86
+	 flip_arg             = 2208
+	 flip_arg             = 2224
+@@T 87
+Async: 239 translating, 0 compiling, 1399 waiting (oldest 60 s), 0 pipelines, 228 queued, 0 skipped/2s, 3/6 redrawn; workers 12/12 busy, 16.9 jobs/s, pump 23.4 ms (worst 8.9 ms, 33 applied, 0 backlog); stages: requested 2492, translating 239, translated 2151 (failed 0), module-compiling 0 of 16 jobs, modules ready 16 (speculative 0, lost 0, failed 0), pipeline-compiling 0 of 9 jobs, pipelines ready 9 (failed 0), expired 736, wanted 0
+	 flip_arg             = 2240
+@@T 88
+	 flip_arg             = 2256
+	 flip_arg             = 2272
+@@T 89
+	 flip_arg             = 2288
+Async: 212 translating, 0 compiling, 1397 waiting (oldest 60 s), 0 pipelines, 201 queued, 0 skipped/2s, 3/6 redrawn; workers 12/12 busy, 14.0 jobs/s, pump 3.1 ms (worst 2.1 ms, 27 applied, 0 backlog); stages: requested 2492, translating 212, translated 2178 (failed 0), module-compiling 0 of 16 jobs, modules ready 16 (speculative 0, lost 0, failed 0), pipeline-compiling 0 of 9 jobs, pipelines ready 9 (failed 0), expired 765, wanted 0
+	 flip_arg             = 2304
+@@T 90
+	 flip_arg             = 2320
+	 flip_arg             = 2336
+@@T 91
+	 flip_arg             = 2352
+Async: 184 translating, 0 compiling, 1382 waiting (oldest 60 s), 0 pipelines, 173 queued, 0 skipped/2s, 3/6 redrawn; workers 12/12 busy, 14.5 jobs/s, pump 5.7 ms (worst 1.4 ms, 28 applied, 0 backlog); stages: requested 2492, translating 184, translated 2206 (failed 0), module-compiling 0 of 16 jobs, modules ready 16 (speculative 0, lost 0, failed 0), pipeline-compiling 0 of 9 jobs, pipelines ready 9 (failed 0), expired 808, wanted 0
+	 flip_arg             = 2368
+@@T 92
+	 flip_arg             = 2384
+	 flip_arg             = 2400
+@@T 93
+Async: 136 translating, 0 compiling, 1399 waiting (oldest 60 s), 0 pipelines, 125 queued, 0 skipped/2s, 3/6 redrawn; workers 12/12 busy, 24.5 jobs/s, pump 8.2 ms (worst 3.0 ms, 48 applied, 0 backlog); stages: requested 2492, translating 136, translated 2254 (failed 0), module-compiling 0 of 16 jobs, modules ready 16 (speculative 0, lost 0, failed 0), pipeline-compiling 0 of 9 jobs, pipelines ready 9 (failed 0), expired 839, wanted 0
+	 flip_arg             = 2416
+	 flip_arg             = 2432
+@@T 94
+	 flip_arg             = 2448
+	 flip_arg             = 2464
+@@T 95
+Async: 115 translating, 0 compiling, 1361 waiting (oldest 60 s), 0 pipelines, 104 queued, 0 skipped/2s, 3/6 redrawn; workers 12/12 busy, 11.0 jobs/s, pump 16.6 ms (worst 4.3 ms, 21 applied, 0 backlog); stages: requested 2492, translating 115, translated 2275 (failed 0), module-compiling 0 of 16 jobs, modules ready 16 (speculative 0, lost 0, failed 0), pipeline-compiling 0 of 9 jobs, pipelines ready 9 (failed 0), expired 898, wanted 0
+	 flip_arg             = 2480
+@@T 96
+	 flip_arg             = 2496
+	 flip_arg             = 2512
+@@T 97
+	 flip_arg             = 2528
+Async: 95 translating, 0 compiling, 1329 waiting (oldest 60 s), 0 pipelines, 84 queued, 0 skipped/2s, 3/6 redrawn; workers 12/12 busy, 10.5 jobs/s, pump 11.4 ms (worst 4.0 ms, 20 applied, 0 backlog); stages: requested 2492, translating 95, translated 2295 (failed 0), module-compiling 0 of 16 jobs, modules ready 16 (speculative 0, lost 0, failed 0), pipeline-compiling 0 of 9 jobs, pipelines ready 9 (failed 0), expired 950, wanted 0
+	 flip_arg             = 2544
+@@T 98
+	 flip_arg             = 2560
+[store] written=29 pending=0 failed=0
+	 flip_arg             = 2576
+@@T 99
+	 flip_arg             = 2592
+Async: 73 translating, 0 compiling, 1309 waiting (oldest 60 s), 0 pipelines, 62 queued, 0 skipped/2s, 3/6 redrawn; workers 12/12 busy, 11.5 jobs/s, pump 9.1 ms (worst 3.9 ms, 22 applied, 0 backlog); stages: requested 2492, translating 73, translated 2317 (failed 0), module-compiling 0 of 16 jobs, modules ready 16 (speculative 0, lost 0, failed 0), pipeline-compiling 0 of 9 jobs, pipelines ready 9 (failed 0), expired 992, wanted 0
+	 flip_arg             = 2608
+@@T 100
+ShaderRecompiler CS phase end: hash = 0xaaaa000000001a94 IR TranslateProgram blocks=933 elapsed_ms=102
+	 flip_arg             = 2624
+	 flip_arg             = 2640
+@@T 101
+Async: 52 translating, 0 compiling, 1267 waiting (oldest 60 s), 0 pipelines, 41 queued, 0 skipped/2s, 3/6 redrawn; workers 12/12 busy, 10.9 jobs/s, pump 17.3 ms (worst 6.8 ms, 21 applied, 0 backlog); stages: requested 2492, translating 52, translated 2338 (failed 0), module-compiling 0 of 16 jobs, modules ready 16 (speculative 0, lost 0, failed 0), pipeline-compiling 0 of 9 jobs, pipelines ready 9 (failed 0), expired 1055, wanted 0
+	 flip_arg             = 2656
+	 flip_arg             = 2672
+@@T 102
+	 flip_arg             = 2688
+ShaderRecompiler CS phase end: hash = 0xaaaa000000001af4 IR TranslateProgram blocks=932 elapsed_ms=125
+	 flip_arg             = 2704
+@@T 103
+	 flip_arg             = 2720
+@@T 104
+	 flip_arg             = 2736
+	 flip_arg             = 2752
+@@T 105
+	 flip_arg             = 2768
+Async: 1 translating, 0 compiling, 1196 waiting (oldest 60 s), 0 pipelines, 0 queued, 0 skipped/2s, 3/6 redrawn; workers 2/12 busy, 10.0 jobs/s, pump 2.2 ms (worst 1.3 ms, 19 applied, 0 backlog); stages: requested 2492, translating 1, translated 2389 (failed 0), module-compiling 0 of 16 jobs, modules ready 16 (speculative 0, lost 0, failed 0), pipeline-compiling 0 of 9 jobs, pipelines ready 9 (failed 0), expired 1177, wanted 0
+	 flip_arg             = 2784
+@@T 106
+	 flip_arg             = 2800
+	 flip_arg             = 2816
+@@T 107
+	 flip_arg             = 2832
+Async: 0 translating, 0 compiling, 1142 waiting (oldest 60 s), 0 pipelines, 0 queued, 0 skipped/2s, 3/6 redrawn; workers 1/12 busy, 1.0 jobs/s, pump 0.1 ms (worst 0.1 ms, 1 applied, 0 backlog); stages: requested 2492, translating 0, translated 2390 (failed 0), module-compiling 0 of 16 jobs, modules ready 16 (speculative 0, lost 0, failed 0), pipeline-compiling 0 of 9 jobs, pipelines ready 9 (failed 0), expired 1232, wanted 0
+	 flip_arg             = 2848
+@@T 108
+	 flip_arg             = 2864
+	 flip_arg             = 2880
+@@T 109
+Async: 0 translating, 0 compiling, 1087 waiting (oldest 60 s), 0 pipelines, 0 queued, 0 skipped/2s, 3/6 redrawn; workers 1/12 busy, 0.5 jobs/s, pump 0.0 ms (worst 0.0 ms, 0 applied, 0 backlog); stages: requested 2492, translating 0, translated 2390 (failed 0), module-compiling 0 of 16 jobs, modules ready 16 (speculative 0, lost 0, failed 0), pipeline-compiling 0 of 9 jobs, pipelines ready 9 (failed 0), expired 1287, wanted 0
+	 flip_arg             = 2896
+	 flip_arg             = 2912
+@@T 110
+	 flip_arg             = 2928
+@@T 111
+	 flip_arg             = 2944
+Async: 0 translating, 0 compiling, 1053 waiting (oldest 60 s), 0 pipelines, 0 queued, 0 skipped/2s, 3/6 redrawn; workers 1/12 busy, 0.5 jobs/s, pump 0.0 ms (worst 0.0 ms, 0 applied, 0 backlog); stages: requested 2492, translating 0, translated 2390 (failed 0), module-compiling 0 of 16 jobs, modules ready 16 (speculative 0, lost 0, failed 0), pipeline-compiling 0 of 9 jobs, pipelines ready 9 (failed 0), expired 1321, wanted 0
+	 flip_arg             = 2960
+@@T 112
+	 flip_arg             = 2976
+	 flip_arg             = 2992
+@@T 113
+	 flip_arg             = 3008
+	 flip_arg             = 3024
+@@T 114
+	 flip_arg             = 3040
+	 flip_arg             = 3056
+@@T 115
+	 flip_arg             = 3072
+Async: 0 translating, 0 compiling, 970 waiting (oldest 60 s), 0 pipelines, 0 queued, 0 skipped/2s, 3/6 redrawn; workers 1/12 busy, 0.5 jobs/s, pump 0.0 ms (worst 0.0 ms, 0 applied, 0 backlog); stages: requested 2492, translating 0, translated 2390 (failed 0), module-compiling 0 of 16 jobs, modules ready 16 (speculative 0, lost 0, failed 0), pipeline-compiling 0 of 9 jobs, pipelines ready 9 (failed 0), expired 1404, wanted 0
+	 flip_arg             = 3088
+@@T 116
+	 flip_arg             = 3104
+	 flip_arg             = 3120
+@@T 117
+Async: 0 translating, 0 compiling, 935 waiting (oldest 60 s), 0 pipelines, 1 queued, 0 skipped/2s, 3/6 redrawn; workers 0/12 busy, 0.5 jobs/s, pump 0.0 ms (worst 0.0 ms, 0 applied, 0 backlog); stages: requested 2492, translating 0, translated 2390 (failed 0), module-compiling 0 of 16 jobs, modules ready 16 (speculative 0, lost 0, failed 0), pipeline-compiling 0 of 9 jobs, pipelines ready 9 (failed 0), expired 1439, wanted 0
+	 flip_arg             = 3136
+	 flip_arg             = 3152
+@@T 118
+	 flip_arg             = 3168
+@@T 119
+@@T 120
+@@T 121
+@@T 122
+@@T 123
+	 flip_arg             = 3184
+	 flip_arg             = 3200
+@@T 124
+	 flip_arg             = 3216
+	 flip_arg             = 3232
+@@T 125
+Async: 0 translating, 0 compiling, 798 waiting (oldest 60 s), 0 pipelines, 0 queued, 0 skipped/2s, 3/8 redrawn; workers 2/12 busy, 0.0 jobs/s, pump 0.0 ms (worst 0.0 ms, 0 applied, 0 backlog); stages: requested 2492, translating 0, translated 2390 (failed 0), module-compiling 0 of 16 jobs, modules ready 16 (speculative 0, lost 0, failed 0), pipeline-compiling 0 of 9 jobs, pipelines ready 9 (failed 0), expired 1576, wanted 0
+	 flip_arg             = 3248
+	 flip_arg             = 3264
+@@T 126
+	 flip_arg             = 3280
+@@T 127
+	 flip_arg             = 3296
+Async: 0 translating, 0 compiling, 775 waiting (oldest 60 s), 0 pipelines, 0 queued, 0 skipped/2s, 3/8 redrawn; workers 1/12 busy, 1.0 jobs/s, pump 0.0 ms (worst 0.0 ms, 0 applied, 0 backlog); stages: requested 2492, translating 0, translated 2390 (failed 0), module-compiling 0 of 16 jobs, modules ready 16 (speculative 0, lost 0, failed 0), pipeline-compiling 0 of 9 jobs, pipelines ready 9 (failed 0), expired 1599, wanted 0
+	 flip_arg             = 3312
+@@T 128
+	 flip_arg             = 3328
+[store] written=29 pending=0 failed=0
+	 flip_arg             = 3344
+@@T 129
+	 flip_arg             = 3360
+	 flip_arg             = 3376
+@@T 130
+	 flip_arg             = 3392
+	 flip_arg             = 3408
+@@T 131
+Async: 0 translating, 0 compiling, 712 waiting (oldest 60 s), 0 pipelines, 0 queued, 0 skipped/2s, 3/8 redrawn; workers 1/12 busy, 0.5 jobs/s, pump 0.0 ms (worst 0.0 ms, 0 applied, 0 backlog); stages: requested 2492, translating 0, translated 2390 (failed 0), module-compiling 0 of 16 jobs, modules ready 16 (speculative 0, lost 0, failed 0), pipeline-compiling 0 of 9 jobs, pipelines ready 9 (failed 0), expired 1662, wanted 0
+	 flip_arg             = 3424
+	 flip_arg             = 3440
+@@T 132
+	 flip_arg             = 3456
+	 flip_arg             = 3472
+@@T 133
+Async: 0 translating, 0 compiling, 666 waiting (oldest 60 s), 0 pipelines, 0 queued, 0 skipped/2s, 3/8 redrawn; workers 1/12 busy, 0.5 jobs/s, pump 0.0 ms (worst 0.0 ms, 0 applied, 0 backlog); stages: requested 2492, translating 0, translated 2390 (failed 0), module-compiling 0 of 16 jobs, modules ready 16 (speculative 0, lost 0, failed 0), pipeline-compiling 0 of 9 jobs, pipelines ready 9 (failed 0), expired 1708, wanted 0
+	 flip_arg             = 3488
+	 flip_arg             = 3504
+@@T 134
+	 flip_arg             = 3520
+@@T 135
+	 flip_arg             = 3536
+	 flip_arg             = 3552
+@@T 136
+	 flip_arg             = 3568
+	 flip_arg             = 3584
+@@T 137
+	 flip_arg             = 3600
+Async: 0 translating, 0 compiling, 575 waiting (oldest 60 s), 0 pipelines, 0 queued, 0 skipped/2s, 3/8 redrawn; workers 1/12 busy, 0.5 jobs/s, pump 0.0 ms (worst 0.0 ms, 0 applied, 0 backlog); stages: requested 2492, translating 0, translated 2390 (failed 0), module-compiling 0 of 16 jobs, modules ready 16 (speculative 0, lost 0, failed 0), pipeline-compiling 0 of 9 jobs, pipelines ready 9 (failed 0), expired 1799, wanted 0
+	 flip_arg             = 3616
+@@T 138
+	 flip_arg             = 3632
+	 flip_arg             = 3648
+ShaderRecompiler PS translation end: hash = 0xaaaa0000000030d4 outcome=emitted
+@@T 139
+@@T 140
+Async: 0 translating, 0 compiling, 428 waiting (oldest 60 s), 0 pipelines, 0 queued, 0 skipped/2s, 3/9 redrawn; workers 1/12 busy, 0.4 jobs/s, pump 0.0 ms (worst 0.0 ms, 0 applied, 0 backlog); stages: requested 2492, translating 0, translated 2390 (failed 0), module-compiling 0 of 16 jobs, modules ready 16 (speculative 0, lost 0, failed 0), pipeline-compiling 0 of 9 jobs, pipelines ready 9 (failed 0), expired 1946, wanted 0
+Async STALL: the render thread built 145 ms in 2 s (worst 108 ms): targets not yet redrawn 145 ms (1 shaders, 1 pipelines)
+	 flip_arg             = 3664
+	 flip_arg             = 3680
+@@T 141
+	 flip_arg             = 3696
+	 flip_arg             = 3712
+@@T 142
+Async: 0 translating, 0 compiling, 325 waiting (oldest 60 s), 0 pipelines, 0 queued, 0 skipped/2s, 3/9 redrawn; workers 1/12 busy, 0.5 jobs/s, pump 0.0 ms (worst 0.0 ms, 0 applied, 0 backlog); stages: requested 2492, translating 0, translated 2390 (failed 0), module-compiling 0 of 16 jobs, modules ready 16 (speculative 0, lost 0, failed 0), pipeline-compiling 0 of 9 jobs, pipelines ready 9 (failed 0), expired 2049, wanted 0
+	 flip_arg             = 3728
+@@T 143
+	 flip_arg             = 3744
+	 flip_arg             = 3760
+@@T 144
+Async: 0 translating, 0 compiling, 284 waiting (oldest 60 s), 0 pipelines, 1 queued, 0 skipped/2s, 3/9 redrawn; workers 0/12 busy, 0.5 jobs/s, pump 0.1 ms (worst 0.0 ms, 0 applied, 0 backlog); stages: requested 2492, translating 0, translated 2390 (failed 0), module-compiling 0 of 16 jobs, modules ready 16 (speculative 0, lost 0, failed 0), pipeline-compiling 0 of 9 jobs, pipelines ready 9 (failed 0), expired 2090, wanted 0
+	 flip_arg             = 3776
+	 flip_arg             = 3792
+@@T 145
+	 flip_arg             = 3808
+	 flip_arg             = 3824
+@@T 146
+Async: 0 translating, 0 compiling, 261 waiting (oldest 60 s), 0 pipelines, 1 queued, 0 skipped/2s, 3/9 redrawn; workers 1/12 busy, 0.0 jobs/s, pump 0.1 ms (worst 0.0 ms, 0 applied, 0 backlog); stages: requested 2492, translating 0, translated 2390 (failed 0), module-compiling 0 of 16 jobs, modules ready 16 (speculative 0, lost 0, failed 0), pipeline-compiling 0 of 9 jobs, pipelines ready 9 (failed 0), expired 2113, wanted 0
+	 flip_arg             = 3840
+	 flip_arg             = 3856
+@@T 147
+	 flip_arg             = 3872
+	 flip_arg             = 3888
+@@T 148
+Async: 0 translating, 0 compiling, 229 waiting (oldest 60 s), 0 pipelines, 1 queued, 0 skipped/2s, 3/9 redrawn; workers 0/12 busy, 1.0 jobs/s, pump 0.1 ms (worst 0.0 ms, 0 applied, 0 backlog); stages: requested 2492, translating 0, translated 2390 (failed 0), module-compiling 0 of 16 jobs, modules ready 16 (speculative 0, lost 0, failed 0), pipeline-compiling 0 of 9 jobs, pipelines ready 9 (failed 0), expired 2145, wanted 0
+	 flip_arg             = 3904
+@@T 149
+	 flip_arg             = 3920
+	 flip_arg             = 3936
+@@T 150
+Async: 0 translating, 0 compiling, 206 waiting (oldest 60 s), 0 pipelines, 0 queued, 0 skipped/2s, 3/9 redrawn; workers 1/12 busy, 0.5 jobs/s, pump 0.1 ms (worst 0.0 ms, 0 applied, 0 backlog); stages: requested 2492, translating 0, translated 2390 (failed 0), module-compiling 0 of 16 jobs, modules ready 16 (speculative 0, lost 0, failed 0), pipeline-compiling 0 of 9 jobs, pipelines ready 9 (failed 0), expired 2168, wanted 0
+	 flip_arg             = 3952
+	 flip_arg             = 3968
+@@T 151
+	 flip_arg             = 3984
+	 flip_arg             = 4000
+@@T 152
+Async: 0 translating, 0 compiling, 180 waiting (oldest 60 s), 0 pipelines, 1 queued, 0 skipped/2s, 3/9 redrawn; workers 0/12 busy, 0.5 jobs/s, pump 0.1 ms (worst 0.0 ms, 0 applied, 0 backlog); stages: requested 2492, translating 0, translated 2390 (failed 0), module-compiling 0 of 16 jobs, modules ready 16 (speculative 0, lost 0, failed 0), pipeline-compiling 0 of 9 jobs, pipelines ready 9 (failed 0), expired 2194, wanted 0
+	 flip_arg             = 4016
+	 flip_arg             = 4032
+@@T 153
+	 flip_arg             = 4048
+	 flip_arg             = 4064
+@@T 154
+Async: 0 translating, 0 compiling, 127 waiting (oldest 60 s), 0 pipelines, 1 queued, 0 skipped/2s, 3/9 redrawn; workers 0/12 busy, 0.5 jobs/s, pump 0.2 ms (worst 0.1 ms, 0 applied, 0 backlog); stages: requested 2492, translating 0, translated 2390 (failed 0), module-compiling 0 of 16 jobs, modules ready 16 (speculative 0, lost 0, failed 0), pipeline-compiling 0 of 9 jobs, pipelines ready 9 (failed 0), expired 2247, wanted 0
+	 flip_arg             = 4080
+	 flip_arg             = 4096
+@@T 155
+	 flip_arg             = 4112
+	 flip_arg             = 4128
+@@T 156
+Async: 0 translating, 0 compiling, 108 waiting (oldest 60 s), 0 pipelines, 1 queued, 0 skipped/2s, 3/9 redrawn; workers 1/12 busy, 0.0 jobs/s, pump 0.1 ms (worst 0.0 ms, 0 applied, 0 backlog); stages: requested 2492, translating 0, translated 2390 (failed 0), module-compiling 0 of 16 jobs, modules ready 16 (speculative 0, lost 0, failed 0), pipeline-compiling 0 of 9 jobs, pipelines ready 9 (failed 0), expired 2266, wanted 0
+	 flip_arg             = 4144
+@@T 157
+	 flip_arg             = 4160
+	 flip_arg             = 4176
+@@T 158
+Async: 0 translating, 0 compiling, 87 waiting (oldest 60 s), 0 pipelines, 1 queued, 0 skipped/2s, 3/9 redrawn; workers 0/12 busy, 1.0 jobs/s, pump 0.1 ms (worst 0.0 ms, 0 applied, 0 backlog); stages: requested 2492, translating 0, translated 2390 (failed 0), module-compiling 0 of 16 jobs, modules ready 16 (speculative 0, lost 0, failed 0), pipeline-compiling 0 of 9 jobs, pipelines ready 9 (failed 0), expired 2287, wanted 0
+	 flip_arg             = 4192
+[store] written=31 pending=0 failed=0
+	 flip_arg             = 4208
+@@T 159
+	 flip_arg             = 4224
+	 flip_arg             = 4240
+@@T 160
+Async: 0 translating, 0 compiling, 66 waiting (oldest 60 s), 0 pipelines, 1 queued, 0 skipped/2s, 3/9 redrawn; workers 1/12 busy, 0.0 jobs/s, pump 0.1 ms (worst 0.0 ms, 0 applied, 0 backlog); stages: requested 2492, translating 0, translated 2390 (failed 0), module-compiling 0 of 16 jobs, modules ready 16 (speculative 0, lost 0, failed 0), pipeline-compiling 0 of 9 jobs, pipelines ready 9 (failed 0), expired 2308, wanted 0
+	 flip_arg             = 4256
+	 flip_arg             = 4272
+@@T 161
+	 flip_arg             = 4288
+	 flip_arg             = 4304
+@@T 162
+Async: 0 translating, 0 compiling, 36 waiting (oldest 60 s), 0 pipelines, 1 queued, 0 skipped/2s, 3/9 redrawn; workers 0/12 busy, 1.0 jobs/s, pump 0.1 ms (worst 0.0 ms, 0 applied, 0 backlog); stages: requested 2492, translating 0, translated 2390 (failed 0), module-compiling 0 of 16 jobs, modules ready 16 (speculative 0, lost 0, failed 0), pipeline-compiling 0 of 9 jobs, pipelines ready 9 (failed 0), expired 2338, wanted 0
+	 flip_arg             = 4320
+	 flip_arg             = 4336
+@@T 163
+	 flip_arg             = 4352
+	 flip_arg             = 4368
+@@T 164
+Async: 0 translating, 0 compiling, 10 waiting (oldest 60 s), 0 pipelines, 1 queued, 0 skipped/2s, 3/9 redrawn; workers 0/12 busy, 0.5 jobs/s, pump 0.1 ms (worst 0.0 ms, 0 applied, 0 backlog); stages: requested 2492, translating 0, translated 2390 (failed 0), module-compiling 0 of 16 jobs, modules ready 16 (speculative 0, lost 0, failed 0), pipeline-compiling 0 of 9 jobs, pipelines ready 9 (failed 0), expired 2364, wanted 0
+	 flip_arg             = 4384
+@@T 165
+	 flip_arg             = 4400
+	 flip_arg             = 4416
+@@T 166
+Async: idle
+	 flip_arg             = 4432
+	 flip_arg             = 4448
+@@T 167
+	 flip_arg             = 4464
+	 flip_arg             = 4480
+@@T 168
+	 flip_arg             = 4496
+	 flip_arg             = 4512
+@@T 169
+	 flip_arg             = 4528
+	 flip_arg             = 4544
+@@T 170
+	 flip_arg             = 4560
+	 flip_arg             = 4576
+@@T 171
+	 flip_arg             = 4592
+	 flip_arg             = 4608
+@@T 172
+	 flip_arg             = 4624
+@@T 173
+	 flip_arg             = 4640
+	 flip_arg             = 4656
+@@T 174
+	 flip_arg             = 4672
+	 flip_arg             = 4688
+@@T 175
+	 flip_arg             = 4704
+	 flip_arg             = 4720
+@@T 176
+	 flip_arg             = 4736
+@@T 177
+	 flip_arg             = 4752
+	 flip_arg             = 4768
+@@T 178
+	 flip_arg             = 4784
+@@T 179
+ShaderRecompiler PS translation end: hash = 0xaaaa00000000343c outcome=emitted
+@@T 180
+@@T 181
+Async STALL: the render thread built 149 ms in 2 s (worst 103 ms): targets not yet redrawn 149 ms (1 shaders, 1 pipelines)
+@@T 182
+@@T 183
+@@T 184
+ShaderRecompiler PS translation end: hash = 0xaaaa000000003508 outcome=emitted
+ShaderRecompiler CS translation end: hash = 0xaaaa000000003509 outcome=emitted (async)
+@@T 185
+Async: 0 translating, 0 compiling, 0 waiting (oldest 0 s), 1 pipelines, 0 queued, 0 skipped/2s, 3/12 redrawn; workers 1/12 busy, 0.9 jobs/s, pump 0.2 ms (worst 0.1 ms, 2 applied, 0 backlog); stages: requested 2493, translating 0, translated 2391 (failed 0), module-compiling 0 of 17 jobs, modules ready 17 (speculative 0, lost 0, failed 0), pipeline-compiling 1 of 10 jobs, pipelines ready 9 (failed 0), expired 2374, wanted 0
+Async STALL: the render thread built 29 ms in 2 s (worst 24 ms): targets not yet redrawn 29 ms (1 shaders, 1 pipelines)
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000143e CFG BuildGraph blocks=27 loops=0 back_edges=0 elapsed_ms=106
+@@T 186
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000143e CFG Structurize blocks=41 loops=0 elapsed_ms=248
+ShaderRecompiler CS phase end: hash = 0xaaaa00000000143e IR TranslateProgram blocks=42 elapsed_ms=379
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000015ea CFG Structurize blocks=66 loops=2 elapsed_ms=236
+ShaderRecompiler CS translation end: hash = 0xaaaa00000000143e outcome=emitted (async)
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000015ea IR TranslateProgram blocks=67 elapsed_ms=353
+ShaderRecompiler CS phase end: hash = 0xaaaa000000003869 CFG BuildGraph blocks=72 loops=0 back_edges=0 elapsed_ms=190
+ShaderRecompiler CS phase end: hash = 0xaaaa000000003869 CFG Structurize blocks=110 loops=0 elapsed_ms=249
+ShaderRecompiler CS phase end: hash = 0xaaaa000000003869 IR TranslateProgram blocks=111 elapsed_ms=265
+ShaderRecompiler CS translation end: hash = 0xaaaa000000003869 outcome=emitted (async)
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000015ea SPIR-V EmitProgram words=88849 wave_size=32 elapsed_ms=419
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000015ea outcome=emitted (async)
+@@T 187
+Async: 0 translating, 1 compiling, 0 waiting (oldest 0 s), 1 pipelines, 0 queued, 0 skipped/2s, 3/24 redrawn; workers 2/12 busy, 5.0 jobs/s, pump 3.2 ms (worst 1.2 ms, 10 applied, 0 backlog); stages: requested 2497, translating 0, translated 2395 (failed 0), module-compiling 1 of 21 jobs, modules ready 20 (speculative 0, lost 0, failed 0), pipeline-compiling 1 of 13 jobs, pipelines ready 12 (failed 0), expired 2374, wanted 1
+ShaderRecompiler CS phase end: hash = 0xaaaa000000003869 SPIR-V EmitProgram words=32712 wave_size=32 elapsed_ms=423
+ShaderRecompiler CS translation end: hash = 0xaaaa000000003869 outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa000000003869 outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa00000000143f outcome=emitted (async)
+ShaderRecompiler CS phase end: hash = 0xaaaa000000001417 CFG BuildGraph blocks=83 loops=0 back_edges=0 elapsed_ms=140
+ShaderRecompiler CS translation end: hash = 0xaaaa000000003883 outcome=emitted (async)
+ShaderRecompiler CS phase end: hash = 0xaaaa000000001417 CFG Structurize blocks=123 loops=0 elapsed_ms=360
+ShaderRecompiler CS phase end: hash = 0xaaaa000000001417 IR TranslateProgram blocks=124 elapsed_ms=379
+ShaderRecompiler CS translation end: hash = 0xaaaa000000001417 outcome=emitted (async)
+@@T 188
+ShaderRecompiler CS translation end: hash = 0xaaaa000000001417 outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa000000003883 outcome=emitted (async)
+[store] written=46 pending=0 failed=0
+ShaderRecompiler CS translation end: hash = 0xaaaa000000001417 outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa000000003884 outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa000000001417 outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa000000001418 outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa000000001418 outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa00000000141b outcome=emitted (async)
+@@T 189
+ShaderRecompiler CS translation end: hash = 0xaaaa00000000141b outcome=emitted (async)
+Async: 0 translating, 0 compiling, 0 waiting (oldest 0 s), 2 pipelines, 0 queued, 0 skipped/2s, 3/24 redrawn; workers 2/12 busy, 20.0 jobs/s, pump 32.5 ms (worst 4.2 ms, 40 applied, 0 backlog); stages: requested 2510, translating 0, translated 2408 (failed 0), module-compiling 0 of 34 jobs, modules ready 34 (speculative 0, lost 0, failed 0), pipeline-compiling 2 of 27 jobs, pipelines ready 25 (failed 0), expired 2374, wanted 0
+ShaderRecompiler CS translation end: hash = 0xaaaa000000001608 outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000015eb outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa000000003886 outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa000000003885 outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000015fe outcome=emitted (async)
+ShaderRecompiler CS phase end: hash = 0xaaaa0000000015fe IR TranslateProgram blocks=61 elapsed_ms=111
+@@T 190
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000015fe outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa000000003887 outcome=emitted (async)
+ShaderRecompiler PS phase end: hash = 0xaaaa000000003892 IR TranslateProgram blocks=427 elapsed_ms=145
+[stall] no frame for 5.0 s (frame 4926): render thread in 'cp-blocked' state=a queue waits on guest memory or a flip for 0.0 s; shader hash = 0x0000000000000000 stage=-; last PM4 opcode 0x15, 1118726 packets; shader worker jobs pending 1
+[wait] queue 0 (draw): wait_reg_mem32 on memory 0x0000001004278880 mask 0xffffffff compare (value & mask) >= 0x1342, value at last poll 0x0; packet at 0x000000104b040080 + 4 dw; polled 2321 times in 0.4 s
+[wait]   range written by a shader: no; written bytes not read back yet: no
+[wait] queue 0x20 (compute): wait_reg_mem32 on memory 0x0000001004278d60 mask 0xffffffff compare (value & mask) >= 0x1343, value at last poll 0x1342; packet at 0x000000104b6c0080 + 4 dw; polled 27883 times in 4.6 s
+[wait]   range written by a shader: no; written bytes not read back yet: no
+[wait] queue 0x28 (compute): wait_reg_mem32 on memory 0x0000001004278da0 mask 0xffffffff compare (value & mask) >= 0x1343, value at last poll 0x1342; packet at 0x000000104b700080 + 4 dw; polled 27883 times in 4.6 s
+[wait]   range written by a shader: no; written bytes not read back yet: no
+[wait] queue 0x30 (compute): suspended for shader 0xaaaa0000000038bc for 0.0 s
+[wait] queue 0x38 (compute): wait_reg_mem32 on memory 0x00000010042788e0 mask 0xffffffff compare (value & mask) >= 0x1342, value at last poll 0x0; packet at 0x000000104b280080 + 4 dw; polled 27883 times in 4.6 s
+[wait]   range written by a shader: no; written bytes not read back yet: no
+[wait] queue 0x40 (compute): wait_reg_mem32 on memory 0x00000010042787c0 mask 0xffffffff compare (value & mask) >= 0x1342, value at last poll 0x0; packet at 0x000000104b0e0080 + 4 dw; polled 27883 times in 4.6 s
+[wait]   range written by a shader: no; written bytes not read back yet: no
+[wait] queue 0x48 (compute): wait_reg_mem32 on memory 0x0000001004278ba0 mask 0xffffffff compare (value & mask) >= 0x1342, value at last poll 0x0; packet at 0x000000104b540080 + 4 dw; polled 27883 times in 4.6 s
+[wait]   range written by a shader: no; written bytes not read back yet: no
+[wait] queue 0x50 (compute): wait_reg_mem32 on memory 0x0000001004278d20 mask 0xffffffff compare (value & mask) >= 0x1343, value at last poll 0x1342; packet at 0x000000104b6a0080 + 4 dw; polled 27883 times in 4.6 s
+[wait]   range written by a shader: no; written bytes not read back yet: no
+[wait]   no label write within 4 KiB of 0x0000001004278880 among the last 32 (87139 in all, oldest 0.5 s ago)
+[wait]   no recent read back covers 0x0000001004278880 (last 32 read backs of 63 in all)
+[wait]   no label write within 4 KiB of 0x0000001004278d60 among the last 32 (87139 in all, oldest 0.5 s ago)
+[wait]   no recent read back covers 0x0000001004278d60 (last 32 read backs of 63 in all)
+[wait]   no label write within 4 KiB of 0x0000001004278da0 among the last 32 (87139 in all, oldest 0.5 s ago)
+[wait]   no recent read back covers 0x0000001004278da0 (last 32 read backs of 63 in all)
+[wait]   no label write within 4 KiB of 0x00000010042788e0 among the last 32 (87139 in all, oldest 0.5 s ago)
+[wait]   no recent read back covers 0x00000010042788e0 (last 32 read backs of 63 in all)
+[wait]   no label write within 4 KiB of 0x00000010042787c0 among the last 32 (87139 in all, oldest 0.5 s ago)
+[wait]   no recent read back covers 0x00000010042787c0 (last 32 read backs of 63 in all)
+[wait]   no label write within 4 KiB of 0x0000001004278ba0 among the last 32 (87139 in all, oldest 0.5 s ago)
+[wait]   no recent read back covers 0x0000001004278ba0 (last 32 read backs of 63 in all)
+[wait]   no label write within 4 KiB of 0x0000001004278d20 among the last 32 (87139 in all, oldest 0.5 s ago)
+[wait]   no recent read back covers 0x0000001004278d20 (last 32 read backs of 63 in all)
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038bc outcome=emitted (async)
+@@T 191
+ShaderRecompiler CS translation end: hash = 0xaaaa000000001584 outcome=emitted (async)
+Async: 0 translating, 0 compiling, 52 waiting (oldest 1 s), 1 pipelines, 0 queued, 430 skipped/2s, 3/34 redrawn; workers 1/12 busy, 40.0 jobs/s, pump 15.2 ms (worst 2.4 ms, 80 applied, 0 backlog); stages: requested 2571, translating 0, translated 2469 (failed 0), module-compiling 0 of 43 jobs, modules ready 43 (speculative 0, lost 0, failed 0), pipeline-compiling 1 of 36 jobs, pipelines ready 35 (failed 0), expired 2374, wanted 0
+ShaderRecompiler PS translation end: hash = 0xaaaa0000000038bd outcome=emitted
+ShaderRecompiler MS translation end: hash = 0xaaaa0000000038be outcome=emitted
+ShaderRecompiler PS translation end: hash = 0xaaaa0000000038bf outcome=emitted
+ShaderRecompiler VS translation end: hash = 0xaaaa0000000038c0 outcome=emitted
+ShaderRecompiler MS translation end: hash = 0xaaaa0000000038c1 outcome=emitted
+!!! SHADER DISPATCH SKIP (resource materialization failed) shader = 0xaaaa000000000117; rendering is incomplete
+!!! SHADER DISPATCH SKIP (resource materialization failed) shader = 0xaaaa0000000000fa; rendering is incomplete
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000000fa outcome=negative-cache hit (unknown)
+!!! SHADER SKIP USES shader = 0xaaaa0000000000fa count=1
+!!! SHADER SKIP USES shader = 0xaaaa0000000000fa count=2
+!!! SHADER SKIP USES shader = 0xaaaa0000000000fa count=4
+!!! SHADER SKIP USES shader = 0xaaaa0000000000fa count=8
+!!! SHADER SKIP USES shader = 0xaaaa0000000000fa count=16
+!!! SHADER DISPATCH SKIP (resource materialization failed) shader = 0xaaaa000000000102; rendering is incomplete
+ShaderRecompiler CS translation end: hash = 0xaaaa000000000102 outcome=negative-cache hit (unknown)
+!!! SHADER SKIP USES shader = 0xaaaa000000000102 count=1
+!!! SHADER SKIP USES shader = 0xaaaa000000000102 count=2
+!!! SHADER SKIP USES shader = 0xaaaa000000000102 count=4
+!!! SHADER SKIP USES shader = 0xaaaa000000000102 count=8
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038c2 outcome=emitted
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038c2 outcome=emitted
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038c2 outcome=served from store
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038c2 outcome=served from store
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038c2 outcome=served from store
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038c2 outcome=served from store
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038c2 outcome=served from store
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038c3 outcome=emitted
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038c3 outcome=emitted
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038c3 outcome=served from store
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038c3 outcome=served from store
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038c3 outcome=served from store
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038c3 outcome=served from store
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038c3 outcome=served from store
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038c4 outcome=emitted
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038c4 outcome=emitted
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038c4 outcome=served from store
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038c4 outcome=served from store
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038c4 outcome=served from store
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038c4 outcome=served from store
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038c4 outcome=served from store
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038c4 outcome=served from store
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038c4 outcome=served from store
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038c4 outcome=served from store
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038c4 outcome=served from store
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038c4 outcome=served from store
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038c4 outcome=served from store
+@@T 192
+@@T 193
+@@T 194
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038c5 outcome=emitted
+Async: 0 translating, 0 compiling, 52 waiting (oldest 4 s), 1 pipelines, 0 queued, 0 skipped/2s, 3/60 redrawn; workers 1/12 busy, 2.1 jobs/s, pump 0.0 ms (worst 0.0 ms, 7 applied, 0 backlog); stages: requested 2571, translating 0, translated 2469 (failed 0), module-compiling 0 of 43 jobs, modules ready 43 (speculative 0, lost 0, failed 0), pipeline-compiling 1 of 43 jobs, pipelines ready 42 (failed 0), expired 2374, wanted 0
+Async STALL: the render thread built 2875 ms in 2 s (worst 2773 ms): targets not yet redrawn 80 ms (5 shaders, 3 pipelines); compute 2795 ms (7 shaders, 0 pipelines)
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038c6 outcome=emitted
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038c2 outcome=emitted
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038c3 outcome=emitted
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038c6 outcome=emitted
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038c7 outcome=emitted
+@@T 195
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038c8 outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa00000000066f outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038c9 outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa000000000670 outcome=emitted (async)
+[stall] no frame for 10.0 s (frame 4926): render thread in 'cp-blocked' state=a queue waits on guest memory or a flip for 0.0 s; shader hash = 0x0000000000000000 stage=-; last PM4 opcode 0x16, 1198687 packets; shader worker jobs pending 1
+[wait] queue 0 (draw): wait_reg_mem32 on memory 0x0000001004278b40 mask 0xffffffff compare (value & mask) >= 0x1342, value at last poll 0x0; packet at 0x000000104b4c2780 + 18 dw; polled 1719 times in 0.4 s
+[wait]   range written by a shader: no; written bytes not read back yet: no
+[wait] queue 0x20 (compute): wait_reg_mem32 on memory 0x0000001004278d60 mask 0xffffffff compare (value & mask) >= 0x1343, value at last poll 0x1342; packet at 0x000000104b6c0080 + 4 dw; polled 34045 times in 9.6 s
+[wait]   range written by a shader: no; written bytes not read back yet: no
+[wait] queue 0x28 (compute): wait_reg_mem32 on memory 0x0000001004278da0 mask 0xffffffff compare (value & mask) >= 0x1343, value at last poll 0x1342; packet at 0x000000104b700080 + 4 dw; polled 34045 times in 9.6 s
+[wait]   range written by a shader: no; written bytes not read back yet: no
+[wait] queue 0x30 (compute): wait_reg_mem32 on memory 0x0000001004278b60 mask 0xffffffff compare (value & mask) >= 0x1342, value at last poll 0x0; packet at 0x000000104b4e0080 + 517 dw; polled 2244 times in 4.1 s
+[wait]   range written by a shader: no; written bytes not read back yet: no
+[wait] queue 0x38 (compute): wait_reg_mem32 on memory 0x0000001004278e20 mask 0xffffffff compare (value & mask) >= 0x1343, value at last poll 0x1342; packet at 0x000000104b720080 + 4 dw; polled 1719 times in 0.4 s
+[wait]   range written by a shader: no; written bytes not read back yet: no
+[wait] queue 0x40 (compute): suspended for shader 0xaaaa000000000625 for 0.0 s
+[wait] queue 0x48 (compute): wait_reg_mem32 on memory 0x0000001004278ba0 mask 0xffffffff compare (value & mask) >= 0x1342, value at last poll 0x0; packet at 0x000000104b540080 + 4 dw; polled 34045 times in 9.6 s
+[wait]   range written by a shader: no; written bytes not read back yet: no
+[wait] queue 0x50 (compute): wait_reg_mem32 on memory 0x0000001004278d20 mask 0xffffffff compare (value & mask) >= 0x1343, value at last poll 0x1342; packet at 0x000000104b6a0080 + 4 dw; polled 34045 times in 9.6 s
+[wait]   range written by a shader: no; written bytes not read back yet: no
+[wait]   label write 0x0000001004278920 <- 0x1342 (4 bytes) by queue 0x38 (compute), 0.41 s ago
+[wait]   label write 0x0000001004278900 <- 0x1342 (4 bytes) by queue 0x38 (compute), 0.41 s ago
+[wait]   no recent read back covers 0x0000001004278b40 (last 32 read backs of 2046 in all)
+[wait]   label write 0x0000001004278920 <- 0x1342 (4 bytes) by queue 0x38 (compute), 0.41 s ago
+[wait]   label write 0x0000001004278900 <- 0x1342 (4 bytes) by queue 0x38 (compute), 0.41 s ago
+[wait]   no recent read back covers 0x0000001004278d60 (last 32 read backs of 2046 in all)
+[wait]   label write 0x0000001004278920 <- 0x1342 (4 bytes) by queue 0x38 (compute), 0.41 s ago
+[wait]   label write 0x0000001004278900 <- 0x1342 (4 bytes) by queue 0x38 (compute), 0.41 s ago
+[wait]   no recent read back covers 0x0000001004278da0 (last 32 read backs of 2046 in all)
+[wait]   label write 0x0000001004278920 <- 0x1342 (4 bytes) by queue 0x38 (compute), 0.41 s ago
+[wait]   label write 0x0000001004278900 <- 0x1342 (4 bytes) by queue 0x38 (compute), 0.41 s ago
+[wait]   no recent read back covers 0x0000001004278b60 (last 32 read backs of 2046 in all)
+[wait]   label write 0x0000001004278920 <- 0x1342 (4 bytes) by queue 0x38 (compute), 0.41 s ago
+[wait]   label write 0x0000001004278900 <- 0x1342 (4 bytes) by queue 0x38 (compute), 0.41 s ago
+[wait]   no recent read back covers 0x0000001004278e20 (last 32 read backs of 2046 in all)
+[wait]   label write 0x0000001004278920 <- 0x1342 (4 bytes) by queue 0x38 (compute), 0.41 s ago
+[wait]   label write 0x0000001004278900 <- 0x1342 (4 bytes) by queue 0x38 (compute), 0.41 s ago
+[wait]   no recent read back covers 0x0000001004278ba0 (last 32 read backs of 2046 in all)
+[wait]   label write 0x0000001004278920 <- 0x1342 (4 bytes) by queue 0x38 (compute), 0.41 s ago
+[wait]   label write 0x0000001004278900 <- 0x1342 (4 bytes) by queue 0x38 (compute), 0.41 s ago
+[wait]   no recent read back covers 0x0000001004278d20 (last 32 read backs of 2046 in all)
+ShaderRecompiler CS translation end: hash = 0xaaaa000000000625 outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038ca outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038cb outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038cc outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038cd outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa000000001821 outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa00000000174d outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038ce outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038cf outcome=emitted (async)
+ShaderRecompiler PS translation end: hash = 0xaaaa0000000038d0 outcome=emitted
+ShaderRecompiler PS translation end: hash = 0xaaaa0000000038d1 outcome=emitted
+ShaderRecompiler CS translation end: hash = 0xaaaa00000000099f outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038d2 outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038d3 outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000009a0 outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038d4 outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038d5 outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038d5 outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038d6 outcome=emitted (async)
+@@T 196
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000002ad outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038d7 outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038d8 outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa000000000929 outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038d9 outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa00000000092b outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa000000000963 outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000000ce outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038da outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038db outcome=emitted (async)
+Async: 0 translating, 0 compiling, 53 waiting (oldest 6 s), 1 pipelines, 0 queued, 0 skipped/2s, 3/62 redrawn; workers 1/12 busy, 49.5 jobs/s, pump 38.7 ms (worst 6.7 ms, 99 applied, 0 backlog); stages: requested 2603, translating 0, translated 2501 (failed 0), module-compiling 0 of 74 jobs, modules ready 74 (speculative 0, lost 0, failed 0), pipeline-compiling 1 of 79 jobs, pipelines ready 78 (failed 0), expired 2374, wanted 0
+Async STALL: the render thread built 83 ms in 2 s (worst 22 ms): targets not yet redrawn 1 ms (2 shaders, 2 pipelines); compute 82 ms (5 shaders, 0 pipelines)
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038dc outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038dd outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038de outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038d7 outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa000000000314 outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038df outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa00000000030f outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa00000000030d outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038e0 outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038e1 outcome=emitted (async)
+@@T 197
+ShaderRecompiler CS translation end: hash = 0xaaaa000000000308 outcome=emitted (async)
+@@T 198
+Async: 0 translating, 0 compiling, 53 waiting (oldest 8 s), 1 pipelines, 0 queued, 0 skipped/2s, 3/62 redrawn; workers 1/12 busy, 16.5 jobs/s, pump 18.9 ms (worst 10.0 ms, 33 applied, 0 backlog); stages: requested 2614, translating 0, translated 2512 (failed 0), module-compiling 0 of 85 jobs, modules ready 85 (speculative 0, lost 0, failed 0), pipeline-compiling 1 of 90 jobs, pipelines ready 89 (failed 0), expired 2374, wanted 0
+@@T 199
+@@T 200
+Async: 0 translating, 0 compiling, 53 waiting (oldest 10 s), 1 pipelines, 0 queued, 0 skipped/2s, 3/62 redrawn; workers 1/12 busy, 0.0 jobs/s, pump 0.0 ms (worst 0.0 ms, 0 applied, 0 backlog); stages: requested 2614, translating 0, translated 2512 (failed 0), module-compiling 0 of 85 jobs, modules ready 85 (speculative 0, lost 0, failed 0), pipeline-compiling 1 of 90 jobs, pipelines ready 89 (failed 0), expired 2374, wanted 0
+[stall] no frame for 15.0 s (frame 4926): render thread in 'cp-blocked' state=a queue waits on guest memory or a flip for 0.0 s; shader hash = 0x0000000000000000 stage=-; last PM4 opcode 0x3c, 1355856 packets; shader worker jobs pending 1
+[wait] queue 0 (draw): suspended for shader 0xaaaa000000000308 for 3.8 s
+[wait] queue 0x20 (compute): wait_reg_mem32 on memory 0x0000001004278d60 mask 0xffffffff compare (value & mask) >= 0x1343, value at last poll 0x1342; packet at 0x000000104b6c0080 + 4 dw; polled 53622 times in 14.6 s
+[wait]   range written by a shader: no; written bytes not read back yet: no
+[wait] queue 0x28 (compute): wait_reg_mem32 on memory 0x0000001004278da0 mask 0xffffffff compare (value & mask) >= 0x1343, value at last poll 0x1342; packet at 0x000000104b700080 + 4 dw; polled 53621 times in 14.6 s
+[wait]   range written by a shader: no; written bytes not read back yet: no
+[wait] queue 0x30 (compute): wait_reg_mem32 on memory 0x0000001004278b60 mask 0xffffffff compare (value & mask) >= 0x1342, value at last poll 0x0; packet at 0x000000104b4e0080 + 517 dw; polled 21820 times in 9.1 s
+[wait]   range written by a shader: no; written bytes not read back yet: no
+[wait] queue 0x38 (compute): wait_reg_mem32 on memory 0x0000001004278e20 mask 0xffffffff compare (value & mask) >= 0x1343, value at last poll 0x1342; packet at 0x000000104b720080 + 4 dw; polled 21295 times in 5.4 s
+[wait]   range written by a shader: no; written bytes not read back yet: no
+[wait] queue 0x40 (compute): wait_reg_mem32 on memory 0x0000001004278de0 mask 0xffffffff compare (value & mask) >= 0x1343, value at last poll 0x1342; packet at 0x000000104b6e0080 + 4 dw; polled 18674 times in 4.8 s
+[wait]   range written by a shader: no; written bytes not read back yet: no
+[wait] queue 0x48 (compute): wait_reg_mem32 on memory 0x0000001004278ba0 mask 0xffffffff compare (value & mask) >= 0x1342, value at last poll 0x0; packet at 0x000000104b540080 + 4 dw; polled 53622 times in 14.6 s
+[wait]   range written by a shader: no; written bytes not read back yet: no
+[wait] queue 0x50 (compute): wait_reg_mem32 on memory 0x0000001004278d20 mask 0xffffffff compare (value & mask) >= 0x1343, value at last poll 0x1342; packet at 0x000000104b6a0080 + 4 dw; polled 53622 times in 14.6 s
+[wait]   range written by a shader: no; written bytes not read back yet: no
+[wait]   no label write within 4 KiB of 0x0000001004278d60 among the last 32 (89166 in all, oldest 4.8 s ago)
+[wait]   no recent read back covers 0x0000001004278d60 (last 32 read backs of 2049 in all)
+[wait]   no label write within 4 KiB of 0x0000001004278da0 among the last 32 (89166 in all, oldest 4.8 s ago)
+[wait]   no recent read back covers 0x0000001004278da0 (last 32 read backs of 2049 in all)
+[wait]   no label write within 4 KiB of 0x0000001004278b60 among the last 32 (89166 in all, oldest 4.8 s ago)
+[wait]   no recent read back covers 0x0000001004278b60 (last 32 read backs of 2049 in all)
+[wait]   no label write within 4 KiB of 0x0000001004278e20 among the last 32 (89166 in all, oldest 4.8 s ago)
+[wait]   no recent read back covers 0x0000001004278e20 (last 32 read backs of 2049 in all)
+[wait]   no label write within 4 KiB of 0x0000001004278de0 among the last 32 (89166 in all, oldest 4.8 s ago)
+[wait]   no recent read back covers 0x0000001004278de0 (last 32 read backs of 2049 in all)
+[wait]   no label write within 4 KiB of 0x0000001004278ba0 among the last 32 (89166 in all, oldest 4.8 s ago)
+[wait]   no recent read back covers 0x0000001004278ba0 (last 32 read backs of 2049 in all)
+[wait]   no label write within 4 KiB of 0x0000001004278d20 among the last 32 (89166 in all, oldest 4.8 s ago)
+[wait]   no recent read back covers 0x0000001004278d20 (last 32 read backs of 2049 in all)
+@@T 201
+@@T 202
+Async: 0 translating, 0 compiling, 53 waiting (oldest 12 s), 1 pipelines, 0 queued, 0 skipped/2s, 3/62 redrawn; workers 1/12 busy, 0.0 jobs/s, pump 0.0 ms (worst 0.0 ms, 0 applied, 0 backlog); stages: requested 2614, translating 0, translated 2512 (failed 0), module-compiling 0 of 85 jobs, modules ready 85 (speculative 0, lost 0, failed 0), pipeline-compiling 1 of 90 jobs, pipelines ready 89 (failed 0), expired 2374, wanted 0
+@@T 203
+@@T 204
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000009a4 outcome=emitted (async)
+Async: 0 translating, 0 compiling, 53 waiting (oldest 14 s), 1 pipelines, 0 queued, 0 skipped/2s, 3/62 redrawn; workers 1/12 busy, 1.5 jobs/s, pump 13.7 ms (worst 10.8 ms, 3 applied, 0 backlog); stages: requested 2615, translating 0, translated 2513 (failed 0), module-compiling 0 of 86 jobs, modules ready 86 (speculative 0, lost 0, failed 0), pipeline-compiling 1 of 91 jobs, pipelines ready 90 (failed 0), expired 2374, wanted 0
+@@T 205
+[stall] no frame for 20.0 s (frame 4926): render thread in 'dispatch-shader' state=lookup for 0.0 s; shader hash = 0xaaaa0000000009a4 stage=cs; last PM4 opcode 0x16, 1516014 packets; shader worker jobs pending 1
+[wait] queue 0 (draw): suspended for shader 0xaaaa0000000009a4 for 1.7 s
+[wait] queue 0x20 (compute): wait_reg_mem32 on memory 0x0000001004278d60 mask 0xffffffff compare (value & mask) >= 0x1343, value at last poll 0x1342; packet at 0x000000104b6c0080 + 4 dw; polled 73642 times in 19.6 s
+[wait]   range written by a shader: no; written bytes not read back yet: no
+[wait] queue 0x28 (compute): wait_reg_mem32 on memory 0x0000001004278da0 mask 0xffffffff compare (value & mask) >= 0x1343, value at last poll 0x1342; packet at 0x000000104b700080 + 4 dw; polled 73642 times in 19.6 s
+[wait]   range written by a shader: no; written bytes not read back yet: no
+[wait] queue 0x30 (compute): wait_reg_mem32 on memory 0x0000001004278b60 mask 0xffffffff compare (value & mask) >= 0x1342, value at last poll 0x0; packet at 0x000000104b4e0080 + 517 dw; polled 41842 times in 14.1 s
+[wait]   range written by a shader: no; written bytes not read back yet: no
+[wait] queue 0x38 (compute): wait_reg_mem32 on memory 0x0000001004278e20 mask 0xffffffff compare (value & mask) >= 0x1343, value at last poll 0x1342; packet at 0x000000104b720080 + 4 dw; polled 41317 times in 10.4 s
+[wait]   range written by a shader: no; written bytes not read back yet: no
+[wait] queue 0x40 (compute): wait_reg_mem32 on memory 0x0000001004278de0 mask 0xffffffff compare (value & mask) >= 0x1343, value at last poll 0x1342; packet at 0x000000104b6e0080 + 4 dw; polled 38695 times in 9.8 s
+[wait]   range written by a shader: no; written bytes not read back yet: no
+[wait] queue 0x48 (compute): wait_reg_mem32 on memory 0x0000001004278ba0 mask 0xffffffff compare (value & mask) >= 0x1342, value at last poll 0x0; packet at 0x000000104b540080 + 4 dw; polled 73643 times in 19.6 s
+[wait]   range written by a shader: no; written bytes not read back yet: no
+[wait] queue 0x50 (compute): wait_reg_mem32 on memory 0x0000001004278d20 mask 0xffffffff compare (value & mask) >= 0x1343, value at last poll 0x1342; packet at 0x000000104b6a0080 + 4 dw; polled 73643 times in 19.6 s
+[wait]   range written by a shader: no; written bytes not read back yet: no
+[wait]   no label write within 4 KiB of 0x0000001004278d60 among the last 32 (89167 in all, oldest 9.8 s ago)
+[wait]   no recent read back covers 0x0000001004278d60 (last 32 read backs of 2049 in all)
+[wait]   no label write within 4 KiB of 0x0000001004278da0 among the last 32 (89167 in all, oldest 9.8 s ago)
+[wait]   no recent read back covers 0x0000001004278da0 (last 32 read backs of 2049 in all)
+[wait]   no label write within 4 KiB of 0x0000001004278b60 among the last 32 (89167 in all, oldest 9.8 s ago)
+[wait]   no recent read back covers 0x0000001004278b60 (last 32 read backs of 2049 in all)
+[wait]   no label write within 4 KiB of 0x0000001004278e20 among the last 32 (89167 in all, oldest 9.8 s ago)
+[wait]   no recent read back covers 0x0000001004278e20 (last 32 read backs of 2049 in all)
+[wait]   no label write within 4 KiB of 0x0000001004278de0 among the last 32 (89167 in all, oldest 9.8 s ago)
+[wait]   no recent read back covers 0x0000001004278de0 (last 32 read backs of 2049 in all)
+[wait]   no label write within 4 KiB of 0x0000001004278ba0 among the last 32 (89167 in all, oldest 9.8 s ago)
+[wait]   no recent read back covers 0x0000001004278ba0 (last 32 read backs of 2049 in all)
+[wait]   no label write within 4 KiB of 0x0000001004278d20 among the last 32 (89167 in all, oldest 9.8 s ago)
+[wait]   no recent read back covers 0x0000001004278d20 (last 32 read backs of 2049 in all)
+@@T 206
+Async: 0 translating, 0 compiling, 53 waiting (oldest 16 s), 1 pipelines, 0 queued, 0 skipped/2s, 3/62 redrawn; workers 1/12 busy, 0.0 jobs/s, pump 0.0 ms (worst 0.0 ms, 0 applied, 0 backlog); stages: requested 2615, translating 0, translated 2513 (failed 0), module-compiling 0 of 86 jobs, modules ready 86 (speculative 0, lost 0, failed 0), pipeline-compiling 1 of 91 jobs, pipelines ready 90 (failed 0), expired 2374, wanted 0
+@@T 207
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000000d2 outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa00000000097b outcome=emitted (async)
+@@T 208
+Async: 0 translating, 0 compiling, 53 waiting (oldest 18 s), 1 pipelines, 0 queued, 0 skipped/2s, 3/62 redrawn; workers 1/12 busy, 3.0 jobs/s, pump 7.9 ms (worst 5.9 ms, 6 applied, 0 backlog); stages: requested 2617, translating 0, translated 2515 (failed 0), module-compiling 0 of 88 jobs, modules ready 88 (speculative 0, lost 0, failed 0), pipeline-compiling 1 of 93 jobs, pipelines ready 92 (failed 0), expired 2374, wanted 0
+@@T 209
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000000cb outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa00000000042c outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038e2 outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038e3 outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038e4 outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038e5 outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038e6 outcome=emitted (async)
+ShaderRecompiler PS translation end: hash = 0xaaaa0000000038e7 outcome=emitted
+ShaderRecompiler VS translation end: hash = 0xaaaa0000000038e8 outcome=emitted
+ShaderRecompiler VS translation end: hash = 0xaaaa0000000038e9 outcome=emitted
+ShaderRecompiler VS translation end: hash = 0xaaaa0000000038ea outcome=emitted
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038eb outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038ec outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa00000000016c outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa00000000016f outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038ed outcome=emitted (async)
+@@T 210
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000002ac outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000002ab outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038ee outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038ef outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa000000000171 outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa000000000174 outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa000000000176 outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa000000000177 outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038f0 outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000009d5 outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038f1 outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000009d6 outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038f2 outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000009d7 outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000009d7 outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038f3 outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa000000000ae3 outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038f4 outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa000000000ae7 outcome=emitted (async)
+Async: 0 translating, 0 compiling, 53 waiting (oldest 20 s), 1 pipelines, 0 queued, 0 skipped/2s, 3/62 redrawn; workers 1/12 busy, 46.5 jobs/s, pump 19.3 ms (worst 3.5 ms, 93 applied, 0 backlog); stages: requested 2648, translating 0, translated 2546 (failed 0), module-compiling 0 of 119 jobs, modules ready 119 (speculative 0, lost 0, failed 0), pipeline-compiling 1 of 124 jobs, pipelines ready 123 (failed 0), expired 2374, wanted 0
+Async STALL: the render thread built 360 ms in 2 s (worst 113 ms): targets not yet redrawn 360 ms (4 shaders, 3 pipelines)
+[stall] no frame for 25.0 s (frame 4926): render thread in 'dispatch-shader' state=lookup for 0.0 s; shader hash = 0xaaaa000000000ae7 stage=cs; last PM4 opcode 0x16, 1693246 packets; shader worker jobs pending 1
+[wait] queue 0 (draw): suspended for shader 0xaaaa000000000ae7 for 0.3 s
+[wait] queue 0x20 (compute): wait_reg_mem32 on memory 0x0000001004278d60 mask 0xffffffff compare (value & mask) >= 0x1343, value at last poll 0x1342; packet at 0x000000104b6c0080 + 4 dw; polled 95752 times in 24.6 s
+[wait]   range written by a shader: no; written bytes not read back yet: no
+[wait] queue 0x28 (compute): wait_reg_mem32 on memory 0x0000001004278da0 mask 0xffffffff compare (value & mask) >= 0x1343, value at last poll 0x1342; packet at 0x000000104b700080 + 4 dw; polled 95752 times in 24.6 s
+[wait]   range written by a shader: no; written bytes not read back yet: no
+[wait] queue 0x30 (compute): wait_reg_mem32 on memory 0x0000001004278b60 mask 0xffffffff compare (value & mask) >= 0x1342, value at last poll 0x0; packet at 0x000000104b4e0080 + 517 dw; polled 63951 times in 19.1 s
+[wait]   range written by a shader: no; written bytes not read back yet: no
+[wait] queue 0x38 (compute): wait_reg_mem32 on memory 0x0000001004278e20 mask 0xffffffff compare (value & mask) >= 0x1343, value at last poll 0x1342; packet at 0x000000104b720080 + 4 dw; polled 63426 times in 15.4 s
+[wait]   range written by a shader: no; written bytes not read back yet: no
+[wait] queue 0x40 (compute): wait_reg_mem32 on memory 0x0000001004278de0 mask 0xffffffff compare (value & mask) >= 0x1343, value at last poll 0x1342; packet at 0x000000104b6e0080 + 4 dw; polled 60805 times in 14.8 s
+[wait]   range written by a shader: no; written bytes not read back yet: no
+[wait] queue 0x48 (compute): wait_reg_mem32 on memory 0x0000001004278ba0 mask 0xffffffff compare (value & mask) >= 0x1342, value at last poll 0x0; packet at 0x000000104b540080 + 4 dw; polled 95753 times in 24.6 s
+[wait]   range written by a shader: no; written bytes not read back yet: no
+[wait] queue 0x50 (compute): wait_reg_mem32 on memory 0x0000001004278d20 mask 0xffffffff compare (value & mask) >= 0x1343, value at last poll 0x1342; packet at 0x000000104b6a0080 + 4 dw; polled 95753 times in 24.6 s
+[wait]   range written by a shader: no; written bytes not read back yet: no
+[wait]   no label write within 4 KiB of 0x0000001004278d60 among the last 32 (89207 in all, oldest 0.9 s ago)
+[wait]   no recent read back covers 0x0000001004278d60 (last 32 read backs of 2052 in all)
+[wait]   no label write within 4 KiB of 0x0000001004278da0 among the last 32 (89207 in all, oldest 0.9 s ago)
+[wait]   no recent read back covers 0x0000001004278da0 (last 32 read backs of 2052 in all)
+[wait]   no label write within 4 KiB of 0x0000001004278b60 among the last 32 (89207 in all, oldest 0.9 s ago)
+[wait]   no recent read back covers 0x0000001004278b60 (last 32 read backs of 2052 in all)
+[wait]   no label write within 4 KiB of 0x0000001004278e20 among the last 32 (89207 in all, oldest 0.9 s ago)
+[wait]   no recent read back covers 0x0000001004278e20 (last 32 read backs of 2052 in all)
+[wait]   no label write within 4 KiB of 0x0000001004278de0 among the last 32 (89207 in all, oldest 0.9 s ago)
+[wait]   no recent read back covers 0x0000001004278de0 (last 32 read backs of 2052 in all)
+[wait]   no label write within 4 KiB of 0x0000001004278ba0 among the last 32 (89207 in all, oldest 0.9 s ago)
+[wait]   no recent read back covers 0x0000001004278ba0 (last 32 read backs of 2052 in all)
+[wait]   no label write within 4 KiB of 0x0000001004278d20 among the last 32 (89207 in all, oldest 0.9 s ago)
+[wait]   no recent read back covers 0x0000001004278d20 (last 32 read backs of 2052 in all)
+@@T 211
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000016c3 outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038f5 outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038f6 outcome=emitted (async)
+@@T 212
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000009d9 outcome=emitted (async)
+Async: 0 translating, 0 compiling, 53 waiting (oldest 22 s), 1 pipelines, 0 queued, 0 skipped/2s, 3/62 redrawn; workers 1/12 busy, 6.0 jobs/s, pump 9.3 ms (worst 5.0 ms, 12 applied, 0 backlog); stages: requested 2652, translating 0, translated 2550 (failed 0), module-compiling 0 of 123 jobs, modules ready 123 (speculative 0, lost 0, failed 0), pipeline-compiling 1 of 128 jobs, pipelines ready 127 (failed 0), expired 2374, wanted 0
+@@T 213
+@@T 214
+Async: 0 translating, 0 compiling, 53 waiting (oldest 24 s), 1 pipelines, 0 queued, 0 skipped/2s, 3/62 redrawn; workers 1/12 busy, 0.0 jobs/s, pump 0.0 ms (worst 0.0 ms, 0 applied, 0 backlog); stages: requested 2652, translating 0, translated 2550 (failed 0), module-compiling 0 of 123 jobs, modules ready 123 (speculative 0, lost 0, failed 0), pipeline-compiling 1 of 128 jobs, pipelines ready 127 (failed 0), expired 2374, wanted 0
+@@T 215
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038f7 outcome=emitted (async)
+[stall] no frame for 30.0 s (frame 4926): render thread in 'cp-blocked' state=a queue waits on guest memory or a flip for 0.0 s; shader hash = 0x0000000000000000 stage=-; last PM4 opcode 0x16, 1881024 packets; shader worker jobs pending 1
+[wait] queue 0 (draw): suspended for shader 0xaaaa0000000038f7 for 0.2 s
+[wait] queue 0x20 (compute): wait_reg_mem32 on memory 0x0000001004278d60 mask 0xffffffff compare (value & mask) >= 0x1343, value at last poll 0x1342; packet at 0x000000104b6c0080 + 4 dw; polled 119225 times in 29.6 s
+[wait]   range written by a shader: no; written bytes not read back yet: no
+[wait] queue 0x28 (compute): wait_reg_mem32 on memory 0x0000001004278da0 mask 0xffffffff compare (value & mask) >= 0x1343, value at last poll 0x1342; packet at 0x000000104b700080 + 4 dw; polled 119225 times in 29.6 s
+[wait]   range written by a shader: no; written bytes not read back yet: no
+[wait] queue 0x30 (compute): wait_reg_mem32 on memory 0x0000001004278b60 mask 0xffffffff compare (value & mask) >= 0x1342, value at last poll 0x0; packet at 0x000000104b4e0080 + 517 dw; polled 87424 times in 24.1 s
+[wait]   range written by a shader: no; written bytes not read back yet: no
+[wait] queue 0x38 (compute): wait_reg_mem32 on memory 0x0000001004278e20 mask 0xffffffff compare (value & mask) >= 0x1343, value at last poll 0x1342; packet at 0x000000104b720080 + 4 dw; polled 86899 times in 20.4 s
+[wait]   range written by a shader: no; written bytes not read back yet: no
+[wait] queue 0x40 (compute): wait_reg_mem32 on memory 0x0000001004278de0 mask 0xffffffff compare (value & mask) >= 0x1343, value at last poll 0x1342; packet at 0x000000104b6e0080 + 4 dw; polled 84278 times in 19.8 s
+[wait]   range written by a shader: no; written bytes not read back yet: no
+[wait] queue 0x48 (compute): wait_reg_mem32 on memory 0x0000001004278ba0 mask 0xffffffff compare (value & mask) >= 0x1342, value at last poll 0x0; packet at 0x000000104b540080 + 4 dw; polled 119226 times in 29.6 s
+[wait]   range written by a shader: no; written bytes not read back yet: no
+[wait] queue 0x50 (compute): wait_reg_mem32 on memory 0x0000001004278d20 mask 0xffffffff compare (value & mask) >= 0x1343, value at last poll 0x1342; packet at 0x000000104b6a0080 + 4 dw; polled 119226 times in 29.6 s
+[wait]   range written by a shader: no; written bytes not read back yet: no
+[wait]   no label write within 4 KiB of 0x0000001004278d60 among the last 32 (89207 in all, oldest 5.9 s ago)
+[wait]   no recent read back covers 0x0000001004278d60 (last 32 read backs of 2052 in all)
+[wait]   no label write within 4 KiB of 0x0000001004278da0 among the last 32 (89207 in all, oldest 5.9 s ago)
+[wait]   no recent read back covers 0x0000001004278da0 (last 32 read backs of 2052 in all)
+[wait]   no label write within 4 KiB of 0x0000001004278b60 among the last 32 (89207 in all, oldest 5.9 s ago)
+[wait]   no recent read back covers 0x0000001004278b60 (last 32 read backs of 2052 in all)
+[wait]   no label write within 4 KiB of 0x0000001004278e20 among the last 32 (89207 in all, oldest 5.9 s ago)
+[wait]   no recent read back covers 0x0000001004278e20 (last 32 read backs of 2052 in all)
+[wait]   no label write within 4 KiB of 0x0000001004278de0 among the last 32 (89207 in all, oldest 5.9 s ago)
+[wait]   no recent read back covers 0x0000001004278de0 (last 32 read backs of 2052 in all)
+[wait]   no label write within 4 KiB of 0x0000001004278ba0 among the last 32 (89207 in all, oldest 5.9 s ago)
+[wait]   no recent read back covers 0x0000001004278ba0 (last 32 read backs of 2052 in all)
+[wait]   no label write within 4 KiB of 0x0000001004278d20 among the last 32 (89207 in all, oldest 5.9 s ago)
+[wait]   no recent read back covers 0x0000001004278d20 (last 32 read backs of 2052 in all)
+ShaderRecompiler CS translation end: hash = 0xaaaa0000000038f8 outcome=emitted (async)
+ShaderRecompiler CS translation end: hash = 0xaaaa000000001810 outcome=emitted (async)
+@@T 216
+[shader-reg] === shader registration ledger ===
+[shader-reg] create-shader calls: 18916
+[shader-reg] registered:                cs=3667 ps=6416 gs=5891 hs=0 fs=4 ?=0
+[shader-reg] used:                      cs=312 ps=139 gs=143 hs=0 fs=0 ?=0
+[shader-reg] registered but never used: cs=3355 ps=6277 gs=5748 hs=0 fs=4 ?=0
+[shader-reg] used but never registered: cs=0 ps=0 gs=0 hs=0 fs=0 ?=0
+[shader-reg] lead time ms (use - registration) cs: n=312 min=2546 median=181245 p90=199310 max=205409
+[shader-reg] lead time ms (use - registration) ps: n=139 min=223 median=181289 p90=181464 max=199692
+[shader-reg] lead time ms (use - registration) gs: n=143 min=251 median=181850 p90=182160 max=200555
+[shader-reg] lead time ms (use - registration) hs: n=0
+[shader-reg] lead time ms (use - registration) fs: n=0
+[shader-reg] lead time ms (use - registration) ?: n=0
+[shader-reg] variants per hash: 1=589 2=5 3-4=0 5+=0 (hashes with uses=594)
+[shader-reg] === end shader registration ledger ===
