@@ -149,7 +149,10 @@ static void PrintUsage() {
 	         "                                       least 2. Default: 0.\n"
 	         "  --async-speculative-modules <0|1>    Build the module of a finished compute translation on\n"
 	         "                                       the worker when its resources need no guest memory, so it\n"
-	         "                                       is stored at once. Default: 1.\n");
+	         "                                       is stored at once. Default: 1.\n"
+	         "  --render-stall-report-s <n>          When no frame was recorded for n seconds, print one line\n"
+	         "                                       with what the render thread is doing, then every n\n"
+	         "                                       seconds. 0 = off. Default: 5.\n");
 }
 
 static bool NextArg(int argc, char* argv[], int& index, std::string& out) {
@@ -571,6 +574,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 		} else if (arg == "--async-speculative-modules") {
 			if (!ParseUint32(value, options.config.async_speculative_modules)) {
 				::printf("invalid async speculative modules value: %s\n", value.c_str());
+				return false;
+			}
+		} else if (arg == "--render-stall-report-s") {
+			if (!ParseUint32(value, options.config.render_stall_report_s)) {
+				::printf("invalid render stall report value: %s\n", value.c_str());
 				return false;
 			}
 		} else {

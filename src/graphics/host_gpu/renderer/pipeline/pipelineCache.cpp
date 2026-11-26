@@ -19,6 +19,7 @@
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
 #include "graphics/host_gpu/renderer/pipeline/blendMapping.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineAsync.h"
+#include "graphics/host_gpu/renderer/pipeline/renderActivity.h"
 #include "graphics/host_gpu/renderer/pipeline/skippedDraws.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
@@ -616,6 +617,9 @@ const ShaderModule* PipelineCache::GetProgramImpl(const ShaderParams& params, In
 		}
 	}
 	const auto sync_begin = std::chrono::steady_clock::now();
+	// The render thread builds this stage itself: the draw could not be skipped.
+	RenderActivity::Note("sync-translate", params.hash, ShaderRecompiler::StageName(options.stage),
+	                     "render thread builds the stage");
 	ShaderRecompiler::ShaderSource source;
 	if (entry == m_program_cache.end()) {
 		DumpShader(params.code, fmt::format("original/{}_{:016x}.bin",
@@ -928,6 +932,7 @@ void PipelineCache::WriteDriverCache() const {
 
 void PipelineCache::GetGraphicsPrograms(const CommandBuffer& command, DrawRenderState& state) {
 	PumpAsync();
+	RenderActivity::Note("draw-shaders", 0, "-", "lookup");
 	const auto& context           = command.GetRegisters();
 	const auto& user_config       = command.GetUserConfig();
 	const auto& sh                = context.GetShaderRegisters();
@@ -1250,6 +1255,7 @@ const ShaderModule* PipelineCache::GetComputeProgram(const HW::ComputeShaderInfo
 	if (pending != nullptr) {
 		*pending = false;
 	}
+	RenderActivity::Note("dispatch-shader", 0, "cs", "preparing");
 	if (m_async != nullptr) {
 		m_async->reason = Async::StallReason::Compute;
 	}
@@ -1260,6 +1266,7 @@ const ShaderModule* PipelineCache::GetComputeProgram(const HW::ComputeShaderInfo
 	input_info.lds_storage = input_info.lds_size_dwords * 4u > limits.maxComputeSharedMemorySize;
 	ShaderRecompiler::IR::PushData::Window push_data;
 	const auto mode = (m_async != nullptr && pending != nullptr) ? AsyncMode::On : AsyncMode::Off;
+	RenderActivity::Note("dispatch-shader", params.hash, "cs", "lookup");
 	const auto* module = GetProgram(params, input_info, push_data, mode);
 	if (module == nullptr && m_last_deferred && pending != nullptr) {
 		*pending = true;
@@ -1502,6 +1509,7 @@ PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(const CommandBuffer&
 	auto [iter, inserted] = m_graphics_pipelines.try_emplace(key);
 	auto& pipeline        = iter->second;
 	if (!inserted) {
+		RenderActivity::Note("wait-pipeline", 0, "-", "pipeline compiling");
 		while (pipeline.pending) {
 			WaitForAsync();
 		}
@@ -1542,6 +1550,7 @@ PipelineCache::Pipeline& PipelineCache::GetComputePipeline(const ShaderComputeIn
 	auto [iter, inserted] = m_compute_pipelines.try_emplace(module.id);
 	auto& pipeline        = iter->second;
 	if (!inserted) {
+		RenderActivity::Note("wait-pipeline", module.info.shader_hash, "cs", "pipeline compiling");
 		while (pipeline.pending) {
 			WaitForAsync();
 		}

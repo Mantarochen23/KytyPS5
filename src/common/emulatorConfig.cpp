@@ -510,4 +510,8 @@ bool AsyncSpeculativeModules() {
 	return g_config == nullptr || g_config->async_speculative_modules != 0u;
 }
 
+uint32_t RenderStallReportSeconds() {
+	return g_config != nullptr ? g_config->render_stall_report_s : 5u;
+}
+
 } // namespace Config

@@ -150,6 +150,9 @@ struct ConfigOptions {
 	// --async-speculative-modules: a finished compute translation whose resources need no guest
 	// memory also gets its module on the worker (and so into the shader store). 0 = off.
 	uint32_t                 async_speculative_modules  = 1;
+	// --render-stall-report-s: when no frame was recorded for this many seconds, print one line
+	// with what the render thread is doing, then again every that many seconds. 0 = off.
+	uint32_t                 render_stall_report_s      = 5;
 };
 
 void Load(const ConfigOptions& cfg);
@@ -255,6 +258,7 @@ bool ShaderKeyIndexEnabled();
 uint32_t AsyncPumpBudgetMs();
 uint32_t AsyncWorkers();
 bool     AsyncSpeculativeModules();
+uint32_t RenderStallReportSeconds();
 
 } // namespace Config
 

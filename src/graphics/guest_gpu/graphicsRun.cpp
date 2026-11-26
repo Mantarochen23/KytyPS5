@@ -2,6 +2,7 @@
 
 #include "common/assert.h"
 #include "common/debugCounters.h"
+#include "common/emulatorConfig.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
 #include "common/stringUtils.h"
@@ -11,6 +12,7 @@
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/guest_gpu/pm4.h"
 #include "graphics/host_gpu/renderer/debug.h"
+#include "graphics/host_gpu/renderer/pipeline/renderActivity.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/renderer/sync.h"
@@ -37,6 +39,8 @@ namespace Libs::Graphics {
 
 static thread_local Pm4Execution* g_current_execution = nullptr;
 static thread_local GuestGpu*     g_gpu_state         = nullptr;
+// Prints what the command thread is doing when no frame was recorded for a while.
+static std::unique_ptr<RenderStallReporter> g_stall_reporter;
 
 GuestGpu::GuestGpu(RenderContext& renderer): m_renderer(renderer) {
 	EXIT_NOT_IMPLEMENTED(!Common::Thread::IsMainThread());
@@ -52,6 +56,7 @@ GuestGpu::GuestGpu(RenderContext& renderer): m_renderer(renderer) {
 		m_work_available.Signal();
 	});
 	m_thread = std::jthread(ThreadRun, this);
+	g_stall_reporter = std::make_unique<RenderStallReporter>(Config::RenderStallReportSeconds());
 }
 
 GuestGpu::~GuestGpu() {
@@ -63,6 +68,7 @@ void GuestGpu::Shutdown() {
 	if (m_shutdown_complete) {
 		return;
 	}
+	g_stall_reporter.reset();
 	{
 		Common::LockGuard lock(m_queue_mutex);
 		m_accepting        = false;
@@ -460,6 +466,7 @@ void GuestGpu::ThreadRun(void* data) {
 			       !gpu->m_prefetch_pending && !gpu->m_stopping) {
 				gpu->m_processing = false;
 				gpu->m_idle.Signal();
+				RenderActivity::Note("cp-no-work", 0, "-", "nothing submitted");
 				gpu->m_work_available.Wait(&gpu->m_queue_mutex);
 			}
 			if (gpu->m_stopping && gpu->m_commands.empty() && gpu->m_submission_count == 0) {
@@ -523,6 +530,10 @@ void GuestGpu::ThreadRun(void* data) {
 						// m_work_available (with a 50 ms safety fallback). Guest memory WaitRegMem
 						// polls keep 100 us.
 						const uint32_t wait_us = all_waiting_on_shaders ? 50000u : 100u;
+						RenderActivity::Note("cp-blocked", 0, "-",
+						                     all_waiting_on_shaders
+						                         ? "every queue waits for a shader or pipeline"
+						                         : "a queue waits on guest memory or a flip");
 						if (!gpu->m_async_ready && !gpu->m_prefetch_pending) {
 							gpu->m_work_available.WaitFor(&gpu->m_queue_mutex, wait_us);
 						}
@@ -550,6 +561,7 @@ void GuestGpu::ThreadRun(void* data) {
 			return;
 		}
 		if (run_prefetch) {
+			RenderActivity::Note("cp-prefetch-drain", 0, "-", "queueing compute prefetches");
 			gpu->DrainComputePrefetches();
 			Common::LockGuard lock(gpu->m_queue_mutex);
 			gpu->m_processing = false;
@@ -559,6 +571,7 @@ void GuestGpu::ThreadRun(void* data) {
 			continue;
 		}
 		if (!pending_prefetches.empty()) {
+			RenderActivity::Note("cp-prefetch-scan", 0, "-", "scanning submitted commands");
 			for (const auto& [queue_id, cmds]: pending_prefetches) {
 				gpu->GetProcessor(queue_id).PrefetchComputeShaders(cmds);
 			}
@@ -568,6 +581,7 @@ void GuestGpu::ThreadRun(void* data) {
 		}
 
 		if (command) {
+			RenderActivity::Note("cp-command", 0, "-", "host command");
 			{
 				Common::DebugCounters::ScopedTimer busy(
 				    Common::DebugCounters::Counter::GpuThreadBusyNs);
@@ -582,6 +596,7 @@ void GuestGpu::ThreadRun(void* data) {
 			continue;
 		}
 
+		RenderActivity::Note("cp-process", 0, "-", "submission");
 		const bool complete = [&] {
 			Common::DebugCounters::ScopedTimer busy(
 			    Common::DebugCounters::Counter::GpuThreadBusyNs);
@@ -857,6 +872,7 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 		if (g_gpu_state != nullptr) {
 			g_gpu_state->ProcessCommands();
 		}
+		RenderActivity::Note("pm4", 0, "-", "packets");
 		auto& cursor = execution.m_buffer_stack.back();
 		if (cursor.offset_dw == cursor.commands.size()) {
 			execution.m_buffer_stack.pop_back();
@@ -868,6 +884,7 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 		const auto        remaining_dw  = total_dw - cursor.offset_dw;
 		const auto        packet_header = packet[0];
 		const auto        opcode        = (packet_header >> 8u) & 0xffu;
+		RenderActivity::NotePacket(opcode);
 
 		if (packet_header == 0x80000000u || Pm4::PacketSizeDw(packet_header) == 1u) {
 			cursor.offset_dw++;
