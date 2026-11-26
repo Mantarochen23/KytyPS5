@@ -1221,14 +1221,58 @@ struct TestSuiteSummary {
   }
 };
 
+TestSuiteSummary *g_suite_summary = nullptr;
+bool g_summary_printed = false;
+
+void PrintSuiteSummary(const TestSuiteSummary &summary) {
+  if (g_summary_printed) {
+    return;
+  }
+  g_summary_printed = true;
+  std::printf("\n=== ShaderRecompilerComputeTests per-case summary ===\n");
+  for (const auto &entry : summary.results) {
+    const char *tag = entry.status == CaseStatus::Pass   ? "PASS"
+                      : entry.status == CaseStatus::Skip ? "SKIP"
+                                                         : "FAIL";
+    if (entry.detail.empty()) {
+      std::printf("[%s] %s\n", tag, entry.name.c_str());
+    } else {
+      std::printf("[%s] %s (%s)\n", tag, entry.name.c_str(),
+                  entry.detail.c_str());
+    }
+  }
+  if (summary.failed > 0) {
+    std::printf("\n=== ShaderRecompilerComputeTests failed cases (%u) ===\n",
+                summary.failed);
+    for (const auto &entry : summary.results) {
+      if (entry.status == CaseStatus::Fail) {
+        std::printf("[FAIL] %s (%s)\n", entry.name.c_str(),
+                    entry.detail.c_str());
+      }
+    }
+  }
+  std::printf("ShaderRecompilerComputeTests: %u passed, %u failed, %u skipped (%zu total)\n",
+              summary.passed, summary.failed, summary.skipped,
+              summary.results.size());
+  std::fflush(stdout);
+}
+
+void PrintSuiteSummaryAtExit() {
+  if (g_suite_summary != nullptr) {
+    PrintSuiteSummary(*g_suite_summary);
+  }
+}
+
 template <typename Function>
-void RunSuiteStep(TestSuiteSummary &summary, const char *name, Function &&fn) {
+bool RunSuiteStep(TestSuiteSummary &summary, const char *name, Function &&fn) {
   const bool prev = g_catch_test_failures;
   g_catch_test_failures = true;
+  bool ok = false;
   try {
     Common::RecoverableScope recover;
     fn();
     summary.RecordPass(name);
+    ok = true;
   } catch (const TestCaseSkip &skip) {
     std::printf("[skip]    %-32s (%s)\n", name, skip.reason.c_str());
     summary.RecordSkip(name, skip.reason);
@@ -1258,7 +1302,9 @@ void RunSuiteStep(TestSuiteSummary &summary, const char *name, Function &&fn) {
                  name, ex.what());
     summary.RecordFail(name, std::string("exception: ") + ex.what());
   }
+  std::fflush(stdout);
   g_catch_test_failures = prev;
+  return ok;
 }
 
 [[noreturn]] void Fail(const char *shader_name, const char *stage,
@@ -1569,6 +1615,8 @@ void ExpectFatal(const char *name, Function function) {
           "fork failed while starting fatal shader test");
   if (pid == 0) {
     g_catch_test_failures = false;
+    g_suite_summary = nullptr;
+    g_summary_printed = true;
     Common::SetThreadRecoverHook(nullptr);
     function();
     ::_exit(0);
@@ -59526,6 +59574,8 @@ int main(int argc, char **argv) {
     return 2;
   }
   TestSuiteSummary summary;
+  g_suite_summary = &summary;
+  std::atexit(PrintSuiteSummaryAtExit);
   VulkanHarness vulkan;
   // Keep compute and host checks running when rasterization features are missing.
   const bool rasterization = vulkan.RasterizationSupported();
@@ -59566,6 +59616,8 @@ int main(int argc, char **argv) {
     return 2;
   }
   TestSuiteSummary summary;
+  g_suite_summary = &summary;
+  std::atexit(PrintSuiteSummaryAtExit);
   RunSuiteStep(summary, "ShaderRecompilerFatalContracts", [&] { CheckShaderRecompilerFatalContracts(); });
   RunSuiteStep(summary, "DepthFeedbackAspects", [&] { CheckDepthFeedbackAspects(); });
   VulkanHarness vulkan;
@@ -59714,91 +59766,32 @@ int main(int argc, char **argv) {
       summary.RecordSkip(name, "production rasterization features unavailable");
     }
   }
-  const auto tests = MakeCases();
-  const auto graphics_tests = MakeGraphicsCases();
-  RunSuiteStep(summary, "OpcodeCoverage", [&] { CheckOpcodeCoverage(tests, graphics_tests); });
+  std::vector<TestCase> tests;
+  std::vector<GraphicsCase> graphics_tests;
+  const bool have_tests = RunSuiteStep(summary, "MakeCases", [&] { tests = MakeCases(); });
+  const bool have_graphics_tests = RunSuiteStep(summary, "MakeGraphicsCases", [&] { graphics_tests = MakeGraphicsCases(); });
+  if (have_tests && have_graphics_tests) {
+    RunSuiteStep(summary, "OpcodeCoverage", [&] { CheckOpcodeCoverage(tests, graphics_tests); });
+  }
   for (const auto &test : tests) {
-    const u32 skipped_before = vulkan.SkippedRobustCaseCount();
-    const bool prev = g_catch_test_failures;
-    g_catch_test_failures = true;
-    try {
-      Common::RecoverableScope recover;
+    RunSuiteStep(summary, test.name, [&] {
+      const u32 skipped_before = vulkan.SkippedRobustCaseCount();
       RunCase(&vulkan, test);
       if (vulkan.SkippedRobustCaseCount() > skipped_before) {
-        summary.RecordSkip(
-            test.name,
-            "robustBufferAccess2 alignment=" +
-                std::to_string(static_cast<uint64_t>(
-                    vulkan.RobustStorageBufferAlignment())));
-      } else {
-        summary.RecordPass(test.name);
+        throw TestCaseSkip{"robustBufferAccess2 alignment=" +
+                           std::to_string(static_cast<uint64_t>(
+                               vulkan.RobustStorageBufferAlignment()))};
       }
-    } catch (const TestCaseSkip &skip) {
-      std::printf("[skip]    %-32s (%s)\n", test.name, skip.reason.c_str());
-      summary.RecordSkip(test.name, skip.reason);
-    } catch (const TestCaseFailure &failure) {
-      summary.RecordFail(test.name, failure.stage + ": " + failure.message);
-    } catch (const Common::RecoverableFailure &failure) {
-      const auto msg = TrimTrailingNewlines(failure.what());
-      if (msg.find("image format does not support required usage:") !=
-          std::string::npos) {
-        std::printf("[skip]    %-32s (%s)\n", test.name, msg.c_str());
-        summary.RecordSkip(test.name, msg);
-      } else {
-        std::fprintf(stderr, "ShaderRecompilerComputeTests: %s hit fatal at %s:%d: %s\n",
-                     test.name, failure.file != nullptr ? failure.file : "?",
-                     failure.line, msg.c_str());
-        summary.RecordFail(
-            test.name, std::string("fatal at ") +
-                           (failure.file != nullptr ? failure.file : "?") + ":" +
-                           std::to_string(failure.line) + ": " + msg);
-      }
-    } catch (const std::exception &ex) {
-      std::fprintf(stderr, "ShaderRecompilerComputeTests: %s threw exception: %s\n",
-                   test.name, ex.what());
-      summary.RecordFail(test.name, std::string("exception: ") + ex.what());
-    }
-    g_catch_test_failures = prev;
+    });
   }
   for (const auto &test : graphics_tests) {
-    const u32 skipped_before = vulkan.SkippedCaseCount();
-    const bool prev = g_catch_test_failures;
-    g_catch_test_failures = true;
-    try {
-      Common::RecoverableScope recover;
+    RunSuiteStep(summary, test.name, [&] {
+      const u32 skipped_before = vulkan.SkippedCaseCount();
       RunGraphicsCase(&vulkan, test);
       if (vulkan.SkippedCaseCount() > skipped_before) {
-        summary.RecordSkip(test.name,
-                           "production rasterization features unavailable");
-      } else {
-        summary.RecordPass(test.name);
+        throw TestCaseSkip{"production rasterization features unavailable"};
       }
-    } catch (const TestCaseSkip &skip) {
-      std::printf("[skip]    %-32s (%s)\n", test.name, skip.reason.c_str());
-      summary.RecordSkip(test.name, skip.reason);
-    } catch (const TestCaseFailure &failure) {
-      summary.RecordFail(test.name, failure.stage + ": " + failure.message);
-    } catch (const Common::RecoverableFailure &failure) {
-      const auto msg = TrimTrailingNewlines(failure.what());
-      if (msg.find("image format does not support required usage:") !=
-          std::string::npos) {
-        std::printf("[skip]    %-32s (%s)\n", test.name, msg.c_str());
-        summary.RecordSkip(test.name, msg);
-      } else {
-        std::fprintf(stderr, "ShaderRecompilerComputeTests: %s hit fatal at %s:%d: %s\n",
-                     test.name, failure.file != nullptr ? failure.file : "?",
-                     failure.line, msg.c_str());
-        summary.RecordFail(
-            test.name, std::string("fatal at ") +
-                           (failure.file != nullptr ? failure.file : "?") + ":" +
-                           std::to_string(failure.line) + ": " + msg);
-      }
-    } catch (const std::exception &ex) {
-      std::fprintf(stderr, "ShaderRecompilerComputeTests: %s threw exception: %s\n",
-                   test.name, ex.what());
-      summary.RecordFail(test.name, std::string("exception: ") + ex.what());
-    }
-    g_catch_test_failures = prev;
+    });
   }
   RunSuiteStep(summary, "GpuSuspendPoint", [&] { vulkan.CheckGpuSuspendPoint(); });
   RunSuiteStep(summary, "GpuCommandLane", [&] { vulkan.CheckGpuCommandLane(); });
@@ -59816,31 +59809,8 @@ int main(int argc, char **argv) {
     std::printf("ShaderRecompilerComputeTests: %u robust buffer cases skipped\n",
                 vulkan.SkippedRobustCaseCount());
   }
-  std::printf("\n=== ShaderRecompilerComputeTests per-case summary ===\n");
-  for (const auto &entry : summary.results) {
-    const char *tag = entry.status == CaseStatus::Pass   ? "PASS"
-                      : entry.status == CaseStatus::Skip ? "SKIP"
-                                                         : "FAIL";
-    if (entry.detail.empty()) {
-      std::printf("[%s] %s\n", tag, entry.name.c_str());
-    } else {
-      std::printf("[%s] %s (%s)\n", tag, entry.name.c_str(),
-                  entry.detail.c_str());
-    }
-  }
-  if (summary.failed > 0) {
-    std::printf("\n=== ShaderRecompilerComputeTests failed cases (%u) ===\n",
-                summary.failed);
-    for (const auto &entry : summary.results) {
-      if (entry.status == CaseStatus::Fail) {
-        std::printf("[FAIL] %s (%s)\n", entry.name.c_str(),
-                    entry.detail.c_str());
-      }
-    }
-  }
-  std::printf("ShaderRecompilerComputeTests: %u passed, %u failed, %u skipped (%zu total)\n",
-              summary.passed, summary.failed, summary.skipped,
-              summary.results.size());
+  PrintSuiteSummary(summary);
+  g_suite_summary = nullptr;
   if (summary.failed == 0) {
     std::printf("ShaderRecompilerComputeTests: all cases passed\n");
     return 0;
