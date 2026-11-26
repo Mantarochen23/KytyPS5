@@ -3908,7 +3908,8 @@ private:
 			}
 			return finish();
 		}
-		if (table_source.dword_count != 4u || indexed) return false;
+		if (table_source.dword_count != 4u || table_offset != 0u || table_immediate != 0u || indexed)
+			return false;
 		// A bounded table V# supplies every reachable descriptor without reading the GPU key,
 		// as for loads. Used when the key is not a bounded loop-selected material value.
 		const auto scalar_table = [&] {
@@ -3916,10 +3917,6 @@ private:
 			indirect.table_scalar = true;
 			return finish();
 		};
-		// The affine start of a descriptor table is scan geometry, not a reason to reject a
-		// pointer-loaded V#: the bounded scalar scan reads from table_offset + table_immediate
-		// and caps the number of rows. Loads already take this path for any start offset.
-		if (table_offset != 0u || table_immediate != 0u) return scalar_table();
 		const auto* lane_read = key.Resolve().TryInstruction();
 		if (lane_read == nullptr || lane_read->GetOpcode() != ValueOpcode::ReadFirstLane)
 			return false;
