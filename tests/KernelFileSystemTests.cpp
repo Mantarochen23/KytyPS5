@@ -2262,7 +2262,7 @@ void CheckAmprOrdering(Loader::SymbolDatabase &symbols, uint32_t file_id) {
     uint64_t expected_apr_offset = 0;
     for (uint32_t i = 0; i < kReplayPairs; ++i) {
       const uint32_t counter_val = i + 2;
-      const uint64_t va = 0x1000000000ull + static_cast<uint64_t>(i) * 0x10000ull;
+      const uint64_t va = 0x80000000000ull + static_cast<uint64_t>(i) * 0x10000ull;
       Check(allocate_pa_for_prt(amm_header.data(), va, 0x10000, 0xc, 0xf2) == OK &&
                 write_counter(amm_header.data(), 0x10, 1, counter_val, 0, 0) == OK &&
                 wait_counter(apr_header.data(), 0x10, 1, counter_val - 1, 1, 0, 0, 0) == OK &&
@@ -2325,14 +2325,14 @@ void CheckAmprOrdering(Loader::SymbolDatabase &symbols, uint32_t file_id) {
     // Fill amm_header (reset to 0) to exact capacity and verify EBUSY triggers cleanly.
     Check(reset_buffer(amm_header.data()) == OK, "reset AMM buffer for overflow check");
     uint32_t full_pairs = 0;
-    while (allocate_pa_for_prt(amm_header.data(), 0x1000000000ull, 0x10000, 0xc, 0xf2) == OK) {
+    while (allocate_pa_for_prt(amm_header.data(), 0x80000000000ull, 0x10000, 0xc, 0xf2) == OK) {
       if (write_counter(amm_header.data(), 0x10, 1, full_pairs + 1, 0, 0) != OK) {
         break;
       }
       ++full_pairs;
     }
     Check(full_pairs > 3000 &&
-              allocate_pa_for_prt(amm_header.data(), 0x1000000000ull, 0x10000, 0xc, 0xf2) ==
+              allocate_pa_for_prt(amm_header.data(), 0x80000000000ull, 0x10000, 0xc, 0xf2) ==
                   Libs::LibKernel::KERNEL_ERROR_EBUSY,
           "0x10100 AMM buffer holds >3,000 AllocatePaForPrt+WriteCounter pairs before EBUSY");
 
