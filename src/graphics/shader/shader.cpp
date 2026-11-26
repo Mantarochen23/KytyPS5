@@ -141,10 +141,16 @@ void ShaderMapUserData(uint64_t addr, const ShaderMappedData& data) {
 	     .translated_size_bytes = mapped.code_size_bytes,
 	     .scratch_size_dwords   = data.scratch_size_dwords,
 	     .input_semantics       = data.num_input_semantics,
-	     .direct_resources      = data.user_data != nullptr ? data.user_data->direct_resource_count : 0,
+	     .direct_resources      = data.user_data != nullptr
+	                                  ? static_cast<uint32_t>(data.user_data->direct_resource_count)
+	                                  : 0u,
 	     .sharp_resources       = sharp_resources,
-	     .eud_size_dwords       = data.user_data != nullptr ? data.user_data->eud_size_dw : 0,
-	     .srt_size_dwords       = data.user_data != nullptr ? data.user_data->srt_size_dw : 0},
+	     .eud_size_dwords       = data.user_data != nullptr
+	                                  ? static_cast<uint32_t>(data.user_data->eud_size_dw)
+	                                  : 0u,
+	     .srt_size_dwords       = data.user_data != nullptr
+	                                  ? static_cast<uint32_t>(data.user_data->srt_size_dw)
+	                                  : 0u},
 	    code_copy);
 	mapped.vertex_error =
 	    ShaderReadVertexMetadata(data, HW::UserSgprInfo::SGPRS_MAX, mapped.vertex);
