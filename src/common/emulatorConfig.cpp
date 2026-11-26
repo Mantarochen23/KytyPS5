@@ -498,4 +498,8 @@ bool ShaderKeyIndexEnabled() {
 	return g_config != nullptr && g_config->shader_key_index_enabled;
 }
 
+uint32_t AsyncPumpBudgetMs() {
+	return g_config != nullptr ? g_config->async_pump_budget_ms : 2u;
+}
+
 } // namespace Config

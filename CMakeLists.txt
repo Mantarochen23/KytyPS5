@@ -521,6 +521,13 @@ add_executable(buffer_probe_tests EXCLUDE_FROM_ALL
 )
 target_include_directories(buffer_probe_tests PRIVATE ${inc_headers})
 
+add_executable(shader_workers_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/ShaderWorkersTests.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/pipeline/shaderWorkers.cpp"
+)
+target_link_libraries(shader_workers_tests common)
+target_include_directories(shader_workers_tests PRIVATE ${inc_headers})
+
 add_executable(lru_cache_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/LruCacheTests.cpp"
 )

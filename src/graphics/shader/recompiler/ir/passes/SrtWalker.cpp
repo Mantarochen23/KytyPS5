@@ -7,6 +7,8 @@
 #include <xbyak/xbyak.h>
 
 #include <algorithm>
+#include <atomic>
+#include <tuple>
 #include <bit>
 #include <cstring>
 #include <deque>
@@ -1528,9 +1530,46 @@ bool WalkedImageActive(const ResourcePlan& plan, uint32_t image) {
 	return Scratch(plan)[ActiveOffset(plan) + plan.descriptor_sources.size() + image] != 0u;
 }
 
+struct RuntimeValueMemoScope::State {
+	const ResourcePlan*                                             plan = nullptr;
+	std::map<std::tuple<const Inst*, RuntimeValueType, bool>, bool> results;
+};
+
+static thread_local RuntimeValueMemoScope::State* t_memo = nullptr;
+static std::atomic<bool> g_memo_enabled {true};
+
+RuntimeValueMemoScope::RuntimeValueMemoScope(const ResourcePlan& plan): m_outer(t_memo) {
+	if (g_memo_enabled.load(std::memory_order_relaxed)) {
+		m_state       = std::make_unique<State>();
+		m_state->plan = &plan;
+		t_memo        = m_state.get();
+	}
+}
+
+RuntimeValueMemoScope::~RuntimeValueMemoScope() {
+	if (m_state != nullptr) t_memo = m_outer;
+}
+
+void SetRuntimeValueMemoEnabled(bool enabled) {
+	g_memo_enabled.store(enabled, std::memory_order_relaxed);
+}
+
 bool ValidateRuntimeValue(const ResourcePlan& program, Value value, RuntimeValueType type,
                           bool allow_dynamic_srt) {
-	return RuntimeValidator(program, type, false, allow_dynamic_srt).Run(value);
+	// A query starts with an empty active mask and no lane reads, so its answer depends only on
+	// the instruction, the type and the flag.
+	const auto* inst = t_memo != nullptr && t_memo->plan == &program
+	                       ? value.Resolve().TryInstruction() : nullptr;
+	if (inst == nullptr) {
+		return RuntimeValidator(program, type, false, allow_dynamic_srt).Run(value);
+	}
+	const auto key = std::make_tuple(inst, type, allow_dynamic_srt);
+	if (const auto found = t_memo->results.find(key); found != t_memo->results.end()) {
+		return found->second;
+	}
+	const bool result = RuntimeValidator(program, type, false, allow_dynamic_srt).Run(value);
+	t_memo->results.emplace(key, result);
+	return result;
 }
 
 bool ValidateWaveUniformValue(const ResourcePlan& program, Value value) {

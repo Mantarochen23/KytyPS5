@@ -1547,6 +1547,8 @@ static bool DerivePlanState(ResourcePlan& plan) {
 }
 
 ResourcePlan ExtractResourcePlan(const Program& program) {
+	// The program is read-only here, and the same operands are validated again and again.
+	const RuntimeValueMemoScope memo(program);
 	ResourcePlan plan;
 	plan.stage                      = program.stage;
 	plan.shader_hash                = program.shader_hash;

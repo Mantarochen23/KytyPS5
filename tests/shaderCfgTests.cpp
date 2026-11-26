@@ -22,6 +22,7 @@
 #include "graphics/shader/recompiler/ir/IREmitter.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/recompiler/ir/passes/ConstantPropagation.h"
+#include "graphics/shader/recompiler/ir/passes/SrtWalker.h"
 #include "graphics/shader/recompiler/ir/passes/DeadCodeElimination.h"
 #include "graphics/shader/recompiler/ir/passes/ReadLaneElimination.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceTracking.h"
@@ -293,7 +294,11 @@ TestCompileResult RecompileForTestOnce(
     const ShaderRecompiler::CompileOptions &options,
     ShaderRecompiler::IR::PushData::Window push_data) {
   auto translated = ShaderRecompiler::TranslateProgram(code, options);
+  const auto plan_begin = NowNs();
   auto plan = ShaderRecompiler::IR::ExtractResourcePlan(translated.program);
+  if (g_pass_bench.measuring) {
+    g_pass_bench.current["ExtractResourcePlan"] += NowNs() - plan_begin;
+  }
   ShaderRecompiler::IR::ResourceSnapshot resources;
   ShaderRecompiler::IR::ResourceSpecialization specialization;
   const ShaderRecompiler::IR::SrtRuntime runtime{
@@ -14122,7 +14127,10 @@ int main(int argc, char** argv) {
 
   for (int i = 1; i < argc; i++) {
     const std::string arg = argv[i];
-    if (arg.rfind("--pass-bench", 0) == 0) {
+    if (arg == "--pass-bench-nomemo") {
+      // Time ExtractResourcePlan without its runtime-value memo, for a before/after run.
+      ShaderRecompiler::IR::SetRuntimeValueMemoEnabled(false);
+    } else if (arg.rfind("--pass-bench", 0) == 0) {
       g_pass_bench.enabled = true;
       g_pass_bench.repeat = arg.size() > 13 ? static_cast<unsigned>(std::atoi(arg.c_str() + 13)) : 1;
     } else if (arg == "--pass-continue") {

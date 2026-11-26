@@ -4,6 +4,7 @@
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 
 #include <algorithm>
+#include <memory>
 #include <span>
 
 namespace Libs::Graphics::ShaderRecompiler::IR {
@@ -67,6 +68,24 @@ enum class RuntimeValueType { Any, Integer, ImmutableInteger, StorageImmutableIn
 bool ValidateRuntimeValue(const ResourcePlan& program, Value value,
                           RuntimeValueType type = RuntimeValueType::Any,
                           bool            allow_dynamic_srt = false);
+// While alive on a thread, ValidateRuntimeValue answers repeated queries about the same instruction
+// of `plan` (same type and flags) from a memo instead of walking its operands again. The plan's
+// graph must not change meanwhile; ExtractResourcePlan holds one over its read-only input. A scope
+// is per thread. SetRuntimeValueMemoEnabled(false) turns the memo off for before/after timing.
+class RuntimeValueMemoScope {
+public:
+	explicit RuntimeValueMemoScope(const ResourcePlan& plan);
+	~RuntimeValueMemoScope();
+	RuntimeValueMemoScope(const RuntimeValueMemoScope&)            = delete;
+	RuntimeValueMemoScope& operator=(const RuntimeValueMemoScope&) = delete;
+
+private:
+	struct State;
+	std::unique_ptr<State> m_state;
+	State*                 m_outer = nullptr;
+};
+void SetRuntimeValueMemoEnabled(bool enabled);
+
 // Uniform across a compute wave, including values derived from its workgroup ID.
 // This does not imply that the host can evaluate the value.
 bool ValidateWaveUniformValue(const ResourcePlan& program, Value value);

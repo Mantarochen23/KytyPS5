@@ -143,6 +143,8 @@ static void PrintUsage() {
 	}
 	::printf("  --shader-key-index                   Persist a shader hash -> ProgramKey index in the\n"
 	         "                                       shader store for next-boot lookup. Default: off.\n");
+	::printf("  --async-pump-budget-ms <ms>          Render-thread time per frame step spent applying finished\n"
+	         "                                       async shader jobs; 0 = unlimited. Default: 2.\n");
 }
 
 static bool NextArg(int argc, char* argv[], int& index, std::string& out) {
@@ -549,6 +551,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 		} else if (arg == "--disable-port") {
 			if (!Config::ParseDisabledPorts(value, options.config.disabled_ports)) {
 				::printf("unknown port in --disable-port: %s\n", value.c_str());
+				return false;
+			}
+		} else if (arg == "--async-pump-budget-ms") {
+			if (!ParseUint32(value, options.config.async_pump_budget_ms)) {
+				::printf("invalid async pump budget: %s\n", value.c_str());
 				return false;
 			}
 		} else {

@@ -142,6 +142,9 @@ struct ConfigOptions {
 	// --disable-port: names from common/ports.h whose ported behaviour is turned off.
 	std::vector<std::string> disabled_ports;
 	bool                     shader_key_index_enabled   = false;
+	// --async-pump-budget-ms: render-thread time per PumpAsync call for applying finished
+	// shader jobs; 0 = unlimited.
+	uint32_t                 async_pump_budget_ms       = 2;
 };
 
 void Load(const ConfigOptions& cfg);
@@ -244,6 +247,7 @@ bool     BufferProbeEnabled();
 const std::vector<uint64_t>& BufferProbeHashes();
 uint32_t LoopGuardLimit();
 bool ShaderKeyIndexEnabled();
+uint32_t AsyncPumpBudgetMs();
 
 } // namespace Config
 

@@ -34,144 +34,13 @@
 // reading them must happen in the draw. A second worker then emits and creates the module.
 namespace Libs::Graphics {
 
-ShaderWorkers::ShaderWorkers(uint32_t threads) {
-	for (uint32_t i = 0; i < threads; i++) {
-		m_threads.emplace_back([this, i](std::stop_token stop) {
-			Common::Thread::LowerPriority();
-			std::unique_lock lock(m_mutex);
-			// Once stop is requested the wait returns false only when no job may be taken.
-			while (m_ready.wait(lock, stop, [this, i] { return CanPick(i); })) {
-				const auto job = Pick(i);
-				if (!job) {
-					continue;
-				}
-				lock.unlock();
-				{
-					struct JobCounterGuard {
-						~JobCounterGuard() { NoteShaderWorkerJobsFinished(1); }
-					} guard;
-					job->run();
-				}
-				lock.lock();
-			}
-		});
-	}
-}
-
-bool ShaderWorkers::CanPick(uint32_t index) const {
-	const auto now     = AskClockMs();
-	const auto allowed = [&](const JobPtr& job) {
-		return index < BackgroundWorkers ||
-		       now - job->asked.load(std::memory_order_relaxed) < StaleAfterMs;
-	};
-	return std::ranges::any_of(m_urgent_jobs, allowed) || std::ranges::any_of(m_jobs, allowed);
-}
-
-ShaderWorkers::JobPtr ShaderWorkers::Pick(uint32_t index) {
-	const auto now = AskClockMs();
-	for (auto* pool: {&m_urgent_jobs, &m_jobs}) {
-		auto best = pool->end();
-		for (auto it = pool->begin(); it != pool->end(); ++it) {
-			if (index >= BackgroundWorkers &&
-			    now - (*it)->asked.load(std::memory_order_relaxed) >= StaleAfterMs) {
-				continue;
-			}
-			// Worker 0 takes the oldest, the others the one asked for last.
-			if (best == pool->end() ||
-			    (index == 0 ? (*it)->sequence < (*best)->sequence
-			                : (*it)->asked.load(std::memory_order_relaxed) >
-			                      (*best)->asked.load(std::memory_order_relaxed))) {
-				best = it;
-			}
-		}
-		if (best != pool->end()) {
-			auto job = std::move(*best);
-			// The order in the vector does not matter: the choice scans all of it.
-			*best = std::move(pool->back());
-			pool->pop_back();
-			return job;
-		}
-	}
-	return nullptr;
-}
-
-ShaderWorkers::JobPtr ShaderWorkers::Post(Common::UniqueFunction<void>&& run, Priority priority) {
-	auto job      = std::make_shared<Job>();
-	job->run      = std::move(run);
-	job->priority = priority;
-	job->Touch();
-	{
-		std::scoped_lock lock(m_mutex);
-		if (m_stopped) {
-			return nullptr;
-		}
-		job->sequence = m_next_sequence++;
-		(priority == Priority::Urgent ? m_urgent_jobs : m_jobs).push_back(job);
-		NoteShaderWorkerJobsAdded(1);
-	}
-	m_ready.notify_one();
-	return job;
-}
-
-void ShaderWorkers::Promote(const JobPtr& job) {
-	if (!job) {
-		return;
-	}
-	job->Touch();
-	bool promoted = false;
-	{
-		std::scoped_lock lock(m_mutex);
-		if (m_stopped || job->priority == Priority::Urgent) {
-			return;
-		}
-		if (const auto it = std::ranges::find(m_jobs, job); it != m_jobs.end()) {
-			job->priority = Priority::Urgent;
-			m_urgent_jobs.push_back(std::move(*it));
-			*it = std::move(m_jobs.back());
-			m_jobs.pop_back();
-			promoted = true;
-		}
-	}
-	if (promoted) {
-		m_ready.notify_one();
-	}
-}
-
-size_t ShaderWorkers::Queued() {
-	std::scoped_lock lock(m_mutex);
-	return m_urgent_jobs.size() + m_jobs.size();
-}
-
-bool ShaderWorkers::Stopped() {
-	std::scoped_lock lock(m_mutex);
-	return m_stopped;
-}
-
-void ShaderWorkers::Stop() {
-	uint32_t dropped = 0;
-	{
-		std::scoped_lock lock(m_mutex);
-		m_stopped = true;
-		dropped   = static_cast<uint32_t>(m_jobs.size() + m_urgent_jobs.size());
-		m_jobs.clear();
-		m_urgent_jobs.clear();
-	}
-	if (dropped != 0) {
-		NoteShaderWorkerJobsFinished(dropped);
-	}
-	for (auto& thread: m_threads) {
-		thread.request_stop();
-	}
-	// A running job finishes first.
-	m_threads.clear();
-}
-
 PipelineCache::Async::~Async() {
 	workers.Stop();
-	uint32_t pending_done = 0;
+	uint32_t pending_done = static_cast<uint32_t>(backlog.size());
+	backlog.clear();
 	{
 		std::scoped_lock lock(done_mutex);
-		pending_done = static_cast<uint32_t>(done.size());
+		pending_done += static_cast<uint32_t>(done.size());
 		done.clear();
 	}
 	if (pending_done != 0) {
@@ -332,6 +201,7 @@ void PipelineCache::RequestAsync(const ProgramKey& key, Program* program,
 		bool        failed    = false;
 		bool        sync_only = false;
 		std::unique_ptr<ShaderRecompiler::TranslateResult> translated;
+		std::unique_ptr<ShaderRecompiler::IR::ResourcePlan> plan;
 		try {
 			if (inputs->key.stage == ShaderType::Compute) {
 				// Decode before PrepareShaderSource so GPU-selected calls (s_swappc_b64) never
@@ -348,6 +218,12 @@ void PipelineCache::RequestAsync(const ProgramKey& key, Program* program,
 				translated = std::make_unique<ShaderRecompiler::TranslateResult>(
 				    ShaderRecompiler::TranslateProgram(inputs->code, inputs->options));
 			}
+			// The resource plan reads only the translated program, which no other thread touches.
+			// Its x86 walker is built with Xbyak, whose error state is per thread.
+			if (translated != nullptr) {
+				plan = std::make_unique<ShaderRecompiler::IR::ResourcePlan>(
+				    ShaderRecompiler::IR::ExtractResourcePlan(translated->program));
+			}
 		} catch (const Common::RecoverableFailure& e) {
 			failed      = true;
 			fail_reason = e.what();
@@ -359,7 +235,8 @@ void PipelineCache::RequestAsync(const ProgramKey& key, Program* program,
 		}
 		async->Finish([this, inputs, translating, failed, sync_only,
 		               fail_reason = std::move(fail_reason), fail_file, fail_line,
-		               translated  = std::move(translated)]() mutable {
+		               translated  = std::move(translated),
+		               plan        = std::move(plan)]() mutable {
 			m_async->in_flight.erase(translating);
 			if (sync_only) {
 				m_async->sync_only_keys.insert(inputs->key);
@@ -377,11 +254,8 @@ void PipelineCache::RequestAsync(const ProgramKey& key, Program* program,
 				m_program_cache.try_emplace(inputs->key).first->second.skip_dispatch = true;
 				return;
 			}
-			// ExtractResourcePlan builds the Xbyak SRT walker on the render thread so Xbyak's
-			// global error state is never raced across worker threads.
 			if (!m_program_cache.contains(inputs->key)) {
-				auto plan = ShaderRecompiler::IR::ExtractResourcePlan(translated->program);
-				m_program_cache.emplace(inputs->key, Program {.resource_plan = std::move(plan)});
+				m_program_cache.emplace(inputs->key, Program {.resource_plan = std::move(*plan)});
 			}
 			m_async->translations.insert_or_assign(
 			    inputs->key, Async::Translation {inputs, std::move(translated), AskClockMs()});
@@ -413,21 +287,41 @@ void PipelineCache::SetAsyncFinishCallback(Common::UniqueFunction<void>&& callba
 	m_async->on_finish = std::move(callback);
 }
 
+// Moves what the workers finished into the render thread's backlog.
+void PipelineCache::Async::TakeFinished() {
+	std::scoped_lock lock(done_mutex);
+	for (auto& apply: done) {
+		backlog.push_back(std::move(apply));
+	}
+	done.clear();
+}
+
+// The jobs applied here are the render-thread-bound steps only: the cache, the module and pipeline
+// hand-off. Everything else ran on the workers. The backlog is applied within the time budget
+// (--async-pump-budget-ms, at least one job per call), so a burst of finished jobs is spread over
+// several calls instead of holding up the draw that called.
 void PipelineCache::PumpAsync() {
 	if (m_async == nullptr) {
 		return;
 	}
-	std::vector<Common::UniqueFunction<void>> done;
-	{
-		std::scoped_lock lock(m_async->done_mutex);
-		done.swap(m_async->done);
+	const auto begin = std::chrono::steady_clock::now();
+	m_async->TakeFinished();
+	const auto now_us = [] {
+		return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+		                                 std::chrono::steady_clock::now().time_since_epoch())
+		                                 .count());
+	};
+	const auto applied = ApplyWithinBudget(
+	    m_async->backlog, static_cast<uint64_t>(Config::AsyncPumpBudgetMs()) * 1000u, now_us);
+	if (applied != 0) {
+		NoteShaderWorkerJobsFinished(static_cast<uint32_t>(applied));
+		m_async->pump_applied += static_cast<uint32_t>(applied);
 	}
-	for (auto& apply: done) {
-		apply();
-	}
-	if (!done.empty()) {
-		NoteShaderWorkerJobsFinished(static_cast<uint32_t>(done.size()));
-	}
+	const auto spent = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+	                                             std::chrono::steady_clock::now() - begin)
+	                                             .count());
+	m_async->pump_us += spent;
+	m_async->pump_worst_us = std::max(m_async->pump_worst_us, spent);
 	m_async->ReportStatus();
 }
 
@@ -435,19 +329,17 @@ void PipelineCache::WaitForAsync() {
 	if (m_async == nullptr) {
 		return;
 	}
-	std::vector<Common::UniqueFunction<void>> done;
-	{
+	if (m_async->backlog.empty()) {
 		std::unique_lock lock(m_async->done_mutex);
 		m_async->done_cv.wait(lock, [this] {
 			return !m_async->done.empty() || m_async->workers.Stopped();
 		});
-		done.swap(m_async->done);
 	}
-	for (auto& apply: done) {
-		apply();
-	}
-	if (!done.empty()) {
-		NoteShaderWorkerJobsFinished(static_cast<uint32_t>(done.size()));
+	m_async->TakeFinished();
+	// The caller is blocked until something it waits for is ready: apply everything.
+	const auto applied = ApplyWithinBudget(m_async->backlog, 0, [] { return uint64_t {0}; });
+	if (applied != 0) {
+		NoteShaderWorkerJobsFinished(static_cast<uint32_t>(applied));
 	}
 	m_async->ReportStatus();
 }
@@ -495,6 +387,7 @@ void PipelineCache::Async::ReportStatus() {
 	if (now - last_report_ms < 2000) {
 		return;
 	}
+	const auto last_status_ms = last_report_ms;
 	last_report_ms = now;
 	// A translation no draw has come back for in a minute belongs to something no longer on
 	// screen; a later draw translates it again.
@@ -522,17 +415,28 @@ void PipelineCache::Async::ReportStatus() {
 	const auto skipped       = skipped_total - reported_skipped;
 	reported_skipped         = skipped_total;
 	const bool busy = !in_flight.empty() || !translations.empty() || pipelines_building != 0 ||
-	                  skipped != 0;
+	                  skipped != 0 || !backlog.empty();
 	if (busy) {
+		const auto   finished = workers.FinishedJobs();
+		const double window_s = static_cast<double>(std::max<uint64_t>(now - last_status_ms, 1)) / 1000.0;
 		std::printf("Async: %zu translating, %zu compiling, %zu waiting (oldest %.0f s), %u pipelines, "
-		            "%zu queued, %" PRIu64 " skipped/2s, %zu/%zu redrawn\n",
+		            "%zu queued, %" PRIu64 " skipped/2s, %zu/%zu redrawn; workers %u/%u busy, "
+		            "%.1f jobs/s, pump %.1f ms (worst %.1f ms, %u applied, %zu backlog)\n",
 		            translating, compiling, translations.size(),
 		            static_cast<double>(oldest) / 1000.0, pipelines_building, workers.Queued(),
-		            skipped, redrawn, targets.size());
+		            skipped, redrawn, targets.size(), workers.Busy(), workers.ThreadCount(),
+		            static_cast<double>(finished - reported_finished) / window_s,
+		            static_cast<double>(pump_us) / 1000.0,
+		            static_cast<double>(pump_worst_us) / 1000.0, pump_applied, backlog.size());
+		reported_finished = finished;
 	} else if (was_busy) {
 		std::printf("Async: idle\n");
 	}
 	was_busy            = busy;
+	pump_us             = 0;
+	pump_worst_us       = 0;
+	pump_applied        = 0;
+	reported_finished   = workers.FinishedJobs();
 	uint64_t stalled_us = 0;
 	for (const auto& cost: stalls.by_reason) {
 		stalled_us += cost.us;
