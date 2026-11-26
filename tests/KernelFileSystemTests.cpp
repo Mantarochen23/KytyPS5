@@ -3386,6 +3386,15 @@ int main(int argc, char** argv) {
     std::printf("KernelFileSystemTests: mutex cases passed\n");
     return 0;
   }
+  // The APR/AMPR cases need no window, so they also run on a host without a display.
+  if (argc == 2 && std::string_view(argv[1]) == "--apr-only") {
+    TempDirectory temporary;
+    FileSystem::Initialize();
+    CheckAprPaths(temporary.Path());
+    subsystems.Destroy();
+    std::printf("KernelFileSystemTests: APR cases passed\n");
+    return 0;
+  }
 
   Check(SDL_InitSubSystem(SDL_INIT_VIDEO), "initialize Vulkan test video");
   auto graphics = std::make_unique<Libs::Graphics::WindowContext>();
