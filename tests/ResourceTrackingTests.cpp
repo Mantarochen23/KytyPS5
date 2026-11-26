@@ -15,6 +15,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <type_traits>
 #include <vector>
@@ -8306,6 +8307,188 @@ void TestFiniteInlineSampler() {
              "finite sampler planning accepted a shared SampleAdjust handle");
 }
 
+void TestFiniteBufferAtomic() {
+  namespace CFG = Libs::Graphics::ShaderRecompiler::CFG;
+  const auto Build = [](Fixture& fixture, ValueOpcode atomic, Value data) {
+    auto* entry = fixture.block;
+    auto* reloaded = fixture.AddBlock();
+    auto* merge = fixture.AddBlock();
+    entry->AddBranch(reloaded);
+    entry->AddBranch(merge);
+    reloaded->AddBranch(merge);
+    std::array<Value, 8> descriptors;
+    for (uint32_t word = 0; word < descriptors.size(); ++word)
+      descriptors[word] = fixture.UserData(word);
+    const auto lane = fixture.Emit(ValueOpcode::GetBuiltin,
+        {Value(static_cast<uint32_t>(StageInputKind::LocalInvocationId)), Value(0u)});
+    entry->condition = fixture.Emit(ValueOpcode::IEqual32, {lane, Value(0u)});
+    entry->terminator = {.kind = CFG::TerminatorKind::ConditionalBranch,
+                        .true_block = reloaded, .false_block = merge};
+    reloaded->terminator = {.kind = CFG::TerminatorKind::Branch, .true_block = merge};
+    merge->terminator.kind = CFG::TerminatorKind::Return;
+    fixture.block = merge;
+    std::array<Value, 4> chosen;
+    for (uint32_t word = 0; word < chosen.size(); ++word) {
+      auto& phi = merge->AppendNewInst(ValueOpcode::Phi, {}, uint64_t(Type::U32));
+      phi.AddPhiOperand(entry, descriptors[word]);
+      phi.AddPhiOperand(reloaded, descriptors[word + 4u]);
+      chosen[word] = Value(&phi);
+    }
+    const auto handle = fixture.Buffer(chosen, 0x980);
+    MemoryInfo memory;
+    memory.kind = ResourceKind::Buffer;
+    fixture.Emit(atomic, {handle, Value(0u), Value(0u), Value(0u), data, Value(true)},
+                 fixture.AddMemory(memory, 0x980));
+    return std::pair{handle, merge};
+  };
+  Fixture fixture;
+  auto* entry = fixture.block;
+  const auto [handle, merge] = Build(fixture, ValueOpcode::BufferAtomicIAdd32, Value(1u));
+  fixture.PlanAndTrack();
+  const auto& tracked = fixture.program.memory_info[0];
+  Check(tracked.kind == ResourceKind::Buffer &&
+            tracked.resource < fixture.program.info.buffers.size(),
+        "atomic on a Phi of two buffer descriptors was not bound as a buffer");
+  const auto root = tracked.resource;
+  const auto& finite = fixture.program
+      .descriptor_sources[fixture.program.info.buffers[root].source].indirect_descriptor;
+  Check(fixture.program.info.buffers[root].atomic && finite && finite->sources.size() == 2,
+        "finite buffer plan lost a descriptor or its atomic use");
+  const auto* selection = handle.Instruction()->Arg(0).TryInstruction();
+  Check(selection != nullptr && selection->GetOpcode() == ValueOpcode::GetBufferResourceIndex,
+        "finite buffer handle does not select its candidate");
+  const auto* key = selection->Arg(0).TryInstruction();
+  Check(key != nullptr && key->GetOpcode() == ValueOpcode::Phi && key->Parent() == merge &&
+            key->PhiBlock(0) == entry && key->PhiBlock(1) != entry &&
+            key->Arg(0).U32() == 0 && key->Arg(1).U32() == 1,
+        "finite buffer key does not follow the descriptor Phis");
+  const auto plan = ExtractResourcePlan(fixture.program);
+  const std::array<uint32_t, 8> user_data{0x1000, 16u << 16u, 1, 0x4dfac,
+                                          0x3000, 16u << 16u, 1, 0x4dfac};
+  TestMemory memory;
+  const SrtRuntime runtime{.user_data = user_data, .userdata = &memory,
+                           .read_specialization_memory = ReadTestMemory};
+  ResourceSnapshot snapshot;
+  ResourceSpecialization specialization;
+  Check(MaterializeResources(plan, runtime, snapshot, specialization),
+        "finite buffer descriptors could not materialize");
+  ApplyResourceSpecialization(fixture.program, specialization);
+  const auto& candidates = fixture.program.info.buffers[root].indirect_resources;
+  Check(candidates.size() == 2 && std::ranges::max(candidates) < snapshot.buffers.size(),
+        "finite buffer specialization lost a candidate");
+  Check(snapshot.buffers[candidates[0]].dwords[0] == 0x1000 &&
+            snapshot.buffers[candidates[1]].dwords[0] == 0x3000,
+        "finite buffer candidates do not hold the two descriptors in key order");
+  Check(std::ranges::all_of(candidates, [&](uint32_t candidate) {
+          return fixture.program.info.buffers[candidate].atomic;
+        }),
+        "finite buffer candidate is not tracked as atomically written");
+
+  Fixture wide;
+  Build(wide, ValueOpcode::BufferAtomicIAdd64, Value(uint64_t{1}));
+  CheckFatal([&] { wide.PlanAndTrack(); }, "not a valid runtime value",
+             "finite buffer planning accepted a 64-bit atomic without candidate selection");
+}
+
+void TestFiniteBufferAtomicSelect() {
+  const auto build = [](Fixture& fixture, bool mismatched) {
+    const auto lane = fixture.Emit(ValueOpcode::GetBuiltin,
+        {Value(static_cast<uint32_t>(StageInputKind::LocalInvocationId)), Value(0u)});
+    auto condition = fixture.Emit(ValueOpcode::IEqual32, {lane, Value(0u)});
+    std::array<Value, 4> words;
+    for (uint32_t word = 0; word < words.size(); ++word) {
+      if (mismatched && word == 2u)
+        condition = fixture.Emit(ValueOpcode::IEqual32, {lane, Value(1u)});
+      words[word] = fixture.Emit(ValueOpcode::SelectU32,
+          {condition, fixture.UserData(word), fixture.UserData(word + 4u)});
+    }
+    const auto handle = fixture.Buffer(words, 0x9a0);
+    MemoryInfo memory;
+    memory.kind = ResourceKind::Buffer;
+    fixture.Emit(ValueOpcode::BufferAtomicIAdd32,
+        {handle, Value(0u), Value(0u), Value(0u), Value(1u), Value(true)},
+        fixture.AddMemory(memory, 0x9a0));
+    return handle;
+  };
+  Fixture fixture;
+  const auto handle = build(fixture, false);
+  fixture.PlanAndTrack();
+  const auto root = fixture.program.memory_info[0].resource;
+  const auto& finite = fixture.program
+      .descriptor_sources[fixture.program.info.buffers[root].source].indirect_descriptor;
+  Check(finite && finite->sources.size() == 2,
+        "two-way select between two buffer descriptors was not planned as finite");
+  const auto* selection = handle.Instruction()->Arg(0).TryInstruction();
+  const auto* key = selection == nullptr ? nullptr : selection->Arg(0).TryInstruction();
+  Check(selection != nullptr && selection->GetOpcode() == ValueOpcode::GetBufferResourceIndex &&
+            key != nullptr && key->GetOpcode() == ValueOpcode::SelectU32 &&
+            key->Arg(0).TryInstruction() != nullptr &&
+            key->Arg(0).TryInstruction()->GetOpcode() == ValueOpcode::IEqual32 &&
+            key->Arg(1).U32() == 0 && key->Arg(2).U32() == 1,
+        "finite buffer key does not follow the descriptor selects");
+  const std::array<uint32_t, 8> user_data{0x1000, 16u << 16u, 1, 0x4dfac,
+                                          0x3000, 16u << 16u, 1, 0x4dfac};
+  TestMemory memory;
+  const SrtRuntime runtime{.user_data = user_data, .userdata = &memory,
+                           .read_specialization_memory = ReadTestMemory};
+  ResourceSnapshot snapshot;
+  ResourceSpecialization specialization;
+  Check(MaterializeResources(ExtractResourcePlan(fixture.program), runtime, snapshot,
+                             specialization),
+        "finite buffer descriptors behind a select could not materialize");
+  ApplyResourceSpecialization(fixture.program, specialization);
+  const auto& candidates = fixture.program.info.buffers[root].indirect_resources;
+  Check(candidates.size() == 2 && snapshot.buffers[candidates[0]].dwords[0] == 0x1000 &&
+            snapshot.buffers[candidates[1]].dwords[0] == 0x3000,
+        "two-way select lost one of its descriptor candidates");
+
+  Fixture mismatched;
+  build(mismatched, true);
+  CheckFatal([&] { mismatched.PlanAndTrack(); },
+             "buffer descriptor is not a valid runtime value "
+             "(shape GetBufferResource->SelectU32->GetUserData",
+             "serial selects with different conditions were accepted as one finite descriptor");
+}
+
+void TestFiniteBufferAtomicNestedSelect() {
+  const auto build = [](Fixture& fixture, bool mismatched) {
+    const auto lane = fixture.Emit(ValueOpcode::GetBuiltin,
+        {Value(static_cast<uint32_t>(StageInputKind::LocalInvocationId)), Value(0u)});
+    const auto outer = fixture.Emit(ValueOpcode::IEqual32, {lane, Value(0u)});
+    const auto inner = fixture.Emit(ValueOpcode::IEqual32, {lane, Value(1u)});
+    std::array<Value, 4> words;
+    for (uint32_t word = 0; word < words.size(); ++word) {
+      const auto condition = mismatched && word == 2u
+          ? fixture.Emit(ValueOpcode::IEqual32, {lane, Value(2u)}) : inner;
+      const auto first = fixture.Emit(ValueOpcode::SelectU32,
+          {condition, fixture.UserData(word * 2u), fixture.UserData(word * 2u + 1u)});
+      const auto second = fixture.Emit(ValueOpcode::SelectU32,
+          {condition, fixture.UserData(word * 2u + 8u), fixture.UserData(word * 2u + 9u)});
+      words[word] = fixture.Emit(ValueOpcode::SelectU32, {outer, first, second});
+    }
+    const auto handle = fixture.Buffer(words, 0x9c0);
+    MemoryInfo memory;
+    memory.kind = ResourceKind::Buffer;
+    fixture.Emit(ValueOpcode::BufferAtomicIAdd32,
+        {handle, Value(0u), Value(0u), Value(0u), Value(1u), Value(true)},
+        fixture.AddMemory(memory, 0x9c0));
+  };
+  Fixture fixture;
+  build(fixture, false);
+  fixture.PlanAndTrack();
+  const auto root = fixture.program.memory_info[0].resource;
+  const auto& finite = fixture.program
+      .descriptor_sources[fixture.program.info.buffers[root].source].indirect_descriptor;
+  Check(finite && finite->sources.size() == 4,
+        "select of selects with aligned inner conditions was not planned as finite");
+  Fixture mismatched;
+  build(mismatched, true);
+  CheckFatal([&] { mismatched.PlanAndTrack(); },
+             "buffer descriptor is not a valid runtime value "
+             "(shape GetBufferResource->SelectU32->SelectU32",
+             "serial selects with different inner conditions were merged");
+}
+
 void TestFiniteImageBitScanSentinel() {
   namespace CFG = Libs::Graphics::ShaderRecompiler::CFG;
   for (const bool nonzero : {false, true}) {
@@ -9478,9 +9661,12 @@ void TestMalformedMemoryKindsRejected() {
 
 } // namespace
 
-int main() {
+int main(int argc, char **argv) {
   try {
-    const auto Run = [](const char *name, auto test) {
+    // Optional substring filter, for running a group when an unrelated test aborts.
+    const std::string_view filter = argc > 1 ? std::string_view(argv[1]) : std::string_view{};
+    const auto Run = [&](const char *name, auto test) {
+      if (!filter.empty() && std::string_view(name).find(filter) == std::string_view::npos) return;
       try {
         test();
       } catch (const std::exception &exception) {
@@ -9541,6 +9727,9 @@ int main() {
     Run("packed descriptor waterfall", TestPackedDescriptorWaterfall);
     Run("finite image waterfall", TestFiniteImageWaterfall);
     Run("finite inline sampler", TestFiniteInlineSampler);
+    Run("finite buffer atomic", TestFiniteBufferAtomic);
+    Run("finite buffer atomic select", TestFiniteBufferAtomicSelect);
+    Run("finite buffer atomic nested select", TestFiniteBufferAtomicNestedSelect);
     Run("finite image bit scan sentinel", TestFiniteImageBitScanSentinel);
     Run("runtime-rooted loop", TestLoopCycleEnteredThroughRuntimeValue);
     Run("invariant loop phi", TestInvariantLoopPhi);

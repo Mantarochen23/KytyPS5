@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fmt/format.h>
+#include <fmt/ranges.h>
 #include <map>
 #include <numeric>
 #include <optional>
@@ -707,6 +708,32 @@ private:
 		    fmt::format("shader resource tracking: hash=0x{:016x} stage={} pc=0x{:08x} {}",
 		                m_program.shader_hash, StageName(m_program.stage), pc, reason);
 		throw std::runtime_error(message);
+	}
+
+	// Short opcode chain of the value a plan rejected, bounded so a cyclic Phi cannot
+	// grow the failure text without limit. Included in the reason that reaches the ledger.
+	std::string ValueShape(Value value) const {
+		std::vector<std::string> chain;
+		bool truncated = false;
+		for (uint32_t depth = 0u; depth < 6u; ++depth) {
+			value = value.Resolve();
+			const auto* inst = value.TryInstruction();
+			if (inst == nullptr) {
+				chain.push_back(value.IsEmpty() ? "Empty" : TypeName(value.GetType()));
+				break;
+			}
+			const auto op = inst->GetOpcode();
+			chain.push_back(std::string(ValueOpcodeName(op)));
+			if (inst->NumArgs() == 0u) break;
+			// For a select the condition is not part of the descriptor shape; follow its
+			// first data arm so nested selections appear in the chain.
+			const bool select = op == ValueOpcode::SelectU1 || op == ValueOpcode::SelectU32 ||
+			                    op == ValueOpcode::SelectF32;
+			value = select && inst->NumArgs() > 1u ? inst->Arg(1) : inst->Arg(0);
+			if (depth == 5u && value.Resolve().TryInstruction() != nullptr) truncated = true;
+		}
+		if (truncated) chain.emplace_back("...");
+		return fmt::format("{}", fmt::join(chain, "->"));
 	}
 
 	Value NativeDescriptorSource(Value value, uint32_t reg, uint32_t use_pc) const {
@@ -4150,11 +4177,14 @@ private:
 
 	bool TryMakeFiniteDescriptor(Inst& handle, IndirectDescriptorPlan& plan) {
 		const bool sampler = handle.GetOpcode() == ValueOpcode::GetSamplerResource;
-		if ((!sampler && handle.GetOpcode() != ValueOpcode::GetImageResource) ||
-		    handle.NumArgs() != (sampler ? 4u : 8u))
+		const bool buffer = handle.GetOpcode() == ValueOpcode::GetBufferResource;
+		if ((!sampler && !buffer && handle.GetOpcode() != ValueOpcode::GetImageResource) ||
+		    handle.NumArgs() != (sampler || buffer ? 4u : 8u))
 			return false;
 		if (std::ranges::any_of(handle.Uses(), [&](const Use& use) {
 			const auto op = use.user->GetOpcode();
+			if (buffer)
+				return BufferAccessOf(op) != BufferAccess::Atomic || use.user->GetType() != Type::U32;
 			if (op != ValueOpcode::ImageSampleRaw) return sampler || op != ValueOpcode::ImageGatherRaw;
 			return sampler && (m_program.memory_info[use.user->Flags<MemoryFlags>().index]
 			                       .image_sample_flags & Decoder::ImageSampleFlagAdjust) != 0u;
@@ -4304,8 +4334,9 @@ private:
 		m_loop_proofs.clear();
 		for (auto* block: m_program.blocks) {
 			for (auto& inst: *block) {
+				const bool atomic = BufferAccessOf(inst.GetOpcode()) == BufferAccess::Atomic;
 				if ((ImageOpcodeInfoOf(inst.GetOpcode()).access == ImageAccess::None &&
-				     !IndirectBufferAccess(inst)) ||
+				     !IndirectBufferAccess(inst) && !atomic) ||
 				    inst.NumArgs() == 0u) {
 					continue;
 				}
@@ -4331,7 +4362,8 @@ private:
 						    })) return;
 						plan.read_dwords = 4u;
 					}
-					if (TryMakeNestedDescriptor(*handle, descriptor, plan) ||
+					if (atomic ? TryMakeFiniteDescriptor(*handle, plan) :
+					    TryMakeNestedDescriptor(*handle, descriptor, plan) ||
 					    (sampler && TryMakeFiniteDescriptor(*handle, plan)) ||
 					    TryMakeTableDescriptor(*handle, descriptor, plan) ||
 					    (!sampler && (TryMakeFiniteDescriptor(*handle, plan) ||
@@ -4355,7 +4387,7 @@ private:
 				    (memory.image_sample_flags & Decoder::ImageSampleFlagAdjust) == 0u) {
 					plan_handle(inst.Arg(1), 4u, memory.sampler * 4u, true);
 				}
-				plan_handle(inst.Arg(0), IndirectBufferAccess(inst) ? 4u : 8u,
+				plan_handle(inst.Arg(0), atomic || IndirectBufferAccess(inst) ? 4u : 8u,
 				            memory.resource * 4u, false);
 			}
 		}
@@ -4383,8 +4415,9 @@ private:
 				source = InternSource(*m_sampler_fallback);
 				return true;
 			}
-			Fail(pc, fmt::format("{} dword {} is not a valid runtime value",
-			                     ValueOpcodeName(expected), bad_dword));
+			Fail(pc, fmt::format("{} dword {} is not a valid runtime value (shape {})",
+			                     ValueOpcodeName(expected), bad_dword,
+			                     ValueShape(descriptor.dwords[bad_dword])));
 		}
 		if (expected == ValueOpcode::GetSamplerResource) {
 			m_sampler_fallback = descriptor;
@@ -4618,8 +4651,10 @@ private:
 				source = buffer != BufferAccess::Read ? CarriedBufferSource(*handle) : UINT32_MAX;
 				if (source == UINT32_MAX) {
 					Fail(flags.pc,
-					     "buffer descriptor is not a valid runtime value; GPU-selected access "
-					     "requires a scalar, raw 8/16-bit, raw DWORD x1/x2/x3/x4, or formatted X load");
+					     fmt::format("buffer descriptor is not a valid runtime value (shape {}); "
+					                 "GPU-selected access requires a scalar, raw 8/16-bit, "
+					                 "raw DWORD x1/x2/x3/x4, or formatted X load",
+					                 ValueShape(inst.Arg(0))));
 				}
 			}
 			resource = AddBuffer(source, memory, op, flags.pc);
