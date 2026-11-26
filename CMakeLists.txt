@@ -538,6 +538,11 @@ add_executable(wait_diagnostics_tests EXCLUDE_FROM_ALL
 )
 target_include_directories(wait_diagnostics_tests PRIVATE ${inc_headers})
 
+add_executable(clock_hold_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/ClockHoldTests.cpp"
+)
+target_include_directories(clock_hold_tests PRIVATE ${inc_headers})
+
 add_executable(lru_cache_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/LruCacheTests.cpp"
 )
