@@ -20,6 +20,8 @@
 #   KYTY_SHADER_CACHE=0  do not keep translated shaders between runs (default: kept in the state
 #                      folder and compiled at boot on all cores, so every run starts further)
 #   KYTY_TRACE=0       run without --trace-calls
+#   KYTY_SKIP_SHADERS=<hashes>  comma-separated hex shader hashes to skip (bisect GPU hangs)
+#   RADV_DEBUG=<flags> passed to RADV; with `hang`, RADV's radv_dumps_* are kept in <run>/radv/
 #   KYTY_FORCE=1   start although another sandboxed run holds the GPU
 #
 # The guest executable runs as native x86-64 code inside the emulator process, so the whole
@@ -60,13 +62,23 @@ opts=(--game "$game" --printf-direction Console)
 [ "${KYTY_AUTO_CROSS:-0}" != 0 ] && opts+=(--auto-cross "$KYTY_AUTO_CROSS")
 opts+=("$@")
 
+home_mount=(--tmpfs /home/sandbox)
+radv_hang=0
+case ",${RADV_DEBUG:-}," in
+    *,hang,*)
+        radv_hang=1
+        mkdir -p "$run/radv"
+        home_mount=(--bind "$run/radv" /home/sandbox)
+        ;;
+esac
+
 args=(
     --unshare-all --die-with-parent --new-session --clearenv
     --ro-bind /usr /usr
     --symlink usr/bin /bin --symlink usr/bin /sbin --symlink usr/lib /lib --symlink usr/lib /lib64
     --ro-bind /etc/ld.so.cache /etc/ld.so.cache
     --ro-bind /etc/passwd /etc/passwd --ro-bind /etc/group /etc/group
-    --proc /proc --dev /dev --tmpfs /tmp --perms 0700 --tmpfs /run --tmpfs /home/sandbox
+    --proc /proc --dev /dev --tmpfs /tmp --perms 0700 --tmpfs /run "${home_mount[@]}"
     --dev-bind /dev/dri /dev/dri
     --ro-bind /sys/dev /sys/dev --ro-bind /sys/devices /sys/devices
     --ro-bind /sys/class/drm /sys/class/drm
@@ -91,6 +103,7 @@ else
     args+=(--setenv SDL_AUDIODRIVER dummy --setenv ALSOFT_DRIVERS null)
 fi
 [ -n "${KYTY_FATAL_ABORT:-}" ] && args+=(--setenv KYTY_FATAL_ABORT "$KYTY_FATAL_ABORT")
+[ -n "${KYTY_SKIP_SHADERS:-}" ] && args+=(--setenv KYTY_SKIP_SHADERS "$KYTY_SKIP_SHADERS")
 [ -n "${RADV_DEBUG:-}" ] && args+=(--setenv RADV_DEBUG "$RADV_DEBUG")
 if [ "${KYTY_PAD:-none}" = host ]; then
     # Game controllers only, by USB vendor (Valve, Microsoft, Sony, Nintendo, 8BitDo, Hori, PDP, PowerA).
@@ -115,6 +128,8 @@ fi
     echo "emulator_sha256=$(sha256sum "$build/kyty_emulator" | cut -d' ' -f1)"
     echo "seconds=$seconds pad=${KYTY_PAD:-none}"
     echo "options=${opts[*]}"
+    [ -n "${KYTY_SKIP_SHADERS:-}" ] && echo "skip_shaders=$KYTY_SKIP_SHADERS"
+    [ -n "${RADV_DEBUG:-}" ] && echo "radv_debug=$RADV_DEBUG"
     echo "kernel=$(uname -r) mesa=$(pacman -Q mesa 2>/dev/null | cut -d' ' -f2)"
 } > "$run/run.txt"
 
@@ -169,7 +184,11 @@ fi
 if [ -d "$state/_ShaderFailures" ]; then
     cp -a "$state/_ShaderFailures" "$run/ShaderFailures"   # cumulative over runs with this state folder
 fi
+if [ "$radv_hang" = 1 ]; then
+    rmdir "$run/radv" 2>/dev/null || true
+fi
 python3 "$here/triage.py" "$run/kyty.log" --json "$run/triage.json" > "$run/triage.txt" 2>&1 || true
 cat "$run/run.txt"; echo; cat "$run/triage.txt"
+[ -d "$run/radv" ] && echo "RADV HANG DUMPS: $run/radv"
 [ -f "$run/kernel-gpu.txt" ] && { echo "KERNEL GPU MESSAGES (kernel-gpu.txt):"; grep -i 'timeout\|reset\|Process' "$run/kernel-gpu.txt" | cut -c1-200; }
 exit "$code"
