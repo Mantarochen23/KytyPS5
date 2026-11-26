@@ -1,5 +1,6 @@
 #include "common/assert.h"
 #include "common/common.h"
+#include "common/logging/log.h"
 #include "common/profiler.h"
 #include "gpu_blit_shaders/gpu_mesh_indirect_spv.h"
 #include "graphics/guest_gpu/gpu_defs.h"
@@ -7,11 +8,13 @@
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
+#include "graphics/host_gpu/renderer/pipeline/subgroupSize.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/renderer/renderTarget.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/shader/recompiler/BufferFormat.h"
+#include "graphics/shader/recompiler/ShaderRecompiler.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/rectListShader.h"
 #include "graphics/shader/shader.h"
@@ -19,7 +22,11 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <cinttypes>
+#include <mutex>
+#include <set>
 #include <span>
+#include <utility>
 #include <vector>
 
 namespace Libs::Graphics {
@@ -197,6 +204,43 @@ static vk::Format InputFormat(uint8_t raw_format, uint32_t used_components) {
 	return NarrowInputFormat(format, used_components);
 }
 
+static bool UsesSubgroupOps(const ShaderRecompiler::IR::ShaderInfo& info) noexcept {
+	return info.subgroup_ballot || info.subgroup_vote || info.subgroup_barrier ||
+	       info.subgroup_shuffle || info.subgroup_arithmetic ||
+	       info.subgroup_local_invocation_id || info.pixel_valid_mask;
+}
+
+static SubgroupSizeCaps MakeSubgroupSizeCaps(const GraphicContext& graphics) noexcept {
+	return {
+	    .default_size     = graphics.subgroup_size,
+	    .min_size         = graphics.min_subgroup_size,
+	    .max_size         = graphics.max_subgroup_size,
+	    .supported_stages =
+	        static_cast<vk::ShaderStageFlags::MaskType>(graphics.required_subgroup_size_stages),
+	};
+}
+
+static void WarnSubgroupSizeMismatch(const ShaderRecompiler::IR::CompiledShaderInfo& info,
+                                     const SubgroupSizeDecision&                     decision,
+                                     const SubgroupSizeCaps&                         caps) {
+	static std::mutex                              mutex;
+	static std::set<std::pair<uint64_t, uint32_t>> warned;
+	const std::pair<uint64_t, uint32_t>            key {info.shader_hash,
+	                                                    static_cast<uint32_t>(info.stage)};
+	{
+		std::scoped_lock lock(mutex);
+		if (!warned.insert(key).second) {
+			return;
+		}
+	}
+	LOGF("!!! SUBGROUP SIZE MISMATCH shader=0x%016" PRIx64
+	     " stage=%s guest_wave=%u expected_subgroup=%u host_default=%u"
+	     " supported_range=[%u,%u] supported_stages=0x%08x\n",
+	     info.shader_hash, ShaderRecompiler::StageName(info.stage), info.wave_size,
+	     decision.expected_size, caps.default_size, caps.min_size, caps.max_size,
+	     caps.supported_stages);
+}
+
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& pipeline,
                             const GraphicsPipelineKey&                 key,
@@ -226,13 +270,28 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 		tess_eval_shader_module    = CompileSPV(shaders.evaluation, graphics.device);
 	}
 
-	vk::PipelineShaderStageCreateInfo shader_stages[4] {};
-	uint32_t                          shader_stage_count = 0;
+	vk::PipelineShaderStageCreateInfo                     shader_stages[4] {};
+	vk::PipelineShaderStageRequiredSubgroupSizeCreateInfo stage_subgroup_sizes[4] {};
+	const auto subgroup_caps      = MakeSubgroupSizeCaps(graphics);
+	uint32_t   shader_stage_count = 0;
 	for (const auto* stage: stages) {
 		if (stage != nullptr) {
-			shader_stages[shader_stage_count++] = {.stage  = NativeShaderStage(stage->info.stage),
-			                                       .module = stage->module,
-			                                       .pName  = "main"};
+			const auto native_stage = NativeShaderStage(stage->info.stage);
+			const auto slot         = shader_stage_count++;
+			shader_stages[slot]     = {
+			        .stage = native_stage, .module = stage->module, .pName = "main"};
+			const bool emulated_wave64_on_32 =
+			    stage->info.stage == ShaderType::Mesh && stage->info.wave_size == 64u &&
+			    graphics.subgroup_size == 32u;
+			const auto decision = ResolveStageSubgroupSize(
+			    static_cast<uint32_t>(native_stage), stage->info.wave_size, emulated_wave64_on_32,
+			    UsesSubgroupOps(stage->info.info), subgroup_caps);
+			if (decision.apply) {
+				stage_subgroup_sizes[slot].requiredSubgroupSize = decision.required_size;
+				shader_stages[slot].pNext                       = &stage_subgroup_sizes[slot];
+			} else if (decision.mismatch_warning) {
+				WarnSubgroupSizeMismatch(stage->info, decision, subgroup_caps);
+			}
 		}
 	}
 	if (task_module) {
@@ -426,14 +485,20 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
                             const ShaderModule& module, vk::PipelineCache driver_cache) {
 	vk::PipelineShaderStageCreateInfo                     comp_shader_stage_info {};
 	vk::PipelineShaderStageRequiredSubgroupSizeCreateInfo comp_subgroup_size {};
-	comp_shader_stage_info.stage  = vk::ShaderStageFlagBits::eCompute;
-	comp_shader_stage_info.module = module.module;
-	comp_shader_stage_info.pName  = "main";
-	const auto wave_size = module.info.wave_size;
-	if (graphics.compute_subgroup_size_control_enabled &&
-	    wave_size >= graphics.min_subgroup_size && wave_size <= graphics.max_subgroup_size) {
-		comp_subgroup_size.requiredSubgroupSize = wave_size;
+	comp_shader_stage_info.stage     = vk::ShaderStageFlagBits::eCompute;
+	comp_shader_stage_info.module    = module.module;
+	comp_shader_stage_info.pName     = "main";
+	const auto subgroup_caps         = MakeSubgroupSizeCaps(graphics);
+	const bool emulated_wave64_on_32 =
+	    module.info.wave_size == 64u && !graphics.SupportsComputeWave64();
+	const auto decision = ResolveStageSubgroupSize(
+	    static_cast<uint32_t>(vk::ShaderStageFlagBits::eCompute), module.info.wave_size,
+	    emulated_wave64_on_32, UsesSubgroupOps(module.info.info), subgroup_caps);
+	if (decision.apply) {
+		comp_subgroup_size.requiredSubgroupSize = decision.required_size;
 		comp_shader_stage_info.pNext            = &comp_subgroup_size;
+	} else if (decision.mismatch_warning) {
+		WarnSubgroupSizeMismatch(module.info, decision, subgroup_caps);
 	}
 
 	std::vector<vk::DescriptorSetLayoutBinding> descriptor_bindings;

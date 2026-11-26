@@ -510,6 +510,11 @@ add_executable(hang_dump_tests EXCLUDE_FROM_ALL
 )
 target_include_directories(hang_dump_tests PRIVATE ${inc_headers})
 
+add_executable(subgroup_size_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/SubgroupSizeTests.cpp"
+)
+target_include_directories(subgroup_size_tests PRIVATE ${inc_headers})
+
 add_executable(lru_cache_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/LruCacheTests.cpp"
 )
