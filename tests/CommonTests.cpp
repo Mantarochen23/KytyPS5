@@ -469,6 +469,19 @@ TEST(Config, ShaderCacheKeepDefaultsOffAndTracksLoadedOption) {
 	Config::Shutdown();
 }
 
+TEST(Config, ShaderKeyIndexDefaultsOffAndTracksLoadedOption) {
+	Config::Initialize();
+	Config::ConfigOptions options;
+	EXPECT_FALSE(options.shader_key_index_enabled);
+	Config::Load(options);
+	EXPECT_FALSE(Config::ShaderKeyIndexEnabled());
+
+	options.shader_key_index_enabled = true;
+	Config::Load(options);
+	EXPECT_TRUE(Config::ShaderKeyIndexEnabled());
+	Config::Shutdown();
+}
+
 } // namespace
 
 int main(int argc, char** argv) {

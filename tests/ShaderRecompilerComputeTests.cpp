@@ -51954,6 +51954,192 @@ void CheckShaderStore(VulkanHarness &vulkan) {
   std::printf("[gpu]     %-32s ok\n", name);
 }
 
+// With --shader-key-index enabled, the shader store persists a bounded per-hash ProgramKey index
+// that loads before first use on restart, deduplicates repeat uses, caps variants per hash, and
+// remains harmless when a v5 store is later opened with the option disabled.
+void CheckShaderKeyIndex(VulkanHarness &vulkan) {
+  constexpr const char *name = "ShaderKeyIndex";
+  const std::vector<u32> compute{EncodeSopp(0x01)};
+  const std::vector<u32> vertex{EncodeVop1(0x01, 0, 8), EncodeExp0(0x0c, 0xf),
+                                EncodeExp1(0, 0, 0, 0), EncodeSopp(0x01)};
+  const std::vector<u32> pixel{EncodeVop1(0x01, 0, 0), EncodeVop1(0x01, 1, 1),
+                               EncodeVop1(0x01, 2, 2), EncodeVop1(0x01, 3, 3),
+                               EncodeExp0(0x00, 0xf), EncodeExp1(0, 1, 2, 3), EncodeSopp(0x01)};
+  constexpr uint64_t cs_hash = 0x101ull;
+  constexpr uint64_t vs_hash = 0x102ull;
+  constexpr uint64_t ps_hash = 0x103ull;
+  const ShaderParams cs_params{.code = compute, .user_data_count = 0, .hash = cs_hash};
+  const ShaderParams vs_params{.code = vertex, .user_data_count = 1, .hash = vs_hash};
+  const ShaderParams ps_params{.code = pixel, .user_data_count = 4, .hash = ps_hash};
+  const auto make_cs_input = [](u32 threads_x) {
+    ShaderComputeInputInfo input{};
+    input.threads_num[0] = threads_x;
+    input.threads_num[1] = 1;
+    input.threads_num[2] = 1;
+    input.wave_size = 64;
+    input.host_subgroup_size = 64;
+    return input;
+  };
+  const auto make_expected_key = [](ShaderType stage, uint64_t hash, uint32_t user_data_count,
+                                    const auto &input) {
+    PipelineCache::ProgramKey key{
+        .stage = stage, .hash = hash, .user_data_count = user_data_count};
+    BuildStageStaticKey(input, key.static_state);
+    return key;
+  };
+  const auto cs_key_for = [&](u32 threads_x) {
+    return make_expected_key(ShaderType::Compute, cs_hash, 0, make_cs_input(threads_x));
+  };
+  const auto expected_vs = make_expected_key(ShaderType::Vertex, vs_hash, 1, ShaderVertexInputInfo{});
+  const auto expected_ps = make_expected_key(ShaderType::Pixel, ps_hash, 4, ShaderPixelInputInfo{});
+
+  const auto root = std::filesystem::temp_directory_path() /
+                    fmt::format("kyty_shader_key_index_{}",
+                                std::chrono::steady_clock::now().time_since_epoch().count());
+  const auto store_off = root / "OFF00000.shaders";
+  const auto store = root / "IDX00000.shaders";
+  struct Guard {
+    std::filesystem::path dir;
+    ~Guard() {
+      Config::Load({.printf_direction = Config::LogDirection::Silent});
+      std::error_code ec;
+      std::filesystem::remove_all(dir, ec);
+    }
+  } guard{root};
+
+  // Default/off: no keys are indexed in memory or written.
+  Config::Load({.printf_direction = Config::LogDirection::Silent,
+                .shader_key_index_enabled = false});
+  {
+    PipelineCache cache(vulkan.RuntimeContext(), nullptr, store_off);
+    auto cs_in = make_cs_input(1);
+    ShaderVertexInputInfo vs_in{};
+    ShaderPixelInputInfo ps_in{};
+    Require(name, "off compile",
+            PipelineCacheTestAccess::GetProgram(cache, cs_params, cs_in) != nullptr &&
+                PipelineCacheTestAccess::GetProgram(cache, vs_params, vs_in) != nullptr &&
+                PipelineCacheTestAccess::GetProgram(cache, ps_params, ps_in) != nullptr,
+            "failed to compile baseline shaders with key index disabled");
+    Require(name, "off empty",
+            cache.FindIndexedKeys(cs_hash).empty() && cache.FindIndexedKeys(vs_hash).empty() &&
+                cache.FindIndexedKeys(ps_hash).empty(),
+            "key index populated while --shader-key-index is disabled");
+  }
+
+  // Enabled: cold start records exact keys; warm restart loads them before first use without growth.
+  Config::Load({.printf_direction = Config::LogDirection::Silent,
+                .shader_key_index_enabled = true});
+  const auto expected_cs1 = cs_key_for(1);
+  {
+    PipelineCache cache(vulkan.RuntimeContext(), nullptr, store);
+    auto cs_in = make_cs_input(1);
+    ShaderVertexInputInfo vs_in{};
+    ShaderPixelInputInfo ps_in{};
+    Require(name, "cold compile",
+            PipelineCacheTestAccess::GetProgram(cache, cs_params, cs_in) != nullptr &&
+                PipelineCacheTestAccess::GetProgram(cache, cs_params, cs_in) != nullptr &&
+                PipelineCacheTestAccess::GetProgram(cache, vs_params, vs_in) != nullptr &&
+                PipelineCacheTestAccess::GetProgram(cache, ps_params, ps_in) != nullptr,
+            "failed to compile shaders with key index enabled");
+    const auto cs_keys = cache.FindIndexedKeys(cs_hash);
+    const auto vs_keys = cache.FindIndexedKeys(vs_hash);
+    const auto ps_keys = cache.FindIndexedKeys(ps_hash);
+    Require(name, "cold index",
+            cs_keys.size() == 1 && cs_keys[0] == expected_cs1 && vs_keys.size() == 1 &&
+                vs_keys[0] == expected_vs && ps_keys.size() == 1 && ps_keys[0] == expected_ps,
+            "cold session did not index exact deduplicated ProgramKeys");
+  }
+  const auto size_after_cold = std::filesystem::file_size(store);
+  {
+    PipelineCache cache(vulkan.RuntimeContext(), nullptr, store);
+    const auto cs_keys = cache.FindIndexedKeys(cs_hash);
+    const auto vs_keys = cache.FindIndexedKeys(vs_hash);
+    const auto ps_keys = cache.FindIndexedKeys(ps_hash);
+    Require(name, "warm pre-use lookup",
+            cs_keys.size() == 1 && cs_keys[0] == expected_cs1 && vs_keys.size() == 1 &&
+                vs_keys[0] == expected_vs && ps_keys.size() == 1 && ps_keys[0] == expected_ps,
+            "warm restart did not load indexed keys before first use");
+    auto cs_in = make_cs_input(1);
+    ShaderVertexInputInfo vs_in{};
+    ShaderPixelInputInfo ps_in{};
+    Require(name, "warm hit",
+            PipelineCacheTestAccess::GetProgram(cache, cs_params, cs_in) != nullptr &&
+                PipelineCacheTestAccess::GetProgram(cache, vs_params, vs_in) != nullptr &&
+                PipelineCacheTestAccess::GetProgram(cache, ps_params, ps_in) != nullptr &&
+                PipelineCacheTestAccess::Compiled(cache) == decltype(PipelineCacheTestAccess::Compiled(cache)){},
+            "warm restart recompiled stored shaders");
+  }
+  Require(name, "warm no growth", std::filesystem::file_size(store) == size_after_cold,
+          "warm restart appended duplicate KeyIndex records");
+
+  // Multi-variant deduplication and cap at MaxIndexedKeysPerHash.
+  const std::array<PipelineCache::ProgramKey, PipelineCache::MaxIndexedKeysPerHash> expected_cs{
+      cs_key_for(1), cs_key_for(2), cs_key_for(4), cs_key_for(8)};
+  {
+    PipelineCache cache(vulkan.RuntimeContext(), nullptr, store);
+    for (u32 threads_x : {2u, 4u, 2u, 8u, 16u}) {
+      auto cs_in = make_cs_input(threads_x);
+      Require(name, "variant compile",
+              PipelineCacheTestAccess::GetProgram(cache, cs_params, cs_in) != nullptr,
+              "failed to compile compute variant");
+    }
+    const auto cs_keys = cache.FindIndexedKeys(cs_hash);
+    Require(name, "variant cap",
+            cs_keys.size() == expected_cs.size() && std::ranges::equal(cs_keys, expected_cs),
+            "per-hash key index did not deduplicate or cap variants at MaxIndexedKeysPerHash");
+  }
+  const auto size_after_cap = std::filesystem::file_size(store);
+  {
+    PipelineCache cache(vulkan.RuntimeContext(), nullptr, store);
+    const auto cs_keys = cache.FindIndexedKeys(cs_hash);
+    Require(name, "cap reload",
+            cs_keys.size() == expected_cs.size() && std::ranges::equal(cs_keys, expected_cs),
+            "capped variants did not persist across restart");
+    auto cs_in16 = make_cs_input(16);
+    Require(name, "fifth variant hit",
+            PipelineCacheTestAccess::GetProgram(cache, cs_params, cs_in16) != nullptr,
+            "5th variant module was not served from store");
+  }
+  Require(name, "cap no growth", std::filesystem::file_size(store) == size_after_cap,
+          "re-using a variant past the cap grew the store");
+
+  // Opening a v5 store containing KeyIndex records with the flag OFF parses cleanly without
+  // truncating the store or dropping subsequent Module records.
+  Config::Load({.printf_direction = Config::LogDirection::Silent,
+                .shader_key_index_enabled = false});
+  {
+    PipelineCache cache(vulkan.RuntimeContext(), nullptr, store);
+    Require(name, "disabled ignores index",
+            cache.FindIndexedKeys(cs_hash).empty() && cache.FindIndexedKeys(vs_hash).empty() &&
+                cache.FindIndexedKeys(ps_hash).empty(),
+            "disabled session populated in-memory key index from store");
+    auto cs_in = make_cs_input(1);
+    ShaderVertexInputInfo vs_in{};
+    ShaderPixelInputInfo ps_in{};
+    Require(name, "disabled loads modules",
+            PipelineCacheTestAccess::GetProgram(cache, cs_params, cs_in) != nullptr &&
+                PipelineCacheTestAccess::GetProgram(cache, vs_params, vs_in) != nullptr &&
+                PipelineCacheTestAccess::GetProgram(cache, ps_params, ps_in) != nullptr &&
+                PipelineCacheTestAccess::Compiled(cache) == decltype(PipelineCacheTestAccess::Compiled(cache)){},
+            "KeyIndex records broke module loading when --shader-key-index was disabled");
+  }
+  Require(name, "disabled no truncate", std::filesystem::file_size(store) == size_after_cap,
+          "opening a v5 store with --shader-key-index disabled truncated the store");
+
+  Config::Load({.printf_direction = Config::LogDirection::Silent,
+                .shader_key_index_enabled = true});
+  {
+    PipelineCache cache(vulkan.RuntimeContext(), nullptr, store);
+    const auto cs_keys = cache.FindIndexedKeys(cs_hash);
+    Require(name, "re-enabled intact",
+            cs_keys.size() == expected_cs.size() && std::ranges::equal(cs_keys, expected_cs) &&
+                cache.FindIndexedKeys(vs_hash).size() == 1 &&
+                cache.FindIndexedKeys(ps_hash).size() == 1,
+            "KeyIndex records did not survive an intervening disabled session");
+  }
+  std::printf("[gpu]     %-32s ok\n", name);
+}
+
 void CheckPs5GameExampleImageClearRuntimeShape() {
   const auto MakeCode = [] {
     std::vector<u32> code;
@@ -58703,6 +58889,7 @@ int main(int argc, char **argv) {
   if (argc == 2 && std::strcmp(argv[1], "--shader-cache-only") == 0) {
     VulkanHarness vulkan;
     CheckShaderStore(vulkan);
+    CheckShaderKeyIndex(vulkan);
     return 0;
   }
   if (argc == 2 && std::strcmp(argv[1], "--lds-limit-only") == 0) {
@@ -60066,6 +60253,7 @@ int main(int argc, char **argv) {
   RunSuiteStep(summary, "GraphicsPushDataModules", [&] { CheckGraphicsPushDataModules(vulkan); });
   RunSuiteStep(summary, "VertexFormatModules", [&] { CheckVertexFormatModules(vulkan); });
   RunSuiteStep(summary, "ShaderStore", [&] { CheckShaderStore(vulkan); });
+  RunSuiteStep(summary, "ShaderKeyIndex", [&] { CheckShaderKeyIndex(vulkan); });
   RunSuiteStep(summary, "OrderedDispatch", [&] { vulkan.CheckOrderedDispatch(); });
   RunSuiteStep(summary, "ZeroStrideBufferBinding", [&] { vulkan.CheckZeroStrideBufferBinding(); });
   RunSuiteStep(summary, "NullStorageBufferDescriptor", [&] { vulkan.CheckNullStorageBufferDescriptor(); });
