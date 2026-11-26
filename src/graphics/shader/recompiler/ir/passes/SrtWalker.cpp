@@ -234,9 +234,18 @@ private:
 			const auto slot = inst->NumArgs() == 2 ? inst->Arg(1).Resolve() : Value {};
 			if (inst->NumArgs() != 2 || inst->Arg(0).Resolve().TryInstruction() == nullptr ||
 			    inst->Arg(0).Resolve().TryInstruction()->GetOpcode() !=
-			        ValueOpcode::GetSrtResource ||
-			    !slot.IsImmediate() || slot.GetType() != Type::U32 ||
-			    slot.U32() >= m_program.srt_reads.size()) {
+			        ValueOpcode::GetSrtResource) {
+				return finish(false);
+			}
+			if (!slot.IsImmediate() || slot.GetType() != Type::U32) {
+				// A GPU-selected SRT slot is emitted as an access chain into the flattened
+				// SRT storage buffer, so the read is bounds-safe without a host-side slot
+				// to enumerate. It cannot serve as an immutable integer proof.
+				if (m_type == RuntimeValueType::ImmutableInteger ||
+				    !ValidateArguments(*inst, require_uniform)) return finish(false);
+				return finish(true);
+			}
+			if (slot.U32() >= m_program.srt_reads.size()) {
 				return finish(false);
 			}
 			if (m_type != RuntimeValueType::Any) {
