@@ -262,9 +262,18 @@ private:
 	// Records everything first created if a shader store is open, and writes the driver cache.
 	ShaderStoreWriter m_store;
 
+	// Null skips the draw or dispatch. With --keep-going any compile failure lands here.
 	template <typename InputInfo>
 	const ShaderModule* GetProgram(const ShaderParams& params, InputInfo& input_info,
 	                               ShaderRecompiler::IR::PushData::Window& push_data);
+	template <typename InputInfo>
+	const ShaderModule* GetProgramImpl(const ShaderParams& params, InputInfo& input_info,
+	                                   ShaderRecompiler::IR::PushData::Window& push_data);
+	void RecordShaderFailure(const ShaderParams& params, std::string_view reason, const char* file,
+	                         int line);
+	void NoteSkippedUse(uint64_t hash);
+	bool                                   m_lookup_key_ready = false;
+	std::unordered_map<uint64_t, uint64_t> m_skipped_uses; // By shader hash.
 	ShaderModule& CompileModule(Program& program, const ProgramKey& key,
 	                            ShaderRecompiler::CompileOptions       options,
 	                            ShaderRecompiler::TranslateResult      translated,

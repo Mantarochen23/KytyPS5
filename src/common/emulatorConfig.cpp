@@ -173,6 +173,10 @@ bool ShaderValidationEnabled() {
 	return g_config->shader_validation_enabled;
 }
 
+bool KeepGoingEnabled() {
+	return g_config->keep_going_enabled;
+}
+
 bool ShaderCacheEnabled() {
 	return g_config->shader_cache_enabled;
 }

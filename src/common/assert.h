@@ -12,6 +12,11 @@ namespace Common {
 [[noreturn]] void DbgExitIfHandler(char const* expr, char const* file, int line);
 [[noreturn]] void DbgNotImplementedHandler(char const* expr, char const* file, int line);
 
+// Keep-going support (common/recoverable.h). While a hook is set on the calling thread, a failed
+// EXIT/EXIT_IF/EXIT_NOT_IMPLEMENTED calls it instead of terminating. The hook must not return.
+using RecoverHook = void (*)(std::string_view text, char const* file, int line);
+RecoverHook SetThreadRecoverHook(RecoverHook hook);
+
 } // namespace Common
 
 #ifndef KYTY_FINAL

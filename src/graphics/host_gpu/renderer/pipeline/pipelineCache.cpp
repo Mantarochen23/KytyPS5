@@ -6,6 +6,7 @@
 #include "common/file.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
+#include "common/recoverable.h"
 #include "common/threads.h"
 #include "graphics/guest_gpu/gpu_format.h"
 #include "graphics/guest_gpu/hardwareContext.h"
@@ -287,9 +288,68 @@ ShaderModule& PipelineCache::CompileModule(Program& program, const ProgramKey& k
 	return module;
 }
 
+void PipelineCache::NoteSkippedUse(uint64_t hash) {
+	// Powers of two only: enough to rank skipped shaders by use without flooding the log.
+	const auto count = ++m_skipped_uses[hash];
+	if ((count & (count - 1u)) == 0u) {
+		PipelineCacheLog("!!! SHADER SKIP USES shader=0x{:016x} count={}", hash, count);
+	}
+}
+
+void PipelineCache::RecordShaderFailure(const ShaderParams& params, std::string_view reason,
+                                        const char* file, int line) {
+	const auto* stage = m_lookup_key_ready ? ShaderRecompiler::StageName(m_lookup_key.stage) : "?";
+	if (m_skipped_uses.contains(params.hash)) {
+		NoteSkippedUse(params.hash);
+		return;
+	}
+	m_skipped_uses[params.hash] = 1;
+	PipelineCacheLog("!!! SHADER SKIP (keep-going) shader=0x{:016x} stage={} at {}:{}: {}",
+	                 params.hash, stage, file, line, reason);
+	const std::filesystem::path folder = "_ShaderFailures";
+	Common::File::CreateDirectories(folder);
+	if (Common::File code(folder / fmt::format("{}_{:016x}.bin", stage, params.hash));
+	    !code.IsInvalid()) {
+		code.Write(params.code.data(), params.code.size_bytes());
+	}
+	std::string text;
+	for (const char c: reason) {
+		if (c == '"' || c == '\\') text += '\\';
+		text += c == '\n' || c == '\t' ? ' ' : c;
+	}
+	if (auto* ledger = std::fopen((folder / "failures.jsonl").string().c_str(), "a")) {
+		fmt::print(ledger,
+		           "{{\"hash\":\"0x{:016x}\",\"stage\":\"{}\",\"words\":{},\"file\":\"{}\",\"line\":{},"
+		           "\"reason\":\"{}\"}}\n",
+		           params.hash, stage, params.code.size(), file, line, text);
+		std::fclose(ledger);
+	}
+}
+
 template <typename InputInfo>
 const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputInfo& input_info,
                                               ShaderRecompiler::IR::PushData::Window& push_data) {
+	if (!Config::KeepGoingEnabled()) {
+		return GetProgramImpl(params, input_info, push_data);
+	}
+	m_lookup_key_ready = false;
+	Common::RecoverableScope scope;
+	try {
+		return GetProgramImpl(params, input_info, push_data);
+	} catch (const Common::RecoverableFailure& e) {
+		RecordShaderFailure(params, e.what(), e.file, e.line);
+	} catch (const std::exception& e) {
+		RecordShaderFailure(params, e.what(), "", 0);
+	}
+	if (m_lookup_key_ready) {
+		m_program_cache.try_emplace(m_lookup_key).first->second.skip_dispatch = true;
+	}
+	return nullptr;
+}
+
+template <typename InputInfo>
+const ShaderModule* PipelineCache::GetProgramImpl(const ShaderParams& params, InputInfo& input_info,
+                                                  ShaderRecompiler::IR::PushData::Window& push_data) {
 	const auto user_data = std::span(params.user_data).first(params.user_data_count);
 	ShaderRecompiler::IR::SrtRuntime runtime {
 	    .user_data                  = user_data,
@@ -323,6 +383,7 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 	m_lookup_key.hash            = params.hash;
 	m_lookup_key.user_data_count = params.user_data_count;
 	BuildStageStaticKey(input_info, m_lookup_key.static_state);
+	m_lookup_key_ready = true;
 	auto entry = m_program_cache.find(m_lookup_key);
 	const auto bind = [&](const ShaderModule& module) {
 		input_info.stage = {.module = &module, .resources = &entry->second.resources};
@@ -332,7 +393,10 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 	bool source_changed = false;
 	if (entry != m_program_cache.end()) {
 		auto& cached = entry->second;
-		if (cached.skip_dispatch) return nullptr;
+		if (cached.skip_dispatch) {
+			if (Config::KeepGoingEnabled()) NoteSkippedUse(params.hash);
+			return nullptr;
+		}
 		ShaderModule* module = nullptr;
 		if (cached.call_source) {
 			source_changed = cached.RefreshCallSource(runtime);
@@ -377,6 +441,7 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 		translated = ShaderRecompiler::TranslateProgram(params.code, options);
 	}
 	} catch (const std::exception& e) {
+		if (Config::KeepGoingEnabled()) throw; // GetProgram records it in the failure ledger.
 		PipelineCacheLog("!!! SHADER DISPATCH SKIP (resource tracking failed) shader=0x{:016x}: {}",
 		                 params.hash, e.what());
 		tracking_failed = true;
@@ -817,7 +882,12 @@ void PipelineCache::GetGraphicsPrograms(const CommandBuffer& command, DrawRender
 	auto push_data = ShaderRecompiler::IR::PushData::GraphicsWindow(
 	    mesh_active, object_primitive_id, last_stage.user_clip_planes);
 	if (pixel_active) {
-		const auto& pixel_module = *GetProgram(pixel_params, pixel_info, push_data);
+		const auto* pixel_program = GetProgram(pixel_params, pixel_info, push_data);
+		if (pixel_program == nullptr) {
+			vertex_info[0].stage.module = nullptr; // Skips the draw (PrepareDrawRenderState).
+			return;
+		}
+		const auto& pixel_module = *pixel_program;
 		for (const auto& output: pixel_module.info.info.outputs) {
 			if (output.kind == ShaderRecompiler::IR::StageOutputKind::Mrt ||
 			    output.kind == ShaderRecompiler::IR::StageOutputKind::ObjectPrimitiveId) {
@@ -827,7 +897,10 @@ void PipelineCache::GetGraphicsPrograms(const CommandBuffer& command, DrawRender
 		state.mrt_mask &= color_output_mask;
 	}
 	for (uint32_t i = 0; i < (tess_active ? 3u : 1u); i++) {
-		GetProgram(vertex_params[i], vertex_info[i], push_data);
+		if (GetProgram(vertex_params[i], vertex_info[i], push_data) == nullptr) {
+			vertex_info[0].stage.module = nullptr; // Skips the draw (PrepareDrawRenderState).
+			return;
+		}
 	}
 }
 
