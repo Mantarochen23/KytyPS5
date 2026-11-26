@@ -367,7 +367,11 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 	if (m_lookup_key_ready) {
 		auto& prog          = m_program_cache.try_emplace(m_lookup_key).first->second;
 		prog.skip_dispatch  = true;
+		prog.logged_neg_hit = true;
 		prog.failure_reason = std::move(failure_reason);
+		PipelineCacheLog("ShaderRecompiler {} translation end: hash=0x{:016x} outcome=failed ({})",
+		                 ShaderRecompiler::StageName(m_lookup_key.stage), params.hash,
+		                 prog.failure_reason);
 		StoreFailedProgram(m_lookup_key, prog.failure_reason);
 	}
 	return nullptr;
@@ -420,6 +424,14 @@ const ShaderModule* PipelineCache::GetProgramImpl(const ShaderParams& params, In
 	if (entry != m_program_cache.end()) {
 		auto& cached = entry->second;
 		if (cached.skip_dispatch) {
+			if (!cached.logged_neg_hit) {
+				cached.logged_neg_hit = true;
+				PipelineCacheLog(
+				    "ShaderRecompiler {} translation end: hash=0x{:016x} "
+				    "outcome=negative-cache hit ({})",
+				    ShaderRecompiler::StageName(options.stage), params.hash,
+				    cached.failure_reason.empty() ? "unknown" : cached.failure_reason);
+			}
 			if (Config::KeepGoingEnabled()) NoteSkippedUse(params.hash);
 			return nullptr;
 		}
@@ -449,7 +461,11 @@ const ShaderModule* PipelineCache::GetProgramImpl(const ShaderParams& params, In
 			                 params.hash, source.unsupported_call_pc);
 			auto& prog =
 			    m_program_cache.emplace(m_lookup_key, Program {.skip_dispatch = true}).first->second;
+			prog.logged_neg_hit = true;
 			prog.failure_reason = "unsupported GPU-selected callable target";
+			PipelineCacheLog(
+			    "ShaderRecompiler {} translation end: hash=0x{:016x} outcome=failed ({})",
+			    ShaderRecompiler::StageName(options.stage), params.hash, prog.failure_reason);
 			StoreFailedProgram(m_lookup_key, prog.failure_reason);
 			return nullptr;
 		}
@@ -483,7 +499,11 @@ const ShaderModule* PipelineCache::GetProgramImpl(const ShaderParams& params, In
 		                       .first->second
 		                 : entry->second;
 		prog.skip_dispatch  = true;
+		prog.logged_neg_hit = true;
 		prog.failure_reason = std::move(tracking_error);
+		PipelineCacheLog("ShaderRecompiler {} translation end: hash=0x{:016x} outcome=failed ({})",
+		                 ShaderRecompiler::StageName(options.stage), params.hash,
+		                 prog.failure_reason);
 		StoreFailedProgram(m_lookup_key, prog.failure_reason);
 		return nullptr;
 	}
@@ -502,18 +522,28 @@ const ShaderModule* PipelineCache::GetProgramImpl(const ShaderParams& params, In
 			                 "shader=0x{:016x}; rendering is incomplete",
 			                 params.hash);
 			program.skip_dispatch  = true;
+			program.logged_neg_hit = true;
 			program.failure_reason = "resource materialization failed";
+			PipelineCacheLog(
+			    "ShaderRecompiler {} translation end: hash=0x{:016x} outcome=failed ({})",
+			    ShaderRecompiler::StageName(options.stage), params.hash, program.failure_reason);
 			StoreFailedProgram(m_lookup_key, program.failure_reason);
 			return nullptr;
 		}
 	} else if (source_changed) {
 		entry->second.resource_plan = ShaderRecompiler::IR::ExtractResourcePlan(translated.program);
 		if (const auto* module = entry->second.FindModule<true>(runtime, push_data)) {
+			PipelineCacheLog(
+			    "ShaderRecompiler {} translation end: hash=0x{:016x} outcome=served from store",
+			    ShaderRecompiler::StageName(options.stage), params.hash);
 			return bind(*module);
 		}
 	}
-	return bind(CompileModule(entry->second, entry->first, options, std::move(translated),
-	                          push_data));
+	const auto& module =
+	    CompileModule(entry->second, entry->first, options, std::move(translated), push_data);
+	PipelineCacheLog("ShaderRecompiler {} translation end: hash=0x{:016x} outcome=emitted",
+	                 ShaderRecompiler::StageName(options.stage), params.hash);
+	return bind(module);
 }
 
 PipelineCache::PipelineCache(GraphicContext&                         graphics,
