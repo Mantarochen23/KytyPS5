@@ -87,6 +87,47 @@ uint64_t PipelineCache::FlightId(
 	return XXH3_64bits(writer.bytes.data(), writer.bytes.size());
 }
 
+// What the translated IR of a stage holds in memory: its instructions, in the program's value
+// storage and in its blocks, at the size of a list node.
+static uint64_t EstimateIrBytes(const ShaderRecompiler::TranslateResult& translated) {
+	const auto& program = translated.program;
+	uint64_t    count   = program.value_storage.size();
+	for (const auto& block: program.block_storage) {
+		count += block->Instructions().size();
+	}
+	return count * (sizeof(ShaderRecompiler::IR::Inst) + 2 * sizeof(void*)) +
+	       translated.decoded_dump.size() + translated.cfg_dump.size();
+}
+
+template <typename InputInfo>
+std::shared_ptr<PipelineCache::StageInputs>
+PipelineCache::MakeStageInputs(const ProgramKey& key, const ShaderParams& params,
+                               const InputInfo& input_info,
+                               const ShaderRecompiler::CompileOptions& options) {
+	auto inputs  = std::make_shared<StageInputs>();
+	inputs->key  = key;
+	inputs->info = input_info;
+	auto& info   = std::get<InputInfo>(inputs->info);
+	info.stage   = {};
+	inputs->code.assign(params.code.begin(), params.code.end());
+	inputs->back_code.assign(params.back_code.begin(), params.back_code.end());
+	inputs->user_data         = params.user_data;
+	inputs->shader_base       = params.Base();
+	inputs->profile           = SpirvProfile(m_graphics);
+	inputs->options           = options;
+	inputs->options.profile   = &inputs->profile;
+	inputs->options.user_data = std::span(inputs->user_data).first(params.user_data_count);
+	inputs->options.back_code = inputs->back_code;
+	if constexpr (std::is_same_v<InputInfo, ShaderVertexInputInfo>) {
+		inputs->options.input_info.vertex = &info;
+	} else if constexpr (std::is_same_v<InputInfo, ShaderPixelInputInfo>) {
+		inputs->options.input_info.pixel = &info;
+	} else {
+		inputs->options.input_info.compute = &info;
+	}
+	return inputs;
+}
+
 template <typename InputInfo>
 void PipelineCache::RequestAsync(const ProgramKey& key, Program* program,
                                  const ShaderParams& params, const InputInfo& input_info,
@@ -217,27 +258,7 @@ void PipelineCache::RequestAsync(const ProgramKey& key, Program* program,
 		}
 		return;
 	}
-	auto inputs = std::make_shared<StageInputs>();
-	inputs->key = key;
-	inputs->info = input_info;
-	auto& info   = std::get<InputInfo>(inputs->info);
-	info.stage   = {};
-	inputs->code.assign(params.code.begin(), params.code.end());
-	inputs->back_code.assign(params.back_code.begin(), params.back_code.end());
-	inputs->user_data         = params.user_data;
-	inputs->shader_base       = params.Base();
-	inputs->profile           = SpirvProfile(m_graphics);
-	inputs->options           = options;
-	inputs->options.profile   = &inputs->profile;
-	inputs->options.user_data = std::span(inputs->user_data).first(params.user_data_count);
-	inputs->options.back_code = inputs->back_code;
-	if constexpr (std::is_same_v<InputInfo, ShaderVertexInputInfo>) {
-		inputs->options.input_info.vertex = &info;
-	} else if constexpr (std::is_same_v<InputInfo, ShaderPixelInputInfo>) {
-		inputs->options.input_info.pixel = &info;
-	} else {
-		inputs->options.input_info.compute = &info;
-	}
+	auto inputs = MakeStageInputs(key, params, input_info, options);
 
 	async->counters.requested++;
 	const bool speculate = AsyncPlan::MaySpeculate(
@@ -383,9 +404,10 @@ void PipelineCache::RequestAsync(const ProgramKey& key, Program* program,
 				         ShaderRecompiler::StageName(inputs->key.stage), inputs->key.hash);
 				return;
 			}
+			const auto bytes = EstimateIrBytes(*translated);
 			m_async->translations.insert_or_assign(
 			    inputs->key, Async::Translation {inputs, std::move(translated), AskClockMs(),
-			                                     AskClockMs()});
+			                                     AskClockMs(), bytes});
 		}, translating);
 	}, urgent_translate ? ShaderWorkers::Priority::Urgent : ShaderWorkers::Priority::Normal,
 	   mode == AsyncMode::On);
@@ -409,6 +431,74 @@ template void PipelineCache::RequestAsync<ShaderComputeInputInfo>(
     const ProgramKey&, Program*, const ShaderParams&, const ShaderComputeInputInfo&,
     const ShaderRecompiler::CompileOptions&, ShaderRecompiler::IR::PushData::Window, AsyncMode,
     bool);
+
+// A compute program with GPU-selected calls is translated and linked on the render thread (it
+// reads the callees from guest memory), but compiling the module from that translation takes the
+// longest, and needs nothing but copies: it runs on a worker and the dispatch is suspended.
+bool PipelineCache::PostCallProgramModule(const ProgramKey& key, Program& program,
+                                          const ShaderParams&                     params,
+                                          const ShaderComputeInputInfo&           input_info,
+                                          const ShaderRecompiler::CompileOptions& options,
+                                          ShaderRecompiler::IR::PushData::Window  push_data,
+                                          ShaderRecompiler::TranslateResult&&     translated) {
+	auto* async           = m_async.get();
+	const auto compiling  = FlightId(key, push_data, &program.specialization);
+	auto       inputs     = MakeStageInputs(key, params, input_info, options);
+	async->counters.module_jobs++;
+	auto job = async->workers.Post(
+	    [this, async, device = m_graphics.device, inputs, compiling, push_data,
+	     specialization = program.specialization,
+	     function_code  = std::vector<uint32_t>(program.FunctionCode().begin(),
+	                                            program.FunctionCode().end()),
+	     translated = std::make_unique<ShaderRecompiler::TranslateResult>(std::move(translated))]() mutable {
+		    std::optional<Common::RecoverableScope> scope;
+		    if (Config::KeepGoingEnabled()) {
+			    scope.emplace();
+		    }
+		    std::string                          fail_reason;
+		    bool                                 failed = false;
+		    std::unique_ptr<Async::PendingStage> pending;
+		    try {
+			    auto compiled = CompileStage(device, inputs->key, inputs->options,
+			                                 std::move(*translated), specialization, push_data,
+			                                 function_code);
+			    pending = std::make_unique<Async::PendingStage>(device, std::move(compiled));
+		    } catch (const std::exception& e) {
+			    failed      = true;
+			    fail_reason = e.what();
+		    }
+		    async->Finish([this, inputs, compiling, push_data, failed,
+		                   fail_reason = std::move(fail_reason),
+		                   pending     = std::move(pending)]() mutable {
+			    m_async->Settle(compiling);
+			    auto& cached = m_program_cache.at(inputs->key);
+			    if (failed) {
+				    m_async->counters.module_failed++;
+				    cached.skip_dispatch  = true;
+				    cached.logged_neg_hit = true;
+				    cached.failure_reason = fail_reason;
+				    Log::WriteToConsoleAndLog(fmt::format(
+				        "!!! SHADER DISPATCH SKIP (async compile failed) shader=0x{:016x}: {}\n",
+				        inputs->key.hash, fail_reason));
+				    return;
+			    }
+			    pending->taken = true;
+			    // Programs with calls are not stored: they depend on their callees' code.
+			    AddModule(cached, inputs->key, std::move(pending->stage));
+			    m_async->counters.modules_ready++;
+			    AsyncLog("ShaderRecompiler {} translation end: hash=0x{:016x} outcome=emitted "
+			             "(async, linked program)",
+			             ShaderRecompiler::StageName(inputs->key.stage), inputs->key.hash);
+		    }, compiling);
+	    },
+	    ShaderWorkers::Priority::Urgent, /*waited=*/true);
+	if (!job) {
+		return false;
+	}
+	async->wanted.insert(compiling);
+	async->in_flight.emplace(compiling, Async::Flight {std::move(job), false});
+	return true;
+}
 
 void PipelineCache::SetAsyncFinishCallback(Common::UniqueFunction<void>&& callback) {
 	if (m_async == nullptr) {
@@ -471,12 +561,14 @@ void PipelineCache::PumpAsync() {
 	if (const auto now = AskClockMs(); now - m_async->last_store_report_ms >= 30000) {
 		m_async->last_store_report_ms = now;
 		m_async->ReportStore(m_store.GetCounts());
+		ReportLookups();
 	}
 }
 
 void PipelineCache::Async::ReportStore(const ShaderStoreWriter::Counts& counts) {
-	std::printf("[store] written=%" PRIu64 " pending=%" PRIu64 " failed=%" PRIu64 "\n",
-	            counts.written, counts.pending, counts.failed);
+	std::printf("[store] written=%" PRIu64 " pending=%" PRIu64 " failed=%" PRIu64
+	            " flushed=%" PRIu64 "\n",
+	            counts.written, counts.pending, counts.failed, counts.flushed);
 }
 
 void PipelineCache::WaitForAsync() {
@@ -545,14 +637,25 @@ void PipelineCache::Async::ReportStatus() {
 	}
 	const auto last_status_ms = last_report_ms;
 	last_report_ms = now;
-	// A translation no draw has come back for in a minute belongs to something no longer on
-	// screen; a later draw translates it again.
-	// The IR of a thousand translations takes the render thread seconds to free, so the expired
-	// ones are freed by a worker.
+	// Translations are kept while their shader may still be drawn; only over the IR budget are the
+	// least recently requested dropped. The IR of a thousand translations takes the render thread
+	// seconds to free, so the dropped ones are freed by a worker.
 	std::vector<Translation> dropped;
-	counters.expired += AsyncPlan::TakeExpired(translations, now, dropped);
+	const auto budget = AsyncPlan::TakeOverBudget(
+	    translations, now, static_cast<uint64_t>(Config::AsyncIrBudgetMb()) << 20, dropped);
+	counters.expired += budget.count;
 	if (!dropped.empty()) {
 		RenderActivity::Scope activity("expire-translations");
+		std::string hashes;
+		for (size_t i = 0; i < std::min<size_t>(dropped.size(), 5); i++) {
+			hashes += fmt::format(" 0x{:016x}", dropped[i].inputs->key.hash);
+		}
+		std::printf("[async] IR budget %u MiB exceeded: dropped %zu translations (%.0f MiB), the "
+		            "newest of them requested %.1f s ago; kept %zu (%.0f MiB); first dropped:%s\n",
+		            Config::AsyncIrBudgetMb(), budget.count,
+		            static_cast<double>(budget.bytes) / 1048576.0,
+		            static_cast<double>(budget.newest_age_ms) / 1000.0, budget.kept,
+		            static_cast<double>(budget.kept_bytes) / 1048576.0, hashes.c_str());
 		// If the workers are stopped the lambda, and with it the vector, is freed here.
 		(void)workers.Post([dropped = std::move(dropped)]() mutable { dropped.clear(); });
 	}

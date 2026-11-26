@@ -152,7 +152,10 @@ static void PrintUsage() {
 	         "                                       is stored at once. Default: 1.\n"
 	         "  --render-stall-report-s <n>          When no frame was recorded for n seconds, print one line\n"
 	         "                                       with what the render thread is doing, then every n\n"
-	         "                                       seconds. 0 = off. Default: 5.\n");
+	         "                                       seconds. 0 = off. Default: 5.\n"
+	         "  --async-ir-budget-mb <n>             Memory finished shader translations that no draw has\n"
+	         "                                       asked for yet may hold; over it the least recently\n"
+	         "                                       requested are dropped. 0 = no limit. Default: 2048.\n");
 }
 
 static bool NextArg(int argc, char* argv[], int& index, std::string& out) {
@@ -579,6 +582,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 		} else if (arg == "--render-stall-report-s") {
 			if (!ParseUint32(value, options.config.render_stall_report_s)) {
 				::printf("invalid render stall report value: %s\n", value.c_str());
+				return false;
+			}
+		} else if (arg == "--async-ir-budget-mb") {
+			if (!ParseUint32(value, options.config.async_ir_budget_mb)) {
+				::printf("invalid async IR budget value: %s\n", value.c_str());
 				return false;
 			}
 		} else {

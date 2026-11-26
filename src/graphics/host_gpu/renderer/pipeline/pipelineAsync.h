@@ -51,10 +51,12 @@ struct PipelineCache::Async {
 	struct Translation {
 		std::shared_ptr<StageInputs>                       inputs;
 		std::unique_ptr<ShaderRecompiler::TranslateResult> translated;
-		// When the translation finished, and when a draw or dispatch last asked for it. A
-		// translation expires a minute after the later of the two.
+		// When the translation finished, and when a draw or dispatch last asked for it. Over
+		// the IR budget the one with the older of the two goes first.
 		uint64_t since = 0;
 		uint64_t asked = 0;
+		// Estimated memory of the translated IR.
+		uint64_t bytes = 0;
 	};
 
 	// A job a worker has or will run for a program, and what it does.
@@ -144,7 +146,7 @@ struct PipelineCache::Async {
 		uint64_t pipeline_jobs     = 0;
 		uint64_t pipelines_ready   = 0;
 		uint64_t pipeline_failed   = 0;
-		uint64_t expired           = 0; // translations dropped unasked for a minute
+		uint64_t expired           = 0; // translations dropped over the IR budget
 	};
 	Counters counters;
 	uint64_t last_store_report_ms = 0;

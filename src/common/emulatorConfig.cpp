@@ -514,4 +514,8 @@ uint32_t RenderStallReportSeconds() {
 	return g_config != nullptr ? g_config->render_stall_report_s : 5u;
 }
 
+uint32_t AsyncIrBudgetMb() {
+	return g_config != nullptr ? g_config->async_ir_budget_mb : 2048u;
+}
+
 } // namespace Config

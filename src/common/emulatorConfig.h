@@ -153,6 +153,9 @@ struct ConfigOptions {
 	// --render-stall-report-s: when no frame was recorded for this many seconds, print one line
 	// with what the render thread is doing, then again every that many seconds. 0 = off.
 	uint32_t                 render_stall_report_s      = 5;
+	// --async-ir-budget-mb: the memory finished shader translations that no draw has asked for
+	// yet may hold before the least recently requested are dropped. 0 = no limit.
+	uint32_t                 async_ir_budget_mb         = 2048;
 };
 
 void Load(const ConfigOptions& cfg);
@@ -259,6 +262,7 @@ uint32_t AsyncPumpBudgetMs();
 uint32_t AsyncWorkers();
 bool     AsyncSpeculativeModules();
 uint32_t RenderStallReportSeconds();
+uint32_t AsyncIrBudgetMb();
 
 } // namespace Config
 

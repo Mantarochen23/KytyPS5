@@ -497,6 +497,63 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 	return nullptr;
 }
 
+void PipelineCache::NoteLookupMiss(const ProgramKey& key, const Program* program,
+                                   ShaderRecompiler::IR::PushData::Window push_data) {
+	auto& stats = m_lookup_stats;
+	(program != nullptr ? stats.miss_key : stats.miss_absent)++;
+	// One identity per key, push window and resources: a dispatch that waits retries every few ms.
+	uint64_t identity = ProgramVariantKey() ^ (uint64_t {program != nullptr} << 63);
+	const auto mix = [&](uint64_t word) { identity = (identity ^ word) * 1099511628211ull; };
+	if (program != nullptr) {
+		mix(push_data.StartFor(0, key.stage));
+		for (const auto& buffer: program->specialization.buffers) {
+			mix(buffer.packed_stride);
+			mix(static_cast<uint64_t>(buffer.descriptor_format));
+			mix(buffer.indirect_search_iterations);
+		}
+		for (const auto& image: program->specialization.images) {
+			mix(image.mip_count);
+			mix(static_cast<uint64_t>(image.dimension));
+			mix(static_cast<uint64_t>(image.numeric_class));
+		}
+	}
+	if (!stats.NoteDistinct(identity) || !stats.WantsDescription()) {
+		return;
+	}
+	stats.described++;
+	std::string text;
+	if (program != nullptr) {
+		std::vector<StoreDiff::ModuleInputs> modules;
+		for (const auto& module: program->modules) {
+			const auto& layout = module.info.bindings;
+			modules.push_back({.id              = module.id,
+			                   .push_start      = layout.push_data_start_dword,
+			                   .want_push_start = push_data.StartFor(layout.ShaderDataDwords(),
+			                                                         module.info.stage),
+			                   .specialization  = &module.specialization});
+		}
+		text = StoreDiff::DescribeNearestModule(modules, program->specialization);
+	} else {
+		text = "no program of this key";
+		for (const auto& [other, ignored]: m_program_cache) {
+			if (other.stage != key.stage || other.hash != key.hash) {
+				continue;
+			}
+			text = "nearest program of this hash: " +
+			       StoreDiff::DescribeKeyDifference(other.user_data_count, other.static_state,
+			                                        key.user_data_count, key.static_state);
+			break;
+		}
+	}
+	std::printf("[store] miss #%u %s stage=%s hash=0x%016" PRIx64 ": %s\n", stats.described,
+	            program != nullptr ? "key" : "absent", ShaderRecompiler::StageName(key.stage),
+	            key.hash, text.c_str());
+}
+
+void PipelineCache::ReportLookups() const {
+	std::printf("%s\n", m_lookup_stats.Line().c_str());
+}
+
 template <typename InputInfo>
 const ShaderModule* PipelineCache::GetProgramImpl(const ShaderParams& params, InputInfo& input_info,
                                                   ShaderRecompiler::IR::PushData::Window& push_data,
@@ -568,6 +625,9 @@ const ShaderModule* PipelineCache::GetProgramImpl(const ShaderParams& params, In
 	bool source_changed = false;
 	if (entry != m_program_cache.end()) {
 		auto& cached = entry->second;
+		if (!cached.skip_dispatch) {
+			m_lookup_stats.lookups++;
+		}
 		if (cached.skip_dispatch) {
 			if (!cached.logged_neg_hit) {
 				cached.logged_neg_hit = true;
@@ -588,7 +648,13 @@ const ShaderModule* PipelineCache::GetProgramImpl(const ShaderParams& params, In
 		} else {
 			module = cached.FindModule<false>(runtime, push_data, &materialized);
 		}
-		if (module != nullptr) return bind(*module);
+		if (module != nullptr) {
+			m_lookup_stats.hit++;
+			return bind(*module);
+		}
+		if (materialized && !source_changed) {
+			NoteLookupMiss(m_lookup_key, &cached, push_data);
+		}
 		if (!cached.call_source && !materialized) {
 			PipelineCacheLog("!!! SHADER DISPATCH SKIP (resource materialization failed) "
 			                 "shader=0x{:016x}; rendering is incomplete",
@@ -603,17 +669,34 @@ const ShaderModule* PipelineCache::GetProgramImpl(const ShaderParams& params, In
 		}
 	}
 
+	if (entry == m_program_cache.end()) {
+		m_lookup_stats.lookups++;
+		NoteLookupMiss(m_lookup_key, nullptr, push_data);
+	}
 	finish_options();
+	// Compute programs with GPU-selected calls are linked on the render thread; their module is
+	// compiled by a worker while the dispatch's queue is suspended.
+	bool call_program = false;
 	if (mode == AsyncMode::On && m_async != nullptr) {
-		const bool sync_only =
-		    (entry != m_program_cache.end() && entry->second.call_source != nullptr) ||
-		    m_async->sync_only_keys.contains(m_lookup_key);
-		if (!sync_only) {
+		call_program = (entry != m_program_cache.end() && entry->second.call_source != nullptr) ||
+		               m_async->sync_only_keys.contains(m_lookup_key);
+		if (!call_program) {
 			m_last_deferred = true;
 			RequestAsync(m_lookup_key, entry != m_program_cache.end() ? &entry->second : nullptr,
 			             params, input_info, options, push_data, mode,
 			             std::is_same_v<InputInfo, ShaderComputeInputInfo>);
 			return nullptr;
+		}
+		if (entry != m_program_cache.end()) {
+			// Its module is being compiled: nothing to link again until it is applied.
+			const auto flight = FlightId(m_lookup_key, push_data, &entry->second.specialization);
+			if (const auto running = m_async->in_flight.find(flight);
+			    running != m_async->in_flight.end()) {
+				m_async->Want(flight, running->second.job);
+				m_last_deferred = true;
+				RenderActivity::NoteDetail("module job running (linked program)");
+				return nullptr;
+			}
 		}
 	}
 	const auto sync_begin = std::chrono::steady_clock::now();
@@ -721,8 +804,38 @@ const ShaderModule* PipelineCache::GetProgramImpl(const ShaderParams& params, In
 			return bind(*module);
 		}
 	}
+	if constexpr (std::is_same_v<InputInfo, ShaderComputeInputInfo>) {
+		if (call_program) {
+			// Null with the dispatch pending; with the workers stopped (shutdown) it is skipped.
+			const bool posted = PostCallProgramModule(entry->first, entry->second, params,
+			                                          input_info, options, push_data,
+			                                          std::move(translated));
+			const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+			                    std::chrono::steady_clock::now() - sync_begin)
+			                    .count();
+			std::printf("[sync-build] cs hash=0x%016" PRIx64
+			            ": linked on the render thread in %lld ms, module compiled on a worker\n",
+			            params.hash, static_cast<long long>(ms));
+			m_last_deferred = posted;
+			return nullptr;
+		}
+	}
 	auto& built = CompileModule(entry->second, entry->first, options, std::move(translated),
 	                            push_data);
+	{
+		const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+		                    std::chrono::steady_clock::now() - sync_begin)
+		                    .count();
+		if (ms >= 50) {
+			std::printf("[sync-build] %s hash=0x%016" PRIx64
+			            ": the render thread built the stage in %lld ms (%s)\n",
+			            ShaderRecompiler::StageName(options.stage), params.hash,
+			            static_cast<long long>(ms),
+			            m_async == nullptr          ? "async compile off"
+			            : mode != AsyncMode::On     ? "draw cannot be skipped"
+			                                        : "worker pool stopped");
+		}
+	}
 	PipelineCacheLog("ShaderRecompiler {} translation end: hash=0x{:016x} outcome=emitted",
 	                 ShaderRecompiler::StageName(options.stage), params.hash);
 	if (m_async != nullptr) {
@@ -867,6 +980,7 @@ void PipelineCache::Save() {
 	if (m_async != nullptr) {
 		m_async->ReportStore(m_store.GetCounts());
 	}
+	ReportLookups();
 	if (m_driver_cache_dirty) {
 		m_driver_cache_dirty = false;
 		WriteDriverCache();

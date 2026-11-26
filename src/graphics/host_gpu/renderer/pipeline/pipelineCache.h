@@ -10,6 +10,7 @@
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
 #include "graphics/host_gpu/renderer/renderTarget.h"
 #include "graphics/host_gpu/vulkanCommon.h"
+#include "graphics/host_gpu/renderer/pipeline/shaderStoreDiff.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
 #include "graphics/shader/rectListShader.h"
 #include "graphics/shader/shader.h"
@@ -166,17 +167,22 @@ public:
 	// Compresses `record` and appends it on the store thread, in call order.
 	void Append(std::vector<uint8_t>&& record);
 	void Post(Common::UniqueFunction<void>&& job);
-	// Records appended, written to the file, and failed to write, for the status line.
+	// Records appended, written to the file, and failed to write, for the status line. `flushed`
+	// is how many of the written ones were forced to the disk.
 	struct Counts {
 		uint64_t written = 0;
 		uint64_t pending = 0;
 		uint64_t failed  = 0;
+		uint64_t flushed = 0;
 	};
+	// The longest a written record waits for the disk while more records are queued behind it.
+	static constexpr int FlushIntervalMs = 500;
 	[[nodiscard]] Counts GetCounts() const {
 		const auto appended = m_appended.load(std::memory_order_relaxed);
 		const auto written  = m_written.load(std::memory_order_relaxed);
 		const auto failed   = m_failed.load(std::memory_order_relaxed);
-		return {written, appended - written - failed, failed};
+		return {written, appended - written - failed, failed,
+		        m_flushed.load(std::memory_order_relaxed)};
 	}
 	// Runs the queued jobs and stops the thread; jobs posted later never run. Safe to call again.
 	void Finish() { m_thread = {}; }
@@ -184,7 +190,13 @@ public:
 private:
 	friend struct PipelineCacheTestAccess;
 
+	// Store thread only: forces what is written to the disk.
+	void Flush();
+	[[nodiscard]] bool QueueEmpty();
+
 	Common::File                             m_file;
+	std::chrono::steady_clock::time_point    m_last_flush = std::chrono::steady_clock::now();
+	std::atomic<uint64_t>                    m_flushed {0};
 	std::atomic<uint64_t>                    m_appended {0};
 	std::atomic<uint64_t>                    m_written {0};
 	std::atomic<uint64_t>                    m_failed {0};
@@ -316,6 +328,13 @@ private:
 	std::unordered_map<uint64_t, std::vector<ProgramKey>>                      m_key_index;
 	// Records everything first created if a shader store is open, and writes the driver cache.
 	ShaderStoreWriter m_store;
+	// What the module lookups ended in, for the `[store] lookups=` line.
+	StoreDiff::LookupStats m_lookup_stats;
+	// Counts a lookup that found no module, and describes the first few.
+	void NoteLookupMiss(const ProgramKey& key, const Program* program,
+	                    ShaderRecompiler::IR::PushData::Window push_data);
+	// Prints the lookup counters.
+	void ReportLookups() const;
 
 	// A stage built from its translation, before the cache holds it.
 	struct CompiledStage {
@@ -383,6 +402,18 @@ private:
 	                  const InputInfo& input_info, const ShaderRecompiler::CompileOptions& options,
 	                  ShaderRecompiler::IR::PushData::Window push_data, AsyncMode mode,
 	                  bool urgent_translate = false);
+	// The inputs a worker needs to translate and compile one stage, copied from the call.
+	template <typename InputInfo>
+	std::shared_ptr<StageInputs> MakeStageInputs(const ProgramKey& key, const ShaderParams& params,
+	                                             const InputInfo&                        input_info,
+	                                             const ShaderRecompiler::CompileOptions& options);
+	// Compiles the module of a translated compute program with GPU-selected calls on a worker.
+	// False when the workers are stopped.
+	bool PostCallProgramModule(const ProgramKey& key, Program& program, const ShaderParams& params,
+	                           const ShaderComputeInputInfo&           input_info,
+	                           const ShaderRecompiler::CompileOptions& options,
+	                           ShaderRecompiler::IR::PushData::Window  push_data,
+	                           ShaderRecompiler::TranslateResult&&     translated);
 	// Applies the work the workers have finished. Render thread only.
 	void            PumpAsync();
 	// Sleeps on a condition variable until a worker finishes, then applies finished work.

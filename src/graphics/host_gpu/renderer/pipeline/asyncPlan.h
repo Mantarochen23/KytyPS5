@@ -7,7 +7,7 @@
 
 // The decisions of --async-shader-compile that need no Vulkan, so that they can be tested: what a
 // request for a stage does, whether a translation may also build its module, and which waiting
-// translations expire. pipelineAsync.cpp applies them.
+// translations are dropped for the memory budget. pipelineAsync.cpp applies them.
 namespace Libs::Graphics::AsyncPlan {
 
 // What a draw or dispatch that found no module for its resources does for a stage.
@@ -73,30 +73,63 @@ struct RequestState {
 	return enabled && compute && !has_program;
 }
 
-// How long a finished translation waits for a draw to ask for it.
-inline constexpr uint64_t TranslationTtlMs = 60000;
+// The memory the finished translations that no draw has asked for yet may hold, as the sum of their
+// estimated IR sizes. A translation is kept while its shader is registered, so a draw that comes
+// back after a minute or an hour still finds it; only when the translations hold more than this
+// are the least recently requested ones dropped, and a request for a dropped stage translates it
+// again. 0 = no limit.
+inline constexpr uint64_t DefaultIrBudgetBytes = uint64_t {2048} << 20;
 
-// Whether a translation made at `since` and last asked for at `asked` has expired at `now`.
-[[nodiscard]] constexpr bool Expired(uint64_t now, uint64_t since, uint64_t asked,
-                                     uint64_t ttl_ms = TranslationTtlMs) {
-	return now - std::max(since, asked) > ttl_ms;
+// When a translation was last wanted: the later of its finish and the last request for it.
+template <typename Entry> [[nodiscard]] constexpr uint64_t LastRequested(const Entry& entry) {
+	return std::max(entry.since, entry.asked);
 }
 
-// Moves the expired entries of `table` (key -> {since, asked, ...}) into `dropped`, so that the
-// caller frees them where it chooses. A request for a dropped stage translates it again.
-template <typename Table, typename Dropped>
-size_t TakeExpired(Table& table, uint64_t now, Dropped& dropped, uint64_t ttl_ms = TranslationTtlMs) {
-	size_t count = 0;
-	for (auto it = table.begin(); it != table.end();) {
-		if (Expired(now, it->second.since, it->second.asked, ttl_ms)) {
+// What dropping for the budget took.
+struct Dropped {
+	size_t   count = 0;
+	uint64_t bytes = 0;
+	// How long ago the most recently requested of the dropped entries was requested.
+	uint64_t newest_age_ms = 0;
+	// What the table holds afterwards.
+	size_t   kept       = 0;
+	uint64_t kept_bytes = 0;
+};
+
+// Moves entries of `table` (key -> {since, asked, bytes, ...}) into `dropped`, least recently
+// requested first, until the table holds at most `budget_bytes`; the caller frees them where it
+// chooses. Nothing is dropped while the table is within the budget or the budget is 0.
+template <typename Table, typename Out>
+Dropped TakeOverBudget(Table& table, uint64_t now, uint64_t budget_bytes, Out& dropped) {
+	Dropped result;
+	uint64_t total = 0;
+	for (const auto& entry: table) {
+		total += entry.second.bytes;
+	}
+	if (budget_bytes != 0 && total > budget_bytes) {
+		std::vector<typename Table::iterator> order;
+		order.reserve(table.size());
+		for (auto it = table.begin(); it != table.end(); ++it) {
+			order.push_back(it);
+		}
+		std::sort(order.begin(), order.end(), [](const auto& a, const auto& b) {
+			return LastRequested(a->second) < LastRequested(b->second);
+		});
+		for (const auto& it: order) {
+			if (total <= budget_bytes) {
+				break;
+			}
+			total -= it->second.bytes;
+			result.bytes += it->second.bytes;
+			result.count++;
+			result.newest_age_ms = now - LastRequested(it->second);
 			dropped.push_back(std::move(it->second));
-			it = table.erase(it);
-			count++;
-		} else {
-			++it;
+			table.erase(it);
 		}
 	}
-	return count;
+	result.kept       = table.size();
+	result.kept_bytes = total;
+	return result;
 }
 
 } // namespace Libs::Graphics::AsyncPlan

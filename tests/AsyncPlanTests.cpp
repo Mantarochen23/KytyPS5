@@ -25,6 +25,7 @@ struct Stage {
 	struct Translation {
 		uint64_t since = 0;
 		uint64_t asked = 0;
+		uint64_t bytes = 0;
 	};
 	bool                      has_program = false; // in the program cache (translated or loaded)
 	std::map<int, Translation> translations;        // zero or one entry, key 0
@@ -62,7 +63,7 @@ struct Stage {
 		translation_job = false;
 		has_program     = true;
 		if (!speculated) {
-			translations[0] = {now, now};
+			translations[0] = {now, now, 0};
 		}
 		speculated = false;
 	}
@@ -119,26 +120,46 @@ void TestSpeculationEndsAfterOneRound() {
 	Check(stage.Request(false, 40) == Action::PostModuleJob, "so the dispatch gets its module job");
 }
 
-// A translation nobody asked for expires; a request that finds it gone translates again instead
-// of waiting for it, and one that asked in time keeps it.
-void TestExpiredWhileWaitedFor() {
-	Stage stage;
-	stage.has_program = true;
+// Translations are kept for as long as the memory budget allows, however old; over it the least
+// recently requested go first, and a request for a dropped stage translates it again.
+void TestBudgetedExpiry() {
+	constexpr uint64_t MiB = 1048576;
 	std::map<int, Stage::Translation> table;
-	table[0] = {1000, 1000};
-	table[1] = {1000, 50000}; // asked later
+	table[0] = {1000, 1000, 100 * MiB};
+	table[1] = {1000, 50000, 100 * MiB}; // asked later
+	table[2] = {20000, 20000, 100 * MiB};
 	std::vector<Stage::Translation> dropped;
-	Check(AsyncPlan::TakeExpired(table, 61000, dropped) == 0, "nothing expires at exactly the limit");
-	Check(AsyncPlan::TakeExpired(table, 61001, dropped) == 1 && dropped.size() == 1,
-	      "the unasked translation expires just after it");
-	Check(table.contains(1) && !table.contains(0), "the asked one stays");
-	Check(AsyncPlan::TakeExpired(table, 110001, dropped) == 1 && table.empty(),
-	      "and expires a minute after its last ask");
+	constexpr uint64_t Hours = 3'600'000;
+	auto none = AsyncPlan::TakeOverBudget(table, 10 * Hours, 300 * MiB, dropped);
+	Check(none.count == 0 && table.size() == 3 && none.kept_bytes == 300 * MiB,
+	      "a table within the budget keeps everything, however old");
+	none = AsyncPlan::TakeOverBudget(table, 10 * Hours, 0, dropped);
+	Check(none.count == 0 && table.size() == 3, "budget 0 means no limit");
+
+	auto first = AsyncPlan::TakeOverBudget(table, 60000, 250 * MiB, dropped);
+	Check(first.count == 1 && dropped.size() == 1 && !table.contains(0),
+	      "one entry goes: the least recently requested");
+	Check(first.bytes == 100 * MiB && first.kept == 2 && first.kept_bytes == 200 * MiB,
+	      "and the totals say what went and what stays");
+	Check(first.newest_age_ms == 59000, "the age is that of the dropped entry's last request");
+
+	// Asking for an entry refreshes it: the next to go is the one nobody asked for.
+	table[2].asked = 55000;
+	auto second = AsyncPlan::TakeOverBudget(table, 60000, 150 * MiB, dropped);
+	Check(second.count == 1 && table.size() == 1 && table.contains(2),
+	      "the entry asked for last stays, the older request goes");
+
+	// One bigger than the budget on its own goes too, after everything less recent.
+	table[3] = {60000, 60000, 400 * MiB};
+	const auto third = AsyncPlan::TakeOverBudget(table, 61000, 300 * MiB, dropped);
+	Check(third.count == 2 && table.empty() && third.bytes == 500 * MiB,
+	      "entries go in order of last request until the rest fits");
 
 	// The waiter: translation gone while its dispatch was blocked.
-	stage.translations.clear();
+	Stage stage;
+	stage.has_program = true;
 	Check(stage.Request(false, 70000) == Action::PostTranslation,
-	      "a dispatch whose translation expired posts a new one");
+	      "a dispatch whose translation was dropped posts a new one");
 	Check(stage.Request(false, 70050) == Action::JoinTranslation, "and then waits for that one");
 	stage.FinishTranslation(71000);
 	Check(stage.Request(false, 71050) == Action::PostModuleJob, "which reaches the module job");
@@ -149,9 +170,9 @@ void TestExpiredWhileWaitedFor() {
 void TestModuleJobDedup() {
 	Stage stage;
 	stage.has_program = true;
-	stage.translations[0] = {0, 0};
+	stage.translations[0] = {0, 0, 0};
 	Check(stage.Request(false, 1) == Action::PostModuleJob, "posts");
-	stage.translations[0] = {0, 0}; // another translation arrives for other resources
+	stage.translations[0] = {0, 0, 0}; // another translation arrives for other resources
 	Check(stage.Request(false, 2) == Action::JoinModuleJob, "joins while running");
 	Check(stage.module_jobs_posted == 1, "posted once");
 }
@@ -180,7 +201,7 @@ int main() {
 	TestColdRequest();
 	TestLoadedFromStore();
 	TestSpeculationEndsAfterOneRound();
-	TestExpiredWhileWaitedFor();
+	TestBudgetedExpiry();
 	TestModuleJobDedup();
 	TestActivity();
 	std::printf("AsyncPlanTests: ok\n");
