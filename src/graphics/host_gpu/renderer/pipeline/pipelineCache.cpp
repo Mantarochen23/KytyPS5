@@ -1,4 +1,5 @@
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
+#include "graphics/host_gpu/renderer/pipeline/shaderStoreIdentity.h"
 
 #include "common/assert.h"
 #include "common/debugCounters.h"
@@ -229,7 +230,7 @@ std::filesystem::path ShaderStorePath() {
 	if (title_id.empty()) {
 		return {};
 	}
-	return std::filesystem::path("_PipelineCache") / (title_id + ".shaders");
+	return std::filesystem::path("_PipelineCache") / (title_id + ShaderStoreSuffix(Config::LoopGuardLimit()) + ".shaders");
 }
 
 bool GraphicsPipelineKey::operator==(const GraphicsPipelineKey& other) const {

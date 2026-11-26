@@ -1,5 +1,6 @@
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderStoreCapability.h"
+#include "graphics/host_gpu/renderer/pipeline/shaderStoreIdentity.h"
 
 #include "common/emulatorConfig.h"
 #include "common/logging/log.h"
@@ -45,8 +46,9 @@ constexpr uint64_t kShaderStoreFormatVersion = 4;
 // What every record depends on besides its own fields.
 std::vector<uint8_t> StoreHeader(const GraphicContext& graphics) {
 	Writer header;
-	IoAll(header, kShaderStoreFormatVersion, SpirvProfile(graphics),
-	      graphics.GetPhysicalDeviceProperties().limits.maxComputeSharedMemorySize);
+	IoAll(header, kShaderStoreFormatVersion);
+	VisitShaderStoreProfile(SpirvProfile(graphics), [&](auto value) { IoAll(header, value); });
+	IoAll(header, graphics.GetPhysicalDeviceProperties().limits.maxComputeSharedMemorySize);
 	return std::move(header.bytes);
 }
 

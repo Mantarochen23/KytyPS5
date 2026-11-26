@@ -1,5 +1,7 @@
 #include "graphics/host_gpu/renderer/cache/loopGuardReport.h"
 #include "graphics/host_gpu/renderer/pipeline/bufferProbe.h"
+#include "graphics/host_gpu/renderer/pipeline/shaderStoreIdentity.h"
+#include "graphics/shader/recompiler/backend/spirv/SpirvEmitter.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -106,6 +108,25 @@ void TestLineAndLimiter() {
 	      "summary text");
 }
 
+void TestStoreIdentity() {
+	using Profile = ShaderRecompiler::Spirv::Profile;
+	const auto collect = [](const Profile& p) {
+		std::vector<uint64_t> values;
+		VisitShaderStoreProfile(p, [&](auto v) { values.push_back(static_cast<uint64_t>(v)); });
+		return values;
+	};
+	Profile plain {.maintenance8 = true, .device_clock_period_ps = 40, .ray_query = true};
+	Profile guarded = plain;
+	guarded.loop_guard_limit = 200000;
+	const auto a = collect(plain);
+	Check(a.size() == 8, "the store identity keeps the eight historic profile fields");
+	Check(a == collect(guarded),
+	      "a loop-guard limit must not change the store header (it made every boot reject the store)");
+	Check(ShaderStoreSuffix(0).empty(), "default store file name is unchanged");
+	Check(ShaderStoreSuffix(200000) == ".guard200000" && ShaderStoreSuffix(200000) != ShaderStoreSuffix(5),
+	      "each loop-guard limit selects its own store file");
+}
+
 void TestLoopGuardReport() {
 	std::vector<uint32_t> words(LoopGuardAreaDwords, 0u);
 	std::set<std::pair<uint64_t, uint32_t>> seen;
@@ -142,6 +163,7 @@ int main() {
 	TestCompare();
 	TestClassify();
 	TestLineAndLimiter();
+	TestStoreIdentity();
 	TestLoopGuardReport();
 	std::puts("BufferProbeTests: ok");
 	return 0;
