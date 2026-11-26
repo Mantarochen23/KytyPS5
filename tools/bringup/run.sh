@@ -159,6 +159,13 @@ set -e
 # Kernel side of the run: GPU ring timeouts and resets name the guilty process.
 journalctl -k --since "@$start_epoch" --no-pager 2>/dev/null | grep -i 'amdgpu\|\[drm\]' | grep -v 'No EDID' > "$run/kernel-gpu.txt" || true
 [ -s "$run/kernel-gpu.txt" ] || rm -f "$run/kernel-gpu.txt"
+# After a GPU ring timeout the kernel keeps a device dump for a few minutes only; it is root-readable.
+if grep -qi "ring .* timeout" "$run/kernel-gpu.txt" 2>/dev/null; then
+    for d in /sys/class/drm/card*/device/devcoredump/data; do
+        [ -e "$d" ] && sudo -n cat "$d" > "$run/gpu-devcoredump.txt" 2>/dev/null
+    done
+    [ -s "$run/gpu-devcoredump.txt" ] || rm -f "$run/gpu-devcoredump.txt"
+fi
 if [ -d "$state/_ShaderFailures" ]; then
     cp -a "$state/_ShaderFailures" "$run/ShaderFailures"   # cumulative over runs with this state folder
 fi
