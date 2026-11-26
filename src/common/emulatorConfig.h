@@ -133,6 +133,12 @@ struct ConfigOptions {
 	bool                     bda_table_validate_enabled = false;
 	// Seconds to wait for the driver's own hang dump after a device loss (RADV_DEBUG=hang); 0 = off.
 	uint32_t                 hang_dump_wait_seconds     = 60;
+	// Shader hashes whose dispatches get the --buffer-probe comparison of guest memory against the
+	// host buffer contents (sorted, unique). Empty = off.
+	std::vector<uint64_t>    buffer_probe_hashes;
+	// --loop-guard: evaluated loop exits per invocation before every loop of a shader is left and
+	// reported. 0 = off.
+	uint32_t                 loop_guard_limit           = 0;
 };
 
 void Load(const ConfigOptions& cfg);
@@ -230,6 +236,9 @@ const Keymap& GetKeymap();
 const std::vector<std::string>& GetGuestArguments();
 bool BdaTableValidateEnabled();
 uint32_t HangDumpWaitSeconds();
+bool     BufferProbeShader(uint64_t hash);
+bool     BufferProbeEnabled();
+uint32_t LoopGuardLimit();
 
 } // namespace Config
 

@@ -130,6 +130,12 @@ static void PrintUsage() {
 	::printf("  --hang-dump-wait <seconds>           Debug: after a device loss, wait up to this long for the\n"
 	         "                                       driver's own hang dump when RADV_DEBUG contains `hang`.\n"
 	         "                                       0 = do not wait. Default: 60.\n");
+	::printf("  --buffer-probe <hashes>              Debug: before each dispatch of a listed shader, compare the guest\n"
+	         "                                       memory of every bound buffer with the host copy the GPU reads\n"
+	         "                                       and log the differences. Also reads KYTY_BUFFER_PROBE.\n");
+	::printf("  --loop-guard <n>                     Debug: after n evaluated loop exits an invocation leaves all\n"
+	         "                                       its loops and the shader hash and loop are logged. 0 = off\n"
+	         "                                       (default). Also reads KYTY_LOOP_GUARD.\n");
 }
 
 static bool NextArg(int argc, char* argv[], int& index, std::string& out) {
@@ -520,6 +526,16 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 		} else if (arg == "--hang-dump-wait") {
 			if (!ParseUint32(value, options.config.hang_dump_wait_seconds)) {
 				::printf("invalid hang dump wait: %s\n", value.c_str());
+				return false;
+			}
+		} else if (arg == "--buffer-probe") {
+			if (!Config::ParseShaderHashList(value, options.config.buffer_probe_hashes)) {
+				::printf("invalid shader hash list for --buffer-probe: %s\n", value.c_str());
+				return false;
+			}
+		} else if (arg == "--loop-guard") {
+			if (!ParseUint32(value, options.config.loop_guard_limit)) {
+				::printf("invalid loop guard limit: %s\n", value.c_str());
 				return false;
 			}
 		} else {

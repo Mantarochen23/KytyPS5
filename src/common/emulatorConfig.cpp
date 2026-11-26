@@ -13,6 +13,9 @@ namespace Config {
 
 static std::unique_ptr<ConfigOptions> g_config;
 
+// Leaves room for the guard's own `limit + 1` comparison constant.
+static constexpr uint32_t MaxLoopGuardLimit = 0xfffffff0u;
+
 void Initialize() {
 	EXIT_IF(g_config != nullptr);
 
@@ -50,6 +53,25 @@ void Load(const ConfigOptions& cfg) {
 	    std::strcmp(env_bda_validate, "0") != 0) {
 		g_config->bda_table_validate_enabled = true;
 	}
+	if (const char* env_probe = std::getenv("KYTY_BUFFER_PROBE");
+	    env_probe != nullptr && env_probe[0] != '\0') {
+		if (!ParseShaderHashList(env_probe, g_config->buffer_probe_hashes)) {
+			EXIT("invalid KYTY_BUFFER_PROBE value: %s\n", env_probe);
+		}
+	}
+	auto& probe = g_config->buffer_probe_hashes;
+	std::ranges::sort(probe);
+	probe.erase(std::unique(probe.begin(), probe.end()), probe.end());
+	if (const char* env_guard = std::getenv("KYTY_LOOP_GUARD");
+	    env_guard != nullptr && env_guard[0] != '\0') {
+		char*      end   = nullptr;
+		const auto limit = std::strtoull(env_guard, &end, 0);
+		if (end == env_guard || *end != '\0') {
+			EXIT("invalid KYTY_LOOP_GUARD value: %s\n", env_guard);
+		}
+		g_config->loop_guard_limit = static_cast<uint32_t>(std::min<unsigned long long>(limit, MaxLoopGuardLimit));
+	}
+	g_config->loop_guard_limit = std::min<uint32_t>(g_config->loop_guard_limit, MaxLoopGuardLimit);
 	Common::DebugCounters::SetEnabled(cfg.perf_overlay_enabled);
 }
 
@@ -446,6 +468,19 @@ const std::vector<std::string>& GetGuestArguments() {
 
 bool BdaTableValidateEnabled() {
 	return g_config != nullptr && g_config->bda_table_validate_enabled;
+}
+
+bool BufferProbeShader(uint64_t hash) {
+	return g_config != nullptr && !g_config->buffer_probe_hashes.empty() &&
+	       std::ranges::binary_search(g_config->buffer_probe_hashes, hash);
+}
+
+bool BufferProbeEnabled() {
+	return g_config != nullptr && !g_config->buffer_probe_hashes.empty();
+}
+
+uint32_t LoopGuardLimit() {
+	return g_config != nullptr ? g_config->loop_guard_limit : 0u;
 }
 
 uint32_t HangDumpWaitSeconds() {
