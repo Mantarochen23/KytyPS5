@@ -25741,6 +25741,7 @@ CoverageClass ClassifyOpcode(ShaderOpcode opcode,
   case Opcode::V_CMP_GE_F16:
   case Opcode::V_CMP_U_F16:
   case Opcode::V_CMP_NGT_F16:
+  case Opcode::V_CMP_NLE_F16:
   case Opcode::V_CMP_NEQ_F16:
   case Opcode::V_CMP_NLT_F16:
   case Opcode::V_CMPX_LT_F16:
@@ -36012,6 +36013,71 @@ TestCase VectorVopcCmpNgtF16CapturedSdwaAndEdges() {
                   O::V_CMP_NGT_F16, O::BUFFER_STORE_DWORD, O::S_ENDPGM};
   test.decoded_counts = {{"V_CMP_NGT_F16", cases.size()}};
   test.required_spirv = {"OpFUnordLessThanEqual"};
+  test.compute_info.wave_size = 32;
+  test.has_compute_info = true;
+  return test;
+}
+
+TestCase VectorVopcCmpNleF16CapturedSdwaAndEdges() {
+  using O = ShaderOpcode;
+  enum Encoding { Captured, Compact };
+  struct CompareCase {
+    u32 lhs;
+    u32 rhs;
+    u32 expected;
+    Encoding encoding = Captured;
+    u32 exec = 1;
+  };
+  // Captured: v_cmp_nle_f16_sdwa vcc_lo, v15, 0 src0_sel:DWORD src1_sel:DWORD.
+  const std::array<CompareCase, 12> cases{{
+      {0x7e003c00u, 0, 1}, // +1; ignore NaN in the upper half.
+      {0x3c00bc00u, 0, 0}, // -1
+      {0x3c000000u, 0, 0}, // +0
+      {0x3c008000u, 0, 0}, // -0
+      {0x00007e00u, 0, 1}, // Quiet NaN: NLE differs from ordered GT.
+      {0x00007c01u, 0, 1}, // Signaling NaN
+      {0x00007c00u, 0, 1}, // +infinity
+      {0x0000fc00u, 0, 0}, // -infinity
+      {0x00003c00u, 0, 0, Captured, 0}, // Inactive lane contributes no VCC bit.
+      {0x00003c00u, 0x00007e00u, 1, Compact}, // NaN in src1.
+      {0x00004000u, 0x00003c00u, 1, Compact}, // +2 > +1
+      {0x00003c00u, 0x00004000u, 0, Compact}, // +1 <= +2
+  }};
+  constexpr u32 vcc_sentinel = 0x89abcdefu;
+  TestCase test;
+  test.name = "VectorVopcCmpNleF16CapturedSdwaAndEdges";
+  for (const auto &entry : cases) {
+    test.initial.insert(test.initial.end(), {entry.lhs, entry.rhs});
+  }
+  test.expected = test.initial;
+  auto &code = test.code;
+  for (u32 i = 0; i < cases.size(); ++i) {
+    const auto &entry = cases[i];
+    AppendVMovU32(&code, 30, i * 8u);
+    AppendBufferLoadDword(&code, 15, 30); // Runtime inputs prevent constant folding.
+    AppendVMovU32(&code, 30, i * 8u + 4u);
+    AppendBufferLoadDword(&code, 1, 30);
+    AppendSMovLiteral(&code, 106, vcc_sentinel);
+    AppendSMovLiteral(&code, 107, vcc_sentinel);
+    code.push_back(EncodeSMovB32(126, InlineU32(entry.exec)));
+    switch (entry.encoding) {
+    case Captured: code.insert(code.end(), {0x7dd900f9u, 0x8606000fu}); break;
+    case Compact: code.push_back(EncodeVopc(0xec, Vgpr(15), 1)); break;
+    }
+    code.push_back(EncodeSMovB32(20, 106));
+    code.push_back(EncodeSMovB32(21, 126)); // CMP must preserve EXEC even if false.
+    code.push_back(EncodeSMovB32(126, InlineU32(1)));
+    const u32 out = static_cast<u32>(test.initial.size()) + i * 4u;
+    AppendStoreSgprPair(&code, 20, out);
+    AppendStoreSgprPair(&code, 106, out + 2u);
+    test.expected.insert(test.expected.end(),
+                         {entry.expected, entry.exec, entry.expected, vcc_sentinel});
+  }
+  AppendEnd(&code);
+  test.opcodes = {O::V_MOV_B32, O::S_MOV_B32, O::BUFFER_LOAD_DWORD,
+                  O::V_CMP_NLE_F16, O::BUFFER_STORE_DWORD, O::S_ENDPGM};
+  test.decoded_counts = {{"V_CMP_NLE_F16", cases.size()}};
+  test.required_spirv = {"OpFUnordGreaterThan"};
   test.compute_info.wave_size = 32;
   test.has_compute_info = true;
   return test;
@@ -50411,6 +50477,7 @@ std::vector<TestCase> MakeCases() {
   AddCase(VectorVopcCmpxEqU16SdwaCompactVop3ExecMask);
   AddCase(VectorVopcCmpxNeU16SdwaCompactVop3ExecMask);
   AddCase(VectorVopcCmpNgtF16CapturedSdwaAndEdges);
+  AddCase(VectorVopcCmpNleF16CapturedSdwaAndEdges);
   AddCase(VectorVopcCmpNltF16CapturedSdwaAndEdges);
   AddCase(VectorVopcCmpUF16CapturedSdwaAndEdges);
   AddCase(VectorVopcCmpxNgtF16CapturedSdwaExecMask);
@@ -58314,6 +58381,7 @@ int main(int argc, char **argv) {
   if (argc == 2 && std::strcmp(argv[1], "--cmp-ngt-f16-only") == 0) {
     VulkanHarness vulkan;
     RunCase(&vulkan, VectorVopcCmpNgtF16CapturedSdwaAndEdges());
+    RunCase(&vulkan, VectorVopcCmpNleF16CapturedSdwaAndEdges());
     RunCase(&vulkan, VectorVopcCmpxNgtF16CapturedSdwaExecMask());
     RunCase(&vulkan, VectorVopcCmpxNleF16CapturedSdwaExecMask());
     for (u32 mode = 0; mode < 4; ++mode) {
