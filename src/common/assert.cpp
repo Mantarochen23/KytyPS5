@@ -6,6 +6,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fmt/format.h>
+#include <exception>
+#include <cstring>
+#include <algorithm>
 
 #if defined(__linux__)
 #include <execinfo.h>
@@ -16,7 +19,24 @@ namespace Common {
 
 static thread_local RecoverHook t_recover_hook = nullptr;
 
+// Last failure handed to a recover hook on this thread. If the exception it throws finds no handler
+// (a noexcept frame in between), the terminate handler reports this instead of a bare abort.
+static thread_local char        t_pending_text[1024] = {};
+static thread_local const char* t_pending_file       = "";
+static thread_local int         t_pending_line       = 0;
+
+[[noreturn]] static void DbgReport(const char* title, std::string_view text, const char* file,
+                                   int line);
+
+[[noreturn]] static void ReportEscapedFailure() {
+	t_recover_hook = nullptr;
+	DbgReport("Error (not recoverable: escaped the keep-going scope)", t_pending_text, t_pending_file,
+	          t_pending_line);
+}
+
 RecoverHook SetThreadRecoverHook(RecoverHook hook) {
+	static const auto installed = std::set_terminate(&ReportEscapedFailure);
+	(void)installed;
 	auto* previous = t_recover_hook;
 	t_recover_hook = hook;
 	return previous;
@@ -25,6 +45,11 @@ RecoverHook SetThreadRecoverHook(RecoverHook hook) {
 [[noreturn]] static void DbgReport(const char* title, std::string_view text, const char* file,
                                    int line) {
 	if (auto* hook = t_recover_hook) {
+		const auto size = std::min(text.size(), sizeof(t_pending_text) - 1);
+		std::memcpy(t_pending_text, text.data(), size);
+		t_pending_text[size] = 0;
+		t_pending_file       = file;
+		t_pending_line       = line;
 		hook(text, file, line);
 	}
 	Log::WriteToConsoleAndLog(fmt::format("--- Build ---\n{}\n{}\n{} in {}:{}\n", KYTY_BUILD_LABEL,

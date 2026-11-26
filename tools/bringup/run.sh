@@ -118,6 +118,7 @@ net=$(bwrap "${args[@]}" /usr/bin/cat /proc/net/dev 2>"$run/sandbox-probe.err" |
 [ "$net" = "lo " ] || { echo "run.sh: sandbox network is not isolated (sees: $net)" >&2; exit 4; }
 
 echo "run folder: $run"
+start_epoch=$(date +%s)
 if [ -n "${KYTY_PROFILE_AT:-}" ]; then
     # Host CPU profile of the emulator, taken from outside the sandbox.
     ( if [ "$KYTY_PROFILE_AT" = stall ]; then
@@ -127,6 +128,7 @@ if [ -n "${KYTY_PROFILE_AT:-}" ]; then
               pgrep -x kyty_emulator >/dev/null || exit 0
               now=$(grep -ac 'flip_arg  *= ' "$run/kyty.log" 2>/dev/null || true); now=${now:-0}
               [ "$now" -gt 300 ] && seen=1
+              grep -aq '^--- Error\|^terminate called\|context is lost' "$run/kyty.log" && exit 0
               [ "$seen" = 1 ] && [ "$now" = "$prev" ] && break
               prev=$now
           done
@@ -148,9 +150,13 @@ fi
 code=${PIPESTATUS[0]}
 set -e
 { echo "end_utc=$(date -u +%FT%TZ)"; echo "exit_code=$code   # 124 = stopped by the time limit, 65 = emulator fatal (_Exit(321))"; } >> "$run/run.txt"
+# Kernel side of the run: GPU ring timeouts and resets name the guilty process.
+journalctl -k --since "@$start_epoch" --no-pager 2>/dev/null | grep -i 'amdgpu\|\[drm\]' | grep -v 'No EDID' > "$run/kernel-gpu.txt" || true
+[ -s "$run/kernel-gpu.txt" ] || rm -f "$run/kernel-gpu.txt"
 if [ -d "$state/_ShaderFailures" ]; then
     cp -a "$state/_ShaderFailures" "$run/ShaderFailures"   # cumulative over runs with this state folder
 fi
 python3 "$here/triage.py" "$run/kyty.log" --json "$run/triage.json" > "$run/triage.txt" 2>&1 || true
 cat "$run/run.txt"; echo; cat "$run/triage.txt"
+[ -f "$run/kernel-gpu.txt" ] && { echo "KERNEL GPU MESSAGES (kernel-gpu.txt):"; grep -i 'timeout\|reset\|Process' "$run/kernel-gpu.txt" | cut -c1-200; }
 exit "$code"
