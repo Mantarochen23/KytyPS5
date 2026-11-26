@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fmt/format.h>
+#include <fmt/ranges.h>
 #include <map>
 #include <numeric>
 #include <optional>
@@ -707,6 +708,27 @@ private:
 		    fmt::format("shader resource tracking: hash=0x{:016x} stage={} pc=0x{:08x} {}",
 		                m_program.shader_hash, StageName(m_program.stage), pc, reason);
 		throw std::runtime_error(message);
+	}
+
+	// Short opcode chain of the value a plan rejected, bounded so a cyclic Phi cannot
+	// grow the failure text without limit. Included in the reason that reaches the ledger.
+	std::string ValueShape(Value value) const {
+		std::vector<std::string> chain;
+		bool truncated = false;
+		for (uint32_t depth = 0u; depth < 6u; ++depth) {
+			value = value.Resolve();
+			const auto* inst = value.TryInstruction();
+			if (inst == nullptr) {
+				chain.push_back(value.IsEmpty() ? "Empty" : TypeName(value.GetType()));
+				break;
+			}
+			chain.push_back(std::string(ValueOpcodeName(inst->GetOpcode())));
+			if (inst->NumArgs() == 0u) break;
+			value = inst->Arg(0);
+			if (depth == 5u && value.Resolve().TryInstruction() != nullptr) truncated = true;
+		}
+		if (truncated) chain.emplace_back("...");
+		return fmt::format("{}", fmt::join(chain, "->"));
 	}
 
 	Value NativeDescriptorSource(Value value, uint32_t reg, uint32_t use_pc) const {
@@ -4388,8 +4410,9 @@ private:
 				source = InternSource(*m_sampler_fallback);
 				return true;
 			}
-			Fail(pc, fmt::format("{} dword {} is not a valid runtime value",
-			                     ValueOpcodeName(expected), bad_dword));
+			Fail(pc, fmt::format("{} dword {} is not a valid runtime value (shape {})",
+			                     ValueOpcodeName(expected), bad_dword,
+			                     ValueShape(descriptor.dwords[bad_dword])));
 		}
 		if (expected == ValueOpcode::GetSamplerResource) {
 			m_sampler_fallback = descriptor;
@@ -4623,8 +4646,10 @@ private:
 				source = buffer != BufferAccess::Read ? CarriedBufferSource(*handle) : UINT32_MAX;
 				if (source == UINT32_MAX) {
 					Fail(flags.pc,
-					     "buffer descriptor is not a valid runtime value; GPU-selected access "
-					     "requires a scalar, raw 8/16-bit, raw DWORD x1/x2/x3/x4, or formatted X load");
+					     fmt::format("buffer descriptor is not a valid runtime value (shape {}); "
+					                 "GPU-selected access requires a scalar, raw 8/16-bit, "
+					                 "raw DWORD x1/x2/x3/x4, or formatted X load",
+					                 ValueShape(inst.Arg(0))));
 				}
 			}
 			resource = AddBuffer(source, memory, op, flags.pc);
