@@ -19,6 +19,7 @@ namespace HW {
 struct VertexShaderInfo;
 struct PixelShaderInfo;
 struct ComputeShaderInfo;
+struct CsStageRegisters;
 struct ShaderRegisters;
 } // namespace HW
 
