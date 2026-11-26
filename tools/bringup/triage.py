@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Triage a KytyPS5 run log: what compiled, what was skipped, what killed it.
-Usage: triage.py <log> [--json out.json]"""
-import re, sys, json, collections
+Usage: triage.py <log> [--json out.json] [--radv-dir <folder holding radv_dumps_*>]"""
+import re, sys, json, collections, os, glob
 path = sys.argv[1]
 ts_re = re.compile(rb'time = ([0-9.]+)')
 hash_re = re.compile(rb'hash=(0x[0-9a-f]{16})')
@@ -19,7 +19,7 @@ skips = collections.OrderedDict()
 bang = collections.Counter(); unresolved_called = collections.Counter()
 flips = timedout = lines = 0
 flip_t = collections.Counter(); shader_t = collections.Counter()
-fatal = []; device_lost = []; in_device_lost = False; tail = collections.deque(maxlen=40); first_fatal_line = None
+driver_hang = []; fatal = []; device_lost = []; in_device_lost = False; tail = collections.deque(maxlen=40); first_fatal_line = None
 with open(path, 'rb') as f:
     for line in f:
         lines += 1
@@ -35,6 +35,8 @@ with open(path, 'rb') as f:
             if line.startswith(b'=== END GPU DEVICE LOST TRIAGE ==='):
                 in_device_lost = False
             continue
+        if line.startswith((b'driver_dump:', b'radv: GPU hang', b'radv: can')):
+            driver_hang.append(line.rstrip().decode(errors='replace')[:400])
         if line.startswith(b'Controller'): continue
         if line.startswith(b'@@T '):
             t = float(line[4:]); continue
@@ -89,7 +91,7 @@ out = dict(log=path, lines=lines, run_seconds=round(t, 1), shaders_seen=len(comp
            last_phase_histogram=dict(phases.most_common(12)),
            new_shaders_per_10s=dict(sorted(shader_t.items())), flip_waits=flips, flip_wait_timeouts=timedout,
            flip_waits_per_10s=dict(sorted(flip_t.items())), skipped=skips, other_bang_lines=dict(bang.most_common(25)),
-           unresolved_stubs_called=dict(unresolved_called), device_lost=device_lost, fatal=fatal)
+           unresolved_stubs_called=dict(unresolved_called), device_lost=device_lost, driver_hang=driver_hang, fatal=fatal)
 if '--json' in sys.argv: json.dump(out, open(sys.argv[sys.argv.index('--json') + 1], 'w'), indent=1)
 print(f"log {path}: {lines} lines, ~{out['run_seconds']} s of wall time")
 print(f"shaders seen: {len(compiled)}  by stage: {dict(stages)}")
@@ -121,4 +123,25 @@ print("unresolved stubs called:", dict(unresolved_called))
 if device_lost:
     print("GPU DEVICE LOST TRIAGE:")
     [print("  " + x) for x in device_lost]
+# Driver (RADV_DEBUG=hang) dump folders: file list, pipeline.log size, the faulting-address line.
+radv_dir = sys.argv[sys.argv.index('--radv-dir') + 1] if '--radv-dir' in sys.argv else None
+dumps = sorted(glob.glob(os.path.join(radv_dir, 'radv_dumps_*'))) if radv_dir else []
+if driver_hang or dumps:
+    print("DRIVER HANG DUMP:")
+    [print("  log: " + x) for x in driver_hang]
+    out['driver_dumps'] = []
+    for d in dumps:
+        names = sorted(os.listdir(d)); pl = os.path.join(d, 'pipeline.log')
+        fault = []
+        for n in ('vm_fault.log', 'dmesg.log'):
+            p = os.path.join(d, n)
+            if os.path.isfile(p):
+                for l in open(p, errors='replace'):
+                    if re.search(r'fault|address', l, re.I) and l.strip(): fault.append(f"{n}: {l.strip()[:200]}")
+        out['driver_dumps'].append(dict(path=d, files=names, pipeline_log_bytes=os.path.getsize(pl) if os.path.isfile(pl) else None, fault_lines=fault[:6]))
+        print(f"  {d}: {len(names)} files: {' '.join(names)}")
+        print(f"  pipeline.log: {os.path.getsize(pl) if os.path.isfile(pl) else 'missing'} bytes")
+        [print("  " + x) for x in fault[:6]]
+    if not dumps: print("  no radv_dumps_* folder found")
+    if '--json' in sys.argv: json.dump(out, open(sys.argv[sys.argv.index('--json') + 1], 'w'), indent=1)
 print("FATAL:" if fatal else "no fatal block"); [print("  " + x) for x in fatal]

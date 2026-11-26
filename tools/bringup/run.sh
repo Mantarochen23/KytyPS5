@@ -212,8 +212,18 @@ fi
 if [ "$radv_hang" = 1 ]; then
     rmdir "$run/radv" 2>/dev/null || true
 fi
-python3 "$here/triage.py" "$run/kyty.log" --json "$run/triage.json" > "$run/triage.txt" 2>&1 || true
+radv_arg=()
+[ "$radv_hang" = 1 ] && [ -d "$run/radv" ] && radv_arg=(--radv-dir "$run/radv")
+python3 "$here/triage.py" "$run/kyty.log" --json "$run/triage.json" "${radv_arg[@]}" > "$run/triage.txt" 2>&1 || true
 cat "$run/run.txt"; echo; cat "$run/triage.txt"
-[ -d "$run/radv" ] && echo "RADV HANG DUMPS: $run/radv"
+if [ "$radv_hang" = 1 ]; then
+    if ls -d "$run"/radv/radv_dumps_* >/dev/null 2>&1; then
+        for d in "$run"/radv/radv_dumps_*; do
+            echo "RADV HANG DUMP: $d"; ls -l "$d" | sed 's/^/    /'
+        done
+    else
+        echo "RADV HANG DUMP: none (RADV_DEBUG has hang but no radv_dumps_* folder was written)"
+    fi
+fi
 [ -f "$run/kernel-gpu.txt" ] && { echo "KERNEL GPU MESSAGES (kernel-gpu.txt):"; grep -i 'timeout\|reset\|Process' "$run/kernel-gpu.txt" | cut -c1-200; }
 exit "$code"
