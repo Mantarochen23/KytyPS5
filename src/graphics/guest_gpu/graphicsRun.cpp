@@ -670,6 +670,7 @@ void GuestGpu::ThreadRun(void* data) {
 		}
 
 		if (command) {
+			gpu->m_renderer.GetBufferCache().NoteCommandBoundary();
 			RenderActivity::Note("cp-command", 0, "-", "host command");
 			{
 				Common::DebugCounters::ScopedTimer busy(
@@ -739,6 +740,7 @@ bool GuestGpu::Process(Submission& submission) {
 			    cp.Process(submission.execution, submission.commands) == Pm4ProcessResult::Complete;
 			cp.SetSubmitter(nullptr);
 			if (submission.execution.MadeProgress()) {
+				m_renderer.GetBufferCache().NoteCommandBoundary();
 				Common::FrameCost::ScopedSubmitReason submit_reason(
 				    Common::FrameCost::SubmitReason::Slice);
 				cp.BufferFlush();
@@ -1046,6 +1048,8 @@ void CommandProcessor::ScanComputeShaders(std::span<const uint32_t> commands) {
 void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 	const bool debug_dump = graphics_debug_dump_enabled();
 	while (!execution.m_buffer_stack.empty()) {
+		// The previous packet recorded every GPU write it marked.
+		m_renderer.GetBufferCache().NoteCommandBoundary();
 		if (g_gpu_state != nullptr) {
 			g_gpu_state->ProcessCommands();
 		}

@@ -6,6 +6,7 @@
 #include "common/emulatorConfig.h"
 #include "common/frameCost.h"
 #include "common/logging/log.h"
+#include "common/ports.h"
 #include "common/profiler.h"
 #include "graphics/guest_gpu/command_processor/waitDiagnostics.h"
 #include "graphics/guest_gpu/graphicsRun.h"
@@ -368,6 +369,9 @@ void BufferCache::EraseBufferSlot(BufferId id) {
 }
 
 void BufferCache::DeleteBuffer(BufferId id) {
+	if (m_slot_buffers[id].gpu_write_open) {
+		std::erase(m_open_writes, id);
+	}
 	Unregister(id);
 	if (m_scheduler.Active()) {
 		m_scheduler.DeferOperation([this, id] { EraseBufferSlot(id); });
@@ -451,6 +455,53 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 		publish();
 	}
 	return true;
+}
+
+bool BufferCache::ReadBackInPlace(Buffer& buffer, uint64_t vaddr, uint64_t size) {
+	if (!Config::PortEnabled(Config::Port::InPlaceReadback) || !buffer.IsHostReadable()) {
+		return false;
+	}
+	const auto current_tick = m_scheduler.CurrentTick();
+	const auto write_tick   = std::max(buffer.gpu_write_tick, m_address_write_tick);
+	if (buffer.gpu_write_open || write_tick >= current_tick) {
+		return false;
+	}
+	uint64_t dirty = 0;
+	m_gpu_modified_ranges.ForEachInRange(
+	    vaddr, size, [&](uint64_t begin, uint64_t end) { dirty += end - begin; });
+	if (dirty == 0 || dirty > MaxInPlaceReadback) {
+		return false;
+	}
+	if (write_tick != 0) {
+		Common::FrameCost::ScopedWaitReason wait_reason(Common::FrameCost::WaitReason::Readback);
+		if (!m_scheduler.IsFree(write_tick)) {
+			m_scheduler.Wait(write_tick);
+		}
+		// Publications of earlier downloads of these bytes land first, so none overwrites them.
+		m_scheduler.WaitPriorityOperations(write_tick);
+	}
+	const auto buffer_address = buffer.CpuAddress();
+	bool       copied         = false;
+	m_memory_tracker.ForEachDownloadRange<false>(
+	    vaddr, size, [&](uint64_t address, uint64_t bytes) noexcept {
+		    m_memory_tracker.ValidateGpuDirtyPages(m_gpu_modified_ranges, address, bytes,
+		                                           "in-place readback");
+		    m_gpu_modified_ranges.ForEachInRange(address, bytes, [&](uint64_t start, uint64_t end) {
+			    m_in_place_scratch.resize(static_cast<size_t>(end - start));
+			    buffer.ReadMapped(start - buffer_address, end - start, m_in_place_scratch.data());
+			    Libs::LibKernel::Memory::WriteBacking(start, m_in_place_scratch.data(),
+			                                          end - start);
+			    copied = true;
+		    });
+		    m_gpu_modified_ranges.Subtract(address, bytes);
+		    ++m_ownership_release_epoch;
+		    ForgetColorMetadataChecks(address, bytes);
+	    });
+	if (copied) {
+		Common::DebugCounters::Add(Common::DebugCounters::Counter::BufferDownloadBytes, dirty);
+		Common::FrameCost::Add(Common::FrameCost::Counter::ReadbackInPlace);
+	}
+	return copied;
 }
 
 BufferCache::BufferCache(GraphicContext& graphics, CommandScheduler& scheduler,
@@ -537,7 +588,8 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write,
 			    std::max(Common::AlignDown(vaddr, DownloadWindowSize), buffer.CpuAddress());
 			const auto end = std::min(std::max(start + DownloadWindowSize, vaddr + size),
 			                          buffer.CpuAddress() + buffer.Size());
-			if (DownloadBufferMemory<false>(buffer, start, end - start)) {
+			if (ReadBackInPlace(buffer, start, end - start) ||
+			    DownloadBufferMemory<false>(buffer, start, end - start)) {
 				WaitDiag::Global().NoteReadback(start, end - start, WaitDiag::NowMs());
 				m_memory_tracker.UnmarkRegionAsGpuModified(start, end - start);
 				++m_ownership_release_epoch;
@@ -637,16 +689,22 @@ BufferId BufferCache::CreateBuffer(uint64_t vaddr, uint64_t size) {
 	size               = end - vaddr;
 	const auto overlap = ResolveOverlaps(vaddr, size);
 
-	const auto id = m_slot_buffers.insert(
+	const bool host_readable = Config::PortEnabled(Config::Port::InPlaceReadback);
+	const auto id            = m_slot_buffers.insert(
 	    m_graphics, m_scheduler, MemoryUsage::DeviceLocal, overlap.begin,
-	    AllFlags | vk::BufferUsageFlagBits::eShaderDeviceAddress, overlap.end - overlap.begin);
-	const auto& buffer = m_slot_buffers[id];
+	    AllFlags | vk::BufferUsageFlagBits::eShaderDeviceAddress, overlap.end - overlap.begin,
+	    host_readable);
+	auto& buffer = m_slot_buffers[id];
 	SetVulkanObjectNameF(m_graphics.device, buffer.Handle(),
 	                     "Kyty.GameBuffer[guest=0x{:016x} size=0x{:x}]", overlap.begin,
 	                     overlap.end - overlap.begin);
 	for (auto it = overlap.first; it != overlap.last;) {
 		const auto old_id = (it++)->second;
 		JoinOverlap(id, old_id, !overlap.has_stream_leap);
+	}
+	if (overlap.first != overlap.last) {
+		// Joined contents arrive via GPU copies recorded in this command buffer.
+		NoteOpenWrite(buffer, id);
 	}
 	Register(id);
 	return id;
@@ -759,6 +817,7 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 	TouchBuffer(buffer);
 	(void)SynchronizeBuffer(buffer, vaddr, size, is_written, is_texel_buffer);
 	if (is_written) {
+		NoteOpenWrite(buffer, id);
 		m_gpu_modified_ranges.Add(vaddr, size);
 		NoteWrite(vaddr, size);
 		ForgetColorMetadataChecks(vaddr, size);
@@ -892,6 +951,48 @@ void BufferCache::ForgetColorMetadataChecks(uint64_t vaddr, uint64_t size) {
 	}
 }
 
+void BufferCache::NoteUntrackedWrite() noexcept {
+	m_untracked_write_stamp = ++m_write_clock;
+	m_address_write_tick    = m_scheduler.CurrentTick();
+}
+
+void BufferCache::NoteOpenWrite(Buffer& buffer, BufferId id) {
+	if (!buffer.gpu_write_open) {
+		buffer.gpu_write_open = true;
+		m_open_writes.push_back(id);
+	}
+}
+
+void BufferCache::NoteOpenWritesInRange(uint64_t vaddr, uint64_t size) {
+	if (size == 0) {
+		return;
+	}
+	const uint64_t end = vaddr + size;
+	auto           it  = m_buffers.upper_bound(vaddr);
+	if (it != m_buffers.begin()) {
+		--it;
+	}
+	for (; it != m_buffers.end() && it->first < end; ++it) {
+		auto& buffer = m_slot_buffers[it->second];
+		if (buffer.CpuAddress() + buffer.Size() > vaddr) {
+			NoteOpenWrite(buffer, it->second);
+		}
+	}
+}
+
+void BufferCache::NoteCommandBoundary() {
+	if (m_open_writes.empty()) {
+		return;
+	}
+	const auto tick = m_scheduler.CurrentTick();
+	for (const auto id: m_open_writes) {
+		auto& buffer          = m_slot_buffers[id];
+		buffer.gpu_write_tick = tick;
+		buffer.gpu_write_open = false;
+	}
+	m_open_writes.clear();
+}
+
 void BufferCache::NoteWrite(uint64_t vaddr, uint64_t size) {
 	PageTable::PageRange pages {};
 	if (!PageTable::TryGetPageRange(vaddr, size, pages) ||
@@ -952,6 +1053,7 @@ void BufferCache::MarkRuntimeTableWritten(const std::shared_ptr<RuntimeTableStat
 		// establishes GPU ownership for a dispatch which may select any member of the union.
 		m_memory_tracker.ForEachUploadRange(
 		    begin, size, true, [](uint64_t, uint64_t) noexcept {}, []() noexcept {});
+		NoteOpenWritesInRange(begin, size);
 		m_gpu_modified_ranges.Add(begin, size);
 		NoteWrite(begin, size);
 		ForgetColorMetadataChecks(begin, size);

@@ -3,6 +3,7 @@
 #include "common/assert.h"
 #include "common/debugCounters.h"
 #include "common/frameCost.h"
+#include "common/ports.h"
 #include "graphics/host_gpu/graphicContext.h"
 
 #include <algorithm>
@@ -326,6 +327,17 @@ CommandBuffer& CommandScheduler::BeginCommand() {
 uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 	EXIT_IF(m_command.IsInvalid());
 
+	if (Config::PortEnabled(Config::Port::InPlaceReadback)) {
+		m_command.EndRendering();
+		// Host-readable buffers are read in place once the submission completes
+		// (BufferCache::ReadBackInPlace): make GPU writes visible to the host.
+		vk::MemoryBarrier to_host {};
+		to_host.srcAccessMask = vk::AccessFlagBits::eMemoryWrite;
+		to_host.dstAccessMask = vk::AccessFlagBits::eHostRead;
+		m_command.Handle().pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
+		                                   vk::PipelineStageFlagBits::eHost, {}, 1, &to_host, 0,
+		                                   nullptr, 0, nullptr);
+	}
 	m_command.End();
 	const auto buffer   = m_command.m_buffer;
 	auto&      graphics = m_graphics;

@@ -189,7 +189,10 @@ public:
 	// stores through device addresses (NoteUntrackedWrite). Equal stamps taken at two times mean the
 	// range was not written in between. Ranges over 64 pages count as untracked writes.
 	[[nodiscard]] uint64_t WriteStamp(uint64_t vaddr, uint64_t size) const;
-	void                   NoteUntrackedWrite() noexcept { m_untracked_write_stamp = ++m_write_clock; }
+	void                   NoteUntrackedWrite() noexcept;
+	// GPU thread, between commands (every write marked so far is recorded): the buffers written
+	// since the last boundary take the current tick as the tick of their latest write.
+	void                   NoteCommandBoundary();
 	[[nodiscard]] std::shared_ptr<RuntimeTableState> RegisterRuntimeTable(
 	    RangeSet dependencies, RangeSet write_ranges = {});
 	// Called only for backing-lifetime changes, not ordinary guest writes.
@@ -255,6 +258,13 @@ private:
 	// Synchronous downloads publish before returning; asynchronous callers wait before reuse.
 	template <bool async>
 	[[nodiscard]] bool DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t size);
+	// Reads the GPU-dirty bytes of [vaddr, size) of a host-readable buffer straight from its
+	// mapping into guest memory, after waiting only for the submission that holds the buffer's
+	// latest GPU write (not for the work queued behind it).
+	[[nodiscard]] bool        ReadBackInPlace(Buffer& buffer, uint64_t vaddr, uint64_t size);
+	void                      NoteOpenWrite(Buffer& buffer, BufferId id);
+	void                      NoteOpenWritesInRange(uint64_t vaddr, uint64_t size);
+	static constexpr uint64_t MaxInPlaceReadback = uint64_t {512} << 10u;
 	void               ForgetColorMetadataChecks(uint64_t vaddr, uint64_t size);
 	void               NoteWrite(uint64_t vaddr, uint64_t size);
 
@@ -277,6 +287,9 @@ private:
 	MultiLevelPageTable<uint64_t, CACHING_PAGEBITS, 44, 20> m_write_stamps;
 	uint64_t                                          m_write_clock           = 1;
 	uint64_t                                          m_untracked_write_stamp = 1;
+	uint64_t                                          m_address_write_tick    = 0;
+	std::vector<uint8_t>                              m_in_place_scratch;
+	std::vector<BufferId>                             m_open_writes;
 	// One per TileManager::ColorClearSlots key slot.
 	std::array<RangeSet, 8>                           m_checked_color_metadata;
 	MemoryTracker                                     m_memory_tracker;

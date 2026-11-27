@@ -28,6 +28,7 @@ enum class Port : uint32_t {
 	RuntimeTableCache, // reuse runtime-indexed buffer tables while their candidate backing is unchanged
 	GpuIndirectThreadDim, // compute thread-dimension indirect dispatch counts and LDS bounds on the GPU
 	GpuDrawIndirectCount, // keep multi-draw indirect counts on the GPU via vkCmdDraw[Indexed]IndirectCount
+	InPlaceReadback, // read finished GPU writes in place from host-visible device memory (resizable BAR)
 	Count
 };
 
@@ -59,6 +60,7 @@ inline constexpr PortInfo PORTS[] = {
     {Port::RuntimeTableCache, "runtime-table-cache", "this tree (table1)", false, false},
     {Port::GpuIndirectThreadDim, "gpu-indirect-thread-dim", "this tree (readback1)", false, false},
     {Port::GpuDrawIndirectCount, "gpu-draw-indirect-count", "this tree (readback1)", false, false},
+    {Port::InPlaceReadback, "inplace-readback", "CarRamRod-963/KytyPS5@4c4300d87d", false, false},
 };
 static_assert(std::size(PORTS) == static_cast<size_t>(Port::Count));
 
