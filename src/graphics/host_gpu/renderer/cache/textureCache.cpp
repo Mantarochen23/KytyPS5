@@ -1986,6 +1986,7 @@ void TextureCache::DownloadImage(Image& image, Buffer& destination, uint64_t des
 }
 
 bool BufferCache::SynchronizeBufferFromImage(Buffer& buffer, uint64_t vaddr, uint64_t size) {
+	NoteWrite(vaddr, size);
 	const auto selected = m_texture_cache.FindImageFromRange(vaddr, size);
 	if (!selected) {
 		return false;

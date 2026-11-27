@@ -1076,7 +1076,8 @@ bool RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 	vk::DispatchIndirectCommand args {};
 	// The counts are known here only when the guest wrote them (the GPU-written ones are checked
 	// by DispatchArgsGuard on the GPU).
-	const bool args_on_host = !m_context.GetBufferCache().HasGpuDirtyBytes(args_addr, sizeof(args)) &&
+	const bool args_gpu_dirty = m_context.GetBufferCache().HasGpuDirtyBytes(args_addr, sizeof(args));
+	const bool args_on_host   = !args_gpu_dirty &&
 	                          LibKernel::Memory::TryReadBacking(args_addr, &args, sizeof(args));
 	if (args_on_host && (args.x == 0 || args.y == 0 || args.z == 0)) {
 		return true;
@@ -1143,12 +1144,25 @@ bool RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 	vk::Buffer indirect_buffer = args_buffer->Handle();
 	uint64_t   indirect_offset = args_offset;
 	if (DispatchArgsGuard::Enabled()) {
-		if (!m_dispatch_guard) {
-			m_dispatch_guard = std::make_unique<DispatchArgsGuard>(
-			    m_context.GetGraphics(), m_context.GetCommandScheduler());
+		// Counts the CPU read are already checked against the limits here (the dispatch was skipped
+		// above when too large): no GPU pass. Counts the GPU wrote are checked on the GPU, once
+		// per write of the range.
+		const auto& device_limits = m_context.GetGraphics().GetPhysicalDeviceProperties().limits;
+		if (args_on_host &&
+		    CountsSafeWithoutGuard(args.x, args.y, args.z, device_limits.maxComputeWorkGroupCount[0],
+		                           device_limits.maxComputeWorkGroupCount[1],
+		                           device_limits.maxComputeWorkGroupCount[2], DispatchGroupLimit())) {
+			Common::FrameCost::Add(Common::FrameCost::Counter::GuardCpuChecks);
+		} else {
+			if (!m_dispatch_guard) {
+				m_dispatch_guard = std::make_unique<DispatchArgsGuard>(
+				    m_context.GetGraphics(), m_context.GetCommandScheduler());
+			}
+			const uint64_t stamp =
+			    args_gpu_dirty ? m_context.GetBufferCache().WriteStamp(args_addr, sizeof(args)) : 0;
+			std::tie(indirect_buffer, indirect_offset) =
+			    m_dispatch_guard->Record(buffer, *args_buffer, args_offset, args_addr, stamp);
 		}
-		std::tie(indirect_buffer, indirect_offset) =
-		    m_dispatch_guard->Record(buffer, *args_buffer, args_offset, args_addr);
 	}
 	RebindBuffers(bindings);
 	if (buffer_probe) {
