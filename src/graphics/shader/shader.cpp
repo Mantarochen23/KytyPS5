@@ -59,7 +59,8 @@ static std::unique_ptr<std::unordered_map<uint64_t, ShaderMapEntry>> g_shader_ma
 static std::mutex                                                      g_shader_map_mutex;
 static std::deque<ComputeShaderPrefetch>                               g_compute_prefetches;
 static std::mutex                                                      g_prefetch_notify_mutex;
-static Common::UniqueFunction<void>                                    g_prefetch_notifier;
+static Common::UniqueFunction<void> g_prefetch_notifier;
+static ComputePrefetchQueueStats g_prefetch_queue_stats; // Under g_shader_map_mutex.
 
 // The same coarse buckets are used for first use in the pipeline cache. Guest halves map to the
 // stage they are consumed as; a front shader is its own bucket.
@@ -164,7 +165,11 @@ void ShaderMapUserData(uint64_t addr, const ShaderMappedData& data) {
 	                               data.registration_compute_input.group_id[2]},
 	     .thread_ids_num        = static_cast<uint32_t>(
 	         std::max(data.registration_compute_input.thread_ids_num, 0)),
-	     .tg_size_en            = data.registration_compute_input.tg_size_en},
+	     .tg_size_en            = data.registration_compute_input.tg_size_en,
+	     .workgroup_register    = static_cast<uint32_t>(
+	         std::max(data.registration_compute_input.workgroup_register, 0)),
+	     .dispatch_thread_dimensions =
+	         data.registration_compute_input.dispatch_thread_dimensions},
 	    code_copy);
 	mapped.vertex_error =
 	    ShaderReadVertexMetadata(data, HW::UserSgprInfo::SGPRS_MAX, mapped.vertex);
@@ -877,8 +882,10 @@ void ShaderQueueComputePrefetch(const HW::CsStageRegisters& cs_regs,
 		std::scoped_lock lock(g_shader_map_mutex);
 		constexpr size_t MaxQueuedPrefetches = 4096;
 		if (g_compute_prefetches.size() >= MaxQueuedPrefetches) {
-			return;
+		g_prefetch_queue_stats.queue_full++;
+		return;
 		}
+		g_prefetch_queue_stats.queued++;
 		wake = g_compute_prefetches.empty();
 		g_compute_prefetches.push_back({cs_regs, dispatch_thread_dimensions});
 	}
@@ -888,6 +895,17 @@ void ShaderQueueComputePrefetch(const HW::CsStageRegisters& cs_regs,
 			g_prefetch_notifier();
 		}
 	}
+}
+
+ComputePrefetchQueueStats ShaderComputePrefetchQueueStats() {
+	std::scoped_lock lock(g_shader_map_mutex);
+	return g_prefetch_queue_stats;
+}
+
+void ShaderNoteComputeRegistration(bool nonzero_offset) {
+	std::scoped_lock lock(g_shader_map_mutex);
+	g_prefetch_queue_stats.registered++;
+	g_prefetch_queue_stats.nonzero_offset += nonzero_offset ? 1u : 0u;
 }
 
 std::vector<ComputeShaderPrefetch> ShaderTakeComputePrefetches() {

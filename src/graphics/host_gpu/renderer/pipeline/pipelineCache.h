@@ -10,6 +10,8 @@
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
 #include "graphics/host_gpu/renderer/renderTarget.h"
 #include "graphics/host_gpu/vulkanCommon.h"
+#include "graphics/host_gpu/renderer/pipeline/buildTiming.h"
+#include "graphics/host_gpu/renderer/pipeline/flowPlan.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderStoreDiff.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
 #include "graphics/shader/rectListShader.h"
@@ -27,6 +29,7 @@
 #include <thread>
 #include <type_traits>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace Libs::Graphics {
@@ -255,8 +258,28 @@ public:
 	// Port wave64-over-limit-32: oversized wave64 groups get 32-lane host subgroups.
 	void LimitComputeSubgroup(ShaderComputeInputInfo& input_info) const;
 	// Starts translating a compute shader discovered by PM4 lookahead on a worker thread.
+	// `user_data` (null = unknown) are the compute user data the dispatch will have, as far as the
+	// scan of the command stream could follow them; with them a shader whose resources follow from
+	// its user data is built to its module ahead of the dispatch.
 	bool PrefetchComputeProgram(const HW::CsStageRegisters& cs_regs,
-	                            bool dispatch_thread_dimensions, bool async_compute);
+	                            bool dispatch_thread_dimensions, bool async_compute,
+	                            const HW::UserSgprInfo* user_data = nullptr);
+	// A dispatch gave up waiting for its shader (--async-compute-wait-ms) and is skipped. Counts it
+	// and logs the first skip of each shader. Render thread only.
+	void NoteDispatchSkipped(uint64_t waited_ms);
+	// The `[prefetch]` line.
+	void ReportPrefetch() const;
+	// Counters of what the scans and registrations queued for translation, printed every 30 s.
+	struct PrefetchCounters {
+		uint64_t requested   = 0; // calls
+		uint64_t queued      = 0; // translation jobs posted
+		uint64_t unmapped    = 0; // no registered shader at the address, or none usable
+		uint64_t known       = 0; // program, translation or sync-only mark exists already
+		uint64_t in_flight   = 0; // translation job already running
+		uint64_t with_data   = 0; // queued with the user data of a scan
+		uint64_t lookahead_modules_built = 0;
+		uint64_t lookahead_hits          = 0;
+	};
 	// Registers a callback invoked on worker threads whenever an async shader/pipeline job
 	// finishes, so the guest command processor wakes without polling.
 	void SetAsyncFinishCallback(Common::UniqueFunction<void>&& callback);
@@ -294,7 +317,8 @@ private:
 		template <bool HasCalls>
 		ShaderModule* FindModule(const ShaderRecompiler::IR::SrtRuntime& runtime,
 		                         ShaderRecompiler::IR::PushData::Window  push_data,
-		                         bool*                                   materialized = nullptr);
+		                         bool*                                   materialized          = nullptr,
+		                         std::string*                            materialization_error = nullptr);
 		// The module of a program without calls that was built for these inputs, if any.
 		ShaderModule* FindCandidate(const ShaderRecompiler::IR::ResourceSpecialization& wanted,
 		                            ShaderRecompiler::IR::PushData::Window              push_data);
@@ -332,14 +356,35 @@ private:
 	StoreDiff::LookupStats m_lookup_stats;
 	// Counts a lookup that found no module, and describes the first few.
 	void NoteLookupMiss(const ProgramKey& key, const Program* program,
-	                    ShaderRecompiler::IR::PushData::Window push_data);
+	                    ShaderRecompiler::IR::PushData::Window push_data, bool first);
 	// Prints the lookup counters.
 	void ReportLookups() const;
+	// One line per built module or pipeline, and the sums for the status line.
+	void NoteBuild(BuildTiming::Build build);
+	BuildTiming::Totals                    m_build_totals;
+	// The steps and SPIR-V size of the last CompileModule, for the render thread's build line.
+	BuildTiming::Steps                     m_last_compile_steps;
+	uint64_t                               m_last_compile_words = 0;
+	std::unordered_map<uint64_t, uint32_t> m_built_count;
+	// "served from store" uses, per hash.
+	FlowPlan::UseCounter     m_served;
+	// A dispatch that waits is retried; the lookup counters count the request once.
+	FlowPlan::RequestCounter m_requests;
+	FlowPlan::SkipLedger     m_skipped_dispatches;
+	// The hash of the compute shader the last GetComputeProgram call left pending.
+	uint64_t                 m_pending_compute_hash     = 0;
+	uint64_t                 m_pending_compute_identity = 0;
+	PrefetchCounters         m_prefetch;
+	// Modules built from the scan's user data, by program key hash and module id, until a dispatch
+	// uses them; what is left at the end is a wrong guess.
+	std::unordered_set<uint64_t> m_lookahead_modules;
 
 	// A stage built from its translation, before the cache holds it.
 	struct CompiledStage {
 		ShaderModule          module;
 		std::vector<uint32_t> spirv;
+		// What the SPIR-V emission and the module creation took.
+		BuildTiming::Steps    steps;
 	};
 	// What a worker needs to translate and compile one stage, copied from the draw that asked.
 	struct StageInputs;
@@ -401,7 +446,7 @@ private:
 	void RequestAsync(const ProgramKey& key, Program* program, const ShaderParams& params,
 	                  const InputInfo& input_info, const ShaderRecompiler::CompileOptions& options,
 	                  ShaderRecompiler::IR::PushData::Window push_data, AsyncMode mode,
-	                  bool urgent_translate = false);
+	                  bool urgent_translate = false, bool user_data_known = true);
 	// The inputs a worker needs to translate and compile one stage, copied from the call.
 	template <typename InputInfo>
 	std::shared_ptr<StageInputs> MakeStageInputs(const ProgramKey& key, const ShaderParams& params,

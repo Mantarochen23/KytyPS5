@@ -1456,6 +1456,166 @@ void TestIndirectImageSamplerClasses(bool mixed) {
   }
 }
 
+void TestIndirectFormattedUInt8RawBoundsBuffer() {
+  using namespace Libs::Graphics::ShaderRecompiler::IR;
+  using Libs::Graphics::DstSel;
+  using F = Libs::Graphics::Prospero::BufferFormat;
+  constexpr uint64_t TableBase = 0x10046f9fb0ull;
+  constexpr uint32_t TableRecords = 196608u;
+
+  Program program;
+  program.stage = Libs::Graphics::ShaderType::Compute;
+  program.srt_plan_complete = program.resource_tracking_complete = true;
+  AddValueBlock(program);
+
+  // Bounded 16-byte-stride scalar table V# matching runtime_stride=16, records=196608.
+  DescriptorSource table;
+  table.dword_count = 4u;
+  table.dwords[0] = Value(static_cast<uint32_t>(TableBase));
+  table.dwords[1] = Value(static_cast<uint32_t>((TableBase >> 32u) & 0xffffu) | (16u << 16u));
+  table.dwords[2] = Value(TableRecords);
+  table.dwords[3] = Value(0x00005204u);
+  program.descriptor_sources.push_back(table);
+
+  DescriptorSource indirect_source;
+  indirect_source.dword_count = 4u;
+  indirect_source.dwords.fill(Value(0u));
+  indirect_source.indirect_descriptor = DescriptorSource::IndirectDescriptor{
+      .table_source = 0u,
+      .table_stride = 16u,
+      .table_maximum = 0xffffffu,
+      .table_scalar = true,
+      .indexed = true,
+  };
+  program.descriptor_sources.push_back(indirect_source);
+  program.info.buffers.push_back({
+      .source = 1u,
+      .max_byte_extent = 4u,
+      .read = false,
+      .written = true,
+      .formatted = true,
+  });
+
+  auto plan = Extract(program);
+
+  // Table rows: 196608 rows of 16 bytes; sparse non-null entries at rows 0..2.
+  struct FakeTable {
+    std::array<uint32_t, 4> row0{0x4ae00000u, 0x00010010u, 0x0ae00000u, 0x30005004u};
+    std::array<uint32_t, 4> row1{0x50000000u, 0x00040010u, 0x00001000u, 0x30014004u};
+  } fake;
+
+  const auto read_table = +[](void *userdata, uint64_t address, std::span<uint32_t> words) {
+    const auto &t = *static_cast<const FakeTable *>(userdata);
+    if (address < TableBase) return false;
+    const uint64_t rel = address - TableBase;
+    if (rel + words.size_bytes() > uint64_t{TableRecords} * 16u) return false;
+    std::ranges::fill(words, 0u);
+    const auto copy_row = [&](uint64_t byte_offset, const std::array<uint32_t, 4> &row) {
+      for (size_t i = 0; i < 4u; ++i) {
+        const uint64_t word_addr = byte_offset + i * 4u;
+        if (word_addr >= rel && word_addr < rel + words.size_bytes()) {
+          words[(word_addr - rel) / 4u] = row[i];
+        }
+      }
+    };
+    copy_row(0u, t.row0);
+    copy_row(16u, t.row1);
+    return true;
+  };
+
+  const SrtRuntime runtime{.userdata = &fake, .read_specialization_memory = read_table};
+  ResourceSnapshot snapshot;
+  ResourceSpecialization specialization;
+  std::string failure_reason;
+  Check(MaterializeResources(plan, runtime, snapshot, specialization, &failure_reason),
+        "OOB_SELECT=3 indexed formatted k8UInt indirect buffer failed materialization");
+  Check(failure_reason.empty(), "successful materialization left a failure reason");
+  Check(snapshot.buffers.size() == 3u && specialization.buffers.size() == 3u,
+        "expected root plus two normalized indirect buffer candidates");
+  // Row 0: stride=1, k8UInt, OOB_SELECT=3 -> normalized to OOB_SELECT=0, records=0x0ae00000.
+  Check(snapshot.buffers[1].dwords[2] == 0x0ae00000u &&
+            snapshot.buffers[1].dwords[3] == 0x00005004u &&
+            specialization.buffers[1].descriptor_format == F::k8UInt &&
+            specialization.buffers[1].packed_stride == 1u,
+        "k8UInt OOB_SELECT=3 indirect candidate was not normalized to exact linear index bounds");
+  // Row 1: stride=4, k32UInt, OOB_SELECT=3, 4096 bytes -> normalized to 1024 records, OOB_SELECT=0.
+  Check(snapshot.buffers[2].dwords[2] == 1024u &&
+            snapshot.buffers[2].dwords[3] == 0x00014004u &&
+            specialization.buffers[2].descriptor_format == F::k32UInt &&
+            specialization.buffers[2].packed_stride == 4u,
+        "k32UInt OOB_SELECT=3 indirect candidate was not normalized by dividing bytes by stride");
+
+  // Non-divisible byte count under OOB_SELECT=3 must still fail and report the reason.
+  fake.row1[2] = 5u;
+  Check(!MaterializeResources(plan, runtime, snapshot, specialization, &failure_reason) &&
+            failure_reason.find("indirect buffers require exact linear index or byte bounds") !=
+                std::string::npos,
+        "non-divisible OOB_SELECT=3 indirect buffer was accepted or lost its failure reason");
+
+  // Zero-stride under OOB_SELECT=3 must still fail.
+  fake.row1 = {0x50000000u, 0x00000010u, 0x00001000u, 0x30014004u};
+  Check(!MaterializeResources(plan, runtime, snapshot, specialization, &failure_reason) &&
+            failure_reason.find("indirect buffers require exact linear index or byte bounds") !=
+                std::string::npos,
+        "zero-stride OOB_SELECT=3 indexed indirect buffer was accepted");
+}
+
+void TestAtomicImageUint8Format() {
+  using namespace Libs::Graphics::ShaderRecompiler::IR;
+  using F = Libs::Graphics::Prospero::BufferFormat;
+  using N = Libs::Graphics::Prospero::TextureNumericClass;
+
+  Program program;
+  program.stage = Libs::Graphics::ShaderType::Pixel;
+  program.srt_plan_complete = program.resource_tracking_complete = true;
+  AddValueBlock(program);
+
+  DescriptorSource source;
+  source.dword_count = 8u;
+  source.dwords.fill(Value(0u));
+  source.dwords[0] = Value(0x100u);
+  source.dwords[1] = Value(static_cast<uint32_t>(F::k8UInt) << 20u);
+  source.dwords[3] = Value(Libs::Graphics::DstSel(4, 0, 0, 1) |
+                           (static_cast<uint32_t>(Libs::Graphics::Prospero::ImageType::kColor2D) << 28u));
+  program.descriptor_sources.push_back(source);
+  program.info.images.push_back({
+      .source = 0u,
+      .resource_class = ImageResourceClass::Storage,
+      .dimension = Libs::Graphics::ShaderRecompiler::Decoder::ImageDimension::Dim2D,
+      .read = true,
+      .written = true,
+      .atomic = true,
+      .atomic64 = false,
+  });
+
+  auto plan = Extract(program);
+  const SrtRuntime runtime{};
+  ResourceSnapshot snapshot;
+  ResourceSpecialization specialization;
+  std::string failure_reason;
+  Check(MaterializeResources(plan, runtime, snapshot, specialization, &failure_reason) &&
+            failure_reason.empty(),
+        "32-bit atomic on k8UInt image failed materialization");
+  Check(specialization.images[0].numeric_class == N::Uint &&
+            specialization.images[0].conversion_format == F::k8UInt,
+        "k8UInt atomic image lost Uint numeric class or conversion_format marker");
+
+  ApplyResourceSpecialization(program, specialization);
+  Check(IsAtomicUint8Image(program.info.images[0]),
+        "specialized k8UInt atomic image was not recognized by IsAtomicUint8Image");
+  const auto binding = DescriptorBindingForImage(program.info.images[0]);
+  Check(binding.has_value() &&
+            static_cast<uint32_t>(*binding) == FirstStorageImageBinding + 6u + 2u,
+        "k8UInt atomic 2D image did not map to StorageUint 2D binding");
+
+  // 64-bit atomics on k8UInt must still be rejected with the exact format reason.
+  plan.info.images[0].atomic64 = true;
+  Check(!MaterializeResources(plan, runtime, snapshot, specialization, &failure_reason) &&
+            failure_reason.find("atomic image descriptor 0 uses unsupported format 5") !=
+                std::string::npos,
+        "64-bit atomic on k8UInt was accepted or lost its failure reason");
+}
+
 void TestShaderCacheRecords() {
   using namespace Libs::Graphics::ShaderRecompiler::IR;
   // Equivalent selector domains share one key group, which a load rebuilds.
@@ -1534,6 +1694,8 @@ int main() {
   TestSignedStorageSpecialization();
   for (const bool atomic64 : {false, true}) TestUnreachedImageIgnoresSharedDescriptor(atomic64);
   for (const bool mixed : {false, true}) TestIndirectImageSamplerClasses(mixed);
+  TestIndirectFormattedUInt8RawBoundsBuffer();
+  TestAtomicImageUint8Format();
   TestShaderCacheRecords();
   std::puts("ResourceMaterializationTests: all cases passed");
   return 0;

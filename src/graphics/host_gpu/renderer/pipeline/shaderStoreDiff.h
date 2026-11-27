@@ -25,6 +25,9 @@ struct LookupStats {
 	uint64_t miss_key    = 0;
 	// The cache has no program for the stage's key.
 	uint64_t miss_absent = 0;
+	// Requests that found no module at first and were served after a retry (a suspended dispatch
+	// whose shader was built meanwhile).
+	uint64_t served_late = 0;
 	// Misses that were counted once per distinct key and resources, not once per retry.
 	uint64_t distinct_misses = 0;
 	// How many misses were described so far.
@@ -43,8 +46,12 @@ struct LookupStats {
 	}
 	[[nodiscard]] bool WantsDescription() const { return described < MaxDescribed; }
 	[[nodiscard]] std::string Line() const {
-		return fmt::format("[store] lookups={} hit={} miss-key={} miss-absent={} distinct-miss={}",
-		                   lookups, hit, miss_key, miss_absent, distinct_misses);
+		auto line = fmt::format("[store] lookups={} hit={} miss-key={} miss-absent={} distinct-miss={}",
+		                        lookups, hit, miss_key, miss_absent, distinct_misses);
+		if (served_late != 0) {
+			line += fmt::format(" served-late={}", served_late);
+		}
+		return line;
 	}
 };
 

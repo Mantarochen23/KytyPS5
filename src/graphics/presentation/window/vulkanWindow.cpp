@@ -405,12 +405,14 @@ static vk::Device VulkanCreateDevice(GraphicContext&          graphics,
 	                   vk::PhysicalDeviceRayQueryFeaturesKHR,
 	                   vk::PhysicalDeviceCooperativeMatrixFeaturesKHR,
 	                   vk::PhysicalDeviceShaderFloat8FeaturesEXT,
+	                   vk::PhysicalDeviceFragmentShaderInterlockFeaturesEXT,
 	                   vk::PhysicalDeviceFaultFeaturesEXT>
 	    supported;
 	auto& [supported2, supported12, supported13, robustness2, workgroup_layout, mesh,
 	       feedback_layout, feedback_dynamic, provoking_vertex, maintenance8, shader_clock,
 	       image_atomic_int64, conditional_rendering, barycentric, compute_derivatives,
-	       acceleration_structure, ray_query, cooperative_matrix, float8, device_fault] = supported;
+	       acceleration_structure, ray_query, cooperative_matrix, float8, fragment_interlock,
+	       device_fault] = supported;
 	graphics.memory_budget_ext_enabled = add(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
 	graphics.buffer_marker_amd_enabled = add(VK_AMD_BUFFER_MARKER_EXTENSION_NAME);
 	if (!add(VK_EXT_DEVICE_FAULT_EXTENSION_NAME)) {
@@ -443,6 +445,9 @@ static vk::Device VulkanCreateDevice(GraphicContext&          graphics,
 	}
 	if (!add(VK_EXT_SHADER_IMAGE_ATOMIC_INT64_EXTENSION_NAME)) {
 		supported.unlink<vk::PhysicalDeviceShaderImageAtomicInt64FeaturesEXT>();
+	}
+	if (!add(VK_EXT_FRAGMENT_SHADER_INTERLOCK_EXTENSION_NAME)) {
+		supported.unlink<vk::PhysicalDeviceFragmentShaderInterlockFeaturesEXT>();
 	}
 	if (!add(VK_EXT_CONDITIONAL_RENDERING_EXTENSION_NAME)) {
 		supported.unlink<vk::PhysicalDeviceConditionalRenderingFeaturesEXT>();
@@ -487,6 +492,11 @@ static vk::Device VulkanCreateDevice(GraphicContext&          graphics,
 		    "Some games may render incorrectly or crash.\n");
 	}
 	graphics.shader_image_int64_atomics_enabled = image_atomic_int64.shaderImageInt64Atomics;
+	graphics.shader_storage_image_extended_formats_enabled =
+	    supported2.features.shaderStorageImageExtendedFormats &&
+	    CheckFormat(physical_device, vk::Format::eR8Uint, vk::FormatFeatureFlagBits::eStorageImage);
+	graphics.fragment_shader_pixel_interlock_enabled =
+	    fragment_interlock.fragmentShaderPixelInterlock;
 	graphics.sampler_filter_minmax_enabled      = supported12.samplerFilterMinmax;
 	graphics.device_fault_ext_enabled           = device_fault.deviceFault == VK_TRUE;
 	// RADV keeps its hang report in memory for vkGetDeviceFaultInfoEXT instead of writing the
@@ -594,6 +604,8 @@ static vk::Device VulkanCreateDevice(GraphicContext&          graphics,
 	device_features.depthClamp  = VK_TRUE;
 #endif
 	device_features.shaderStorageImageWriteWithoutFormat = VK_TRUE;
+	device_features.shaderStorageImageExtendedFormats =
+	    supported2.features.shaderStorageImageExtendedFormats;
 	device_features.shaderStorageImageMultisample =
 	    supported2.features.shaderStorageImageMultisample;
 	device_features.shaderImageGatherExtended            = VK_TRUE;
@@ -624,6 +636,9 @@ static vk::Device VulkanCreateDevice(GraphicContext&          graphics,
 	features12.hostQueryReset             = graphics.occlusion_queries_enabled;
 	device_features.occlusionQueryPrecise = graphics.occlusion_query_precise_enabled;
 	LOGF("Vulkan ray query: %s\n", ray_query_enabled ? "true" : "false");
+	LOGF("Vulkan 8-bit image atomics: extended_formats=%s pixel_interlock=%s\n",
+	     graphics.shader_storage_image_extended_formats_enabled ? "true" : "false",
+	     graphics.fragment_shader_pixel_interlock_enabled ? "true" : "false");
 	LOGF("Vulkan occlusion queries: %s, precise: %s\n",
 	     graphics.occlusion_queries_enabled ? "true" : "false",
 	     graphics.occlusion_query_precise_enabled ? "true" : "false");
@@ -660,6 +675,8 @@ static vk::Device VulkanCreateDevice(GraphicContext&          graphics,
 	                                        .pEnabledFeatures        = &device_features};
 	provoking_vertex.transformFeedbackPreservesProvokingVertex = VK_FALSE;
 	image_atomic_int64.sparseImageInt64Atomics                 = VK_FALSE;
+	fragment_interlock.fragmentShaderSampleInterlock           = VK_FALSE;
+	fragment_interlock.fragmentShaderShadingRateInterlock      = VK_FALSE;
 	// Robustness2 enables what the device has; selection requires nullDescriptor.
 	vk::StructureChain create {
 	    create_info, WindowContext::RequiredVulkan11Features(), features12, features13, robustness2,
@@ -670,7 +687,8 @@ static vk::Device VulkanCreateDevice(GraphicContext&          graphics,
 	        .workgroupMemoryExplicitLayout = workgroup_layout.workgroupMemoryExplicitLayout},
 	    barycentric,
 	    vk::PhysicalDeviceMeshShaderFeaturesEXT {.taskShader = VK_TRUE, .meshShader = VK_TRUE},
-	    feedback_layout, feedback_dynamic, provoking_vertex, image_atomic_int64, maintenance8,
+	    feedback_layout, feedback_dynamic, provoking_vertex, image_atomic_int64,
+	    fragment_interlock, maintenance8,
 	    shader_clock, conditional_rendering, compute_derivatives,
 	    vk::PhysicalDeviceAccelerationStructureFeaturesKHR {.accelerationStructure = VK_TRUE},
 	    vk::PhysicalDeviceRayQueryFeaturesKHR {.rayQuery = VK_TRUE}, cooperative_matrix, float8,
@@ -701,6 +719,9 @@ static vk::Device VulkanCreateDevice(GraphicContext&          graphics,
 	}
 	if (!graphics.shader_image_int64_atomics_enabled) {
 		create.unlink<vk::PhysicalDeviceShaderImageAtomicInt64FeaturesEXT>();
+	}
+	if (!graphics.fragment_shader_pixel_interlock_enabled) {
+		create.unlink<vk::PhysicalDeviceFragmentShaderInterlockFeaturesEXT>();
 	}
 	if (!graphics.maintenance8_enabled) create.unlink<vk::PhysicalDeviceMaintenance8FeaturesKHR>();
 	if (graphics.device_clock_period_ps == 0u) {

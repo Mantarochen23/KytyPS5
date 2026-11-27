@@ -3,6 +3,8 @@
 
 #include "graphics/shader/recompiler/ir/passes/SrtWalker.h"
 
+#include <string>
+
 namespace Libs::Graphics::ShaderRecompiler::IR {
 
 // Canonical module-affecting resource state. Runtime addresses and descriptor payloads remain in
@@ -63,8 +65,10 @@ std::vector<uint8_t> SaveResourcePlan(const ResourcePlan& plan);
 bool                 LoadResourcePlan(std::span<const uint8_t> bytes, ResourcePlan& plan);
 
 // Refreshes cached resources and specialization in place. A failed refresh must not be used.
+// When failure_reason is non-null, a failed refresh stores the first specialization error message.
 bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime,
-                          ResourceSnapshot& snapshot, ResourceSpecialization& specialization);
+                          ResourceSnapshot& snapshot, ResourceSpecialization& specialization,
+                          std::string* failure_reason = nullptr);
 
 // Applies an already-derived specialization to native IR before layout and emission.
 void ApplyResourceSpecialization(Program& program, const ResourceSpecialization& specialization);

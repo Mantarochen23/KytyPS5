@@ -145,6 +145,8 @@ struct EmitterState {
 	std::array<uint32_t, 2>                          scratch_variable {};
 	std::array<ImageDefinition, IR::ImageBindingCount> images {};
 	std::array<ImageDefinition, IR::ImageBindingCount> heap_images {};
+	std::array<ImageDefinition, 5>                     atomic_u8_images {};
+	bool                                               pixel_interlock_active = false;
 	uint32_t                   sampler_variable                      = 0;
 	uint32_t                   sampler_type                          = 0;
 	uint32_t                   sampler_pointer_type                  = 0;

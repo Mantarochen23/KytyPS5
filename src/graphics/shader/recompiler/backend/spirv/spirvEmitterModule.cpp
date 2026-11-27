@@ -232,6 +232,7 @@ void DefineDescriptors(EmitterState& state) {
 		buffer.descriptor_index = buffer.live ? buffer_count++ : UINT32_MAX;
 	}
 	std::array<const IR::ImageResource*, IR::ImageBindingCount> image_types {};
+	std::array<const IR::ImageResource*, 5>                     atomic_u8_image_types {};
 	for (auto& image: info.images) {
 		const auto kind = IR::DescriptorBindingForImage(image);
 		if (!kind.has_value() || image.mip_count == 0u ||
@@ -248,7 +249,12 @@ void DefineDescriptors(EmitterState& state) {
 		}
 		auto& count = counts[static_cast<size_t>(*kind)];
 		image.descriptor_index = count;
-		if (count == 0) image_types[IR::ImageBindingIndex(*kind)] = &image;
+		if (IR::IsAtomicUint8Image(image)) {
+			const auto dim = IR::AtomicUint8ImageIndex(image.dimension);
+			if (atomic_u8_image_types[dim] == nullptr) atomic_u8_image_types[dim] = &image;
+		} else if (image_types[IR::ImageBindingIndex(*kind)] == nullptr) {
+			image_types[IR::ImageBindingIndex(*kind)] = &image;
+		}
 		count += image.mip_count;
 	}
 	counts[static_cast<size_t>(Kind::Samplers)] = static_cast<uint32_t>(info.samplers.size());
@@ -360,11 +366,30 @@ void DefineDescriptors(EmitterState& state) {
 			default: {
 				EXIT_IF(IR::ImageBindingResourceClass(kind) ==
 				        IR::ImageResourceClass::None);
-				auto& definition = state.images[IR::ImageBindingIndex(kind)];
-				DefineImageArray(state, definition, *image_types[IR::ImageBindingIndex(kind)],
-				                 counts[index], 0u, IR::NativeBinding(state.program.stage, kind));
-				state.builder.AddName(definition.variable,
-				                      ("image_" + std::to_string(static_cast<uint32_t>(kind))).c_str());
+				const auto binding = IR::NativeBinding(state.program.stage, kind);
+				const auto image_index = IR::ImageBindingIndex(kind);
+				if (image_types[image_index] != nullptr) {
+					auto& definition = state.images[image_index];
+					DefineImageArray(state, definition, *image_types[image_index], counts[index],
+					                 0u, binding);
+					state.builder.AddName(
+					    definition.variable,
+					    ("image_" + std::to_string(static_cast<uint32_t>(kind))).c_str());
+				}
+				constexpr uint32_t StorageUintBinding = IR::FirstStorageImageBinding + 6u;
+				if (index >= StorageUintBinding && index < StorageUintBinding + 5u) {
+					const auto dim = index - StorageUintBinding;
+					if (atomic_u8_image_types[dim] != nullptr) {
+						auto& definition = state.atomic_u8_images[dim];
+						DefineImageArray(state, definition, *atomic_u8_image_types[dim],
+						                 counts[index], 0u, binding);
+						state.builder.AddAnnotation(spv::OpDecorate, definition.variable,
+						                            spv::DecorationCoherent);
+						state.builder.AddName(
+						    definition.variable,
+						    ("image_atomic_u8_" + std::to_string(dim)).c_str());
+					}
+				}
 				break;
 			}
 		}
@@ -893,6 +918,37 @@ void DefineModule(EmitterState& state) {
 		}
 		if (state.input_info.pixel->ps_early_z) {
 			state.builder.AddExecutionMode(state.main_func, spv::ExecutionModeEarlyFragmentTests);
+		}
+		const bool uses_atomic_u8 = std::ranges::any_of(
+		    state.program.info.images,
+		    [](const IR::ImageResource& img) { return IR::IsAtomicUint8Image(img); });
+		const auto has_single_top_level_return = [&]() {
+			if (state.program.blocks.empty() || state.program.dispatcher_fallback) return true;
+			const auto* last = state.program.blocks.back();
+			if (last->terminator.kind != CFG::TerminatorKind::Return) return false;
+			for (const auto* block: state.program.blocks) {
+				const auto& term = block->terminator;
+				if (block == last) continue;
+				if (term.kind == CFG::TerminatorKind::Branch) {
+					if (term.true_block == nullptr) return false;
+				} else if (term.kind == CFG::TerminatorKind::ConditionalBranch) {
+					if (term.true_block == nullptr || term.false_block == nullptr ||
+					    block->condition.IsEmpty()) {
+						return false;
+					}
+				} else {
+					return false;
+				}
+			}
+			return true;
+		};
+		if (uses_atomic_u8 && state.profile.fragment_shader_pixel_interlock &&
+		    has_single_top_level_return()) {
+			state.builder.RequireExtension("SPV_EXT_fragment_shader_interlock");
+			state.builder.RequireCapability(spv::CapabilityFragmentShaderPixelInterlockEXT);
+			state.builder.AddExecutionMode(state.main_func,
+			                               spv::ExecutionModePixelInterlockUnorderedEXT);
+			state.pixel_interlock_active = true;
 		}
 	}
 	if (state.program.info.compute_derivatives && state.program.stage == ShaderType::Compute) {

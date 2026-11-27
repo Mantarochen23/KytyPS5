@@ -25,6 +25,7 @@
 #include "libs/errno.h"
 
 #include <algorithm>
+#include <chrono>
 #include <array>
 #include <atomic>
 #include <cstdio>
@@ -756,6 +757,46 @@ void CommandProcessor::SuspendPm4ForShader() {
 	g_current_execution->m_suspended_for_shader = true;
 }
 
+void CommandProcessor::NoteDispatchDone() {
+	if (g_current_execution != nullptr) {
+		g_current_execution->m_shader_wait.Done();
+	}
+}
+
+// A dispatch whose shader is not ready suspends its queue (SuspendPm4ForShader) and is retried when
+// a build finishes or every 50 ms. With --async-compute-wait-ms the wait is bounded: after that long
+// the dispatch is skipped for this use, the queue goes on to its next packet (the label writes and
+// flips behind the dispatch are packets of their own and still run), and the build, which is
+// already in flight, goes on in the background for the next use.
+void CommandProcessor::SuspendOrSkipDispatch() {
+	EXIT_IF(g_current_execution == nullptr);
+	const auto limit = Config::AsyncComputeWaitMs();
+	if (limit != 0) {
+		const auto now  = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+		                                           std::chrono::steady_clock::now().time_since_epoch())
+		                                           .count());
+		const auto step = g_current_execution->m_shader_wait.NotReady(limit, now);
+		if (step.action == FlowPlan::WaitAction::Skip) {
+			Common::LockGuard lock(m_renderer.GetMutex());
+			m_renderer.GetPipelineCache().NoteDispatchSkipped(step.waited_ms);
+			return;
+		}
+	}
+	SuspendPm4ForShader();
+}
+
+// A discovered dispatch with the user data the scan followed, when it saw all the dispatch's
+// shader read.
+static ComputeShaderPrefetch MakePrefetch(const HW::CsStageRegisters& spec, bool thread_dimensions,
+                                          const FlowPlan::UserDataTracker& tracker, bool lookahead) {
+	ComputeShaderPrefetch prefetch {spec, thread_dimensions};
+	if (lookahead && tracker.Covers(spec.user_sgpr)) {
+		prefetch.user_data_known = true;
+		std::copy_n(tracker.Values(), FlowPlan::UserDataTracker::Slots, prefetch.user_data.value);
+	}
+	return prefetch;
+}
+
 void CommandProcessor::PrefetchComputeShaders(std::span<const uint32_t> commands) {
 	if (!Config::AsyncShaderCompileEnabled() || commands.empty()) {
 		return;
@@ -778,6 +819,9 @@ void CommandProcessor::PrefetchComputeShaders(std::span<const uint32_t> commands
 	stack.push_back({{}, commands, 0u});
 
 	HW::CsStageRegisters               cs_regs = m_sh_ctx.GetCs().cs_regs;
+	// The user data the scan saw written; a dispatch whose data it did not see is only translated.
+	FlowPlan::UserDataTracker          user_data;
+	const bool                         lookahead = Config::AsyncLookaheadEnabled();
 	std::vector<ComputeShaderPrefetch> discovered;
 	std::vector<uint32_t>              indirect_pairs;
 	uint32_t                           packets_scanned = 0;
@@ -818,7 +862,10 @@ void CommandProcessor::PrefetchComputeShaders(std::span<const uint32_t> commands
 				const auto reg_offset = body[0];
 				if (reg_offset != Pm4::SH_NOP && reg_offset < Pm4::SH_NUM) {
 					for (uint32_t i = 1u; i < payload_dw; i++) {
-						ApplyComputeShRegister(cs_regs, reg_offset + (i - 1u), body[i]);
+						const uint32_t reg = reg_offset + (i - 1u);
+						if (!ApplyComputeShRegister(cs_regs, reg, body[i])) {
+							user_data.Note(reg, body[i], Pm4::COMPUTE_USER_DATA_0);
+						}
 					}
 				}
 				break;
@@ -837,8 +884,11 @@ void CommandProcessor::PrefetchComputeShaders(std::span<const uint32_t> commands
 								if (raw_offset == 0xffffffffu) {
 									continue;
 								}
-								ApplyComputeShRegister(cs_regs, raw_offset,
-								                       indirect_pairs[i * 2u + 1u]);
+								if (!ApplyComputeShRegister(cs_regs, raw_offset,
+								                            indirect_pairs[i * 2u + 1u])) {
+									user_data.Note(raw_offset, indirect_pairs[i * 2u + 1u],
+									               Pm4::COMPUTE_USER_DATA_0);
+								}
 							}
 						}
 					}
@@ -858,6 +908,7 @@ void CommandProcessor::PrefetchComputeShaders(std::span<const uint32_t> commands
 					} else if (tag == Pm4::USERDATA_TAG_RESET_QUEUE &&
 					           (body[1] & Pm4::ResetQueueOp::ShState) != 0) {
 						cs_regs = {};
+						user_data.Reset();
 					}
 				}
 				break;
@@ -894,7 +945,7 @@ void CommandProcessor::PrefetchComputeShaders(std::span<const uint32_t> commands
 					spec.wave_size      = Pm4::ComputeWaveSize(mode);
 					const bool use_thread_dims =
 					    (mode & Pm4::COMPUTE_DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS) != 0;
-					discovered.push_back({spec, use_thread_dims});
+					discovered.push_back(MakePrefetch(spec, use_thread_dims, user_data, lookahead));
 				}
 				break;
 			}
@@ -905,7 +956,7 @@ void CommandProcessor::PrefetchComputeShaders(std::span<const uint32_t> commands
 					spec.wave_size      = Pm4::ComputeWaveSize(mode);
 					const bool use_thread_dims =
 					    (mode & Pm4::COMPUTE_DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS) != 0;
-					discovered.push_back({spec, use_thread_dims});
+					discovered.push_back(MakePrefetch(spec, use_thread_dims, user_data, lookahead));
 				}
 				break;
 			}
@@ -921,7 +972,8 @@ void CommandProcessor::PrefetchComputeShaders(std::span<const uint32_t> commands
 	auto&             cache         = m_renderer.GetPipelineCache();
 	const bool        async_compute = IsAsyncComputeQueue();
 	for (const auto& req: discovered) {
-		cache.PrefetchComputeProgram(req.cs_regs, req.dispatch_thread_dimensions, async_compute);
+		cache.PrefetchComputeProgram(req.cs_regs, req.dispatch_thread_dimensions, async_compute,
+		                             req.user_data_known ? &req.user_data : nullptr);
 	}
 }
 
@@ -1236,7 +1288,9 @@ void CommandProcessor::DispatchDirect(uint32_t thread_group_x, uint32_t thread_g
 	if (!m_renderer.GetRenderExecutor().DispatchDirect(CurrentBuffer(), thread_group_x,
 	                                                   thread_group_y, thread_group_z, mode,
 	                                                   IsAsyncComputeQueue(), allow_async)) {
-		SuspendPm4ForShader();
+		SuspendOrSkipDispatch();
+	} else {
+		NoteDispatchDone();
 	}
 }
 
@@ -1257,7 +1311,9 @@ void CommandProcessor::DispatchIndirect(uint64_t args_addr, uint32_t mode) {
 	const bool allow_async = g_current_execution != nullptr;
 	if (!m_renderer.GetRenderExecutor().DispatchIndirect(CurrentBuffer(), args_addr, mode,
 	                                                     IsAsyncComputeQueue(), allow_async)) {
-		SuspendPm4ForShader();
+		SuspendOrSkipDispatch();
+	} else {
+		NoteDispatchDone();
 	}
 }
 

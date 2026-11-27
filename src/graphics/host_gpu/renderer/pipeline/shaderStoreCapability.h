@@ -11,7 +11,7 @@ namespace Libs::Graphics {
 // recorded under an older generation no longer applies and is retried once. It is a field
 // of the negative-cache key, not of the store format, so warm positive records and driver
 // pipelines keep being reused.
-inline constexpr uint64_t kTranslatorCapabilityVersion = 3;
+inline constexpr uint64_t kTranslatorCapabilityVersion = 4;
 
 [[nodiscard]] inline constexpr bool FailureCacheApplies(uint64_t stored_version) {
   return stored_version == kTranslatorCapabilityVersion;

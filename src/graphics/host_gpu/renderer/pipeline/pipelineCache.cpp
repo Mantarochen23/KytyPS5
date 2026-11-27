@@ -39,6 +39,7 @@
 #include <cstring>
 #include <fmt/format.h>
 #include <limits>
+#include <set>
 #include <ranges>
 #include <span>
 #include <spirv-tools/libspirv.hpp>
@@ -146,6 +147,45 @@ bool ReadShaderGuestMemory(void*, uint64_t address, std::span<uint32_t> values) 
 	       Libs::LibKernel::Memory::TryReadBufferBacking(address, values.data(), values.size_bytes());
 }
 
+// Collects the guest memory a first-use materialization reads, for --dump-registered-shaders.
+struct UseMemoryRecorder {
+	static constexpr uint64_t MaxBytes  = 16ull << 20;
+	static constexpr size_t   MaxRanges = 65536;
+	std::vector<Common::ShaderRegLedger::UseRange> ranges;
+	std::vector<uint8_t>                           memory;
+	std::set<std::pair<uint64_t, uint64_t>>        seen;
+	bool                                           truncated = false;
+};
+
+bool RecordingGuestRead(void* userdata, uint64_t address, std::span<uint32_t> values) {
+	if (!ReadShaderGuestMemory(nullptr, address, values)) return false;
+	auto&      recorder = *static_cast<UseMemoryRecorder*>(userdata);
+	const auto bytes    = static_cast<uint64_t>(values.size_bytes());
+	if (!recorder.seen.emplace(address, bytes).second) return true;
+	if (recorder.ranges.size() >= UseMemoryRecorder::MaxRanges ||
+	    recorder.memory.size() + bytes > UseMemoryRecorder::MaxBytes) {
+		recorder.truncated = true;
+		return true;
+	}
+	recorder.ranges.push_back({address, bytes});
+	const auto* begin = reinterpret_cast<const uint8_t*>(values.data());
+	recorder.memory.insert(recorder.memory.end(), begin, begin + bytes);
+	return true;
+}
+
+const char* UseStageName(ShaderType stage) {
+	switch (stage) {
+		case ShaderType::Compute: return "cs";
+		case ShaderType::Pixel: return "ps";
+		case ShaderType::Vertex: return "vs";
+		case ShaderType::Local: return "ls";
+		case ShaderType::TessellationControl: return "hs";
+		case ShaderType::TessellationEvaluation: return "tes";
+		case ShaderType::Mesh: return "ms";
+		default: return "unknown";
+	}
+}
+
 void DumpShader(std::span<const uint32_t> words, const std::string& name) {
 	if (!Config::GraphicsDebugDumpEnabled()) {
 		return;
@@ -237,8 +277,9 @@ ShaderRecompiler::Spirv::Profile SpirvProfile(const GraphicContext& graphics) {
 	        .r8_srgb_views          = graphics.r8_srgb_views,
 	        .r8g8_srgb_views        = graphics.r8g8_srgb_views,
 	        .relaxed_float          = Config::RelaxedShaderFloatEnabled(),
-	        .ray_query              = graphics.ray_query_enabled,
-	        .loop_guard_limit       = Config::LoopGuardLimit()};
+	        .ray_query                       = graphics.ray_query_enabled,
+	        .loop_guard_limit                = Config::LoopGuardLimit(),
+	        .fragment_shader_pixel_interlock = graphics.fragment_shader_pixel_interlock_enabled};
 }
 
 std::filesystem::path ShaderStorePath() {
@@ -283,9 +324,10 @@ bool PipelineCache::Program::RefreshCallSource(const ShaderRecompiler::IR::SrtRu
 template <bool HasCalls>
 ShaderModule* PipelineCache::Program::FindModule(const ShaderRecompiler::IR::SrtRuntime& runtime,
                                                  ShaderRecompiler::IR::PushData::Window push_data,
-                                                 bool* materialized) {
+                                                 bool*        materialized,
+                                                 std::string* materialization_error) {
 	if (!ShaderRecompiler::IR::MaterializeResources(resource_plan, runtime, resources,
-	                                                specialization)) {
+	                                                specialization, materialization_error)) {
 		if (materialized != nullptr) {
 			*materialized = false;
 		}
@@ -329,9 +371,11 @@ ShaderModule& PipelineCache::CompileModule(Program& program, const ProgramKey& k
                                            ShaderRecompiler::IR::PushData::Window push_data) {
 	const auto profile = SpirvProfile(m_graphics);
 	options.profile    = &profile;
-	return AddModule(program, key,
-	                 CompileStage(m_graphics.device, key, options, std::move(translated),
-	                              program.specialization, push_data, program.FunctionCode()));
+	auto compiled = CompileStage(m_graphics.device, key, options, std::move(translated),
+	                             program.specialization, push_data, program.FunctionCode());
+	m_last_compile_steps = compiled.steps;
+	m_last_compile_words = compiled.spirv.size();
+	return AddModule(program, key, std::move(compiled));
 }
 
 PipelineCache::CompiledStage PipelineCache::CompileStage(
@@ -342,9 +386,11 @@ PipelineCache::CompiledStage PipelineCache::CompileStage(
 	Common::DebugCounters::ScopedTimer timer(Common::DebugCounters::Counter::ShadersCompiled,
 	                                         Common::DebugCounters::Counter::ShaderCompileNs,
 	                                         Common::DebugCounters::Peak::ShaderCompileNs);
-	const auto& profile = *options.profile;
+	const auto& profile    = *options.profile;
+	const auto  emit_begin = std::chrono::steady_clock::now();
 	auto        result =
 	    ShaderRecompiler::CompileProgram(std::move(translated), options, specialization, push_data);
+	const auto emit_us = BuildTiming::ElapsedUs(emit_begin);
 	auto info = std::move(result.program).TakeCompiledInfo();
 	if (const auto* workgroup = ShaderWorkgroupInput(key.stage, options.input_info)) {
 		info.subgroup_size = std::min(info.wave_size, workgroup->host_subgroup_size);
@@ -360,9 +406,12 @@ PipelineCache::CompiledStage PipelineCache::CompileStage(
 	const auto* stage = ShaderRecompiler::StageName(key.stage);
 	DumpShader(result.spirv, fmt::format("{}_{:016x}_{:016x}.spv", stage, key.hash, id));
 	ValidateShaderSpirv(stage, key.hash, result.spirv, profile.maintenance8);
+	const auto module_begin  = std::chrono::steady_clock::now();
+	auto       host_module   = CompileSPV(result.spirv, device);
+	const auto module_us     = BuildTiming::ElapsedUs(module_begin);
 	CompiledStage compiled {.module = ShaderModule {
 	                            .id             = id,
-	                            .module         = CompileSPV(result.spirv, device),
+	                            .module         = host_module,
 	                            .info           = std::move(info),
 	                            .specialization = specialization,
 	                            .function_code  = {function_code.begin(), function_code.end()},
@@ -375,8 +424,18 @@ PipelineCache::CompiledStage PipelineCache::CompileStage(
 	} else if (key.stage == ShaderType::Mesh) {
 		module.mesh_task = options.input_info.vertex->indirect_draw;
 	}
-	compiled.spirv = std::move(result.spirv);
+	compiled.steps.emit_us   = emit_us;
+	compiled.steps.module_us = module_us;
+	compiled.spirv           = std::move(result.spirv);
 	return compiled;
+}
+
+void PipelineCache::NoteBuild(BuildTiming::Build build) {
+	m_build_totals.Note(build);
+	if (build.words != 0) {
+		build.number = ++m_built_count[build.hash];
+	}
+	std::printf("%s\n", BuildTiming::Line(build).c_str());
 }
 
 ShaderModule& PipelineCache::AddModule(Program& program, const ProgramKey& key,
@@ -488,7 +547,8 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 		auto& prog          = m_program_cache.try_emplace(m_lookup_key).first->second;
 		prog.skip_dispatch  = true;
 		prog.logged_neg_hit = true;
-		prog.failure_reason = std::move(failure_reason);
+		prog.failure_reason =
+		    failure_reason.empty() ? "unspecified shader failure" : std::move(failure_reason);
 		PipelineCacheLog("ShaderRecompiler {} translation end: hash=0x{:016x} outcome=failed ({})",
 		                 ShaderRecompiler::StageName(m_lookup_key.stage), params.hash,
 		                 prog.failure_reason);
@@ -498,9 +558,11 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 }
 
 void PipelineCache::NoteLookupMiss(const ProgramKey& key, const Program* program,
-                                   ShaderRecompiler::IR::PushData::Window push_data) {
+                                   ShaderRecompiler::IR::PushData::Window push_data, bool first) {
 	auto& stats = m_lookup_stats;
-	(program != nullptr ? stats.miss_key : stats.miss_absent)++;
+	if (first) {
+		(program != nullptr ? stats.miss_key : stats.miss_absent)++;
+	}
 	// One identity per key, push window and resources: a dispatch that waits retries every few ms.
 	uint64_t identity = ProgramVariantKey() ^ (uint64_t {program != nullptr} << 63);
 	const auto mix = [&](uint64_t word) { identity = (identity ^ word) * 1099511628211ull; };
@@ -603,6 +665,61 @@ const ShaderModule* PipelineCache::GetProgramImpl(const ShaderParams& params, In
 		module.info.bindings.AdvancePushData(push_data, module.info.stage);
 		return &module;
 	};
+	// --dump-registered-shaders: at the first use of a (stage, hash) whose plan exists, replay its
+	// materialization over a recording reader and queue what the translator and the plan read.
+	const auto capture_use = [&] {
+		if (!Common::ShaderRegLedger::UseDumpEnabled() || entry == m_program_cache.end()) return;
+		if (!Common::ShaderRegLedger::WantUse(params.hash, UseStageName(options.stage))) return;
+		auto& program = entry->second;
+		if (program.skip_dispatch) return;
+		if (program.call_source) {
+			Common::ShaderRegLedger::NoteUseSkipped("call_targets");
+			return;
+		}
+		if constexpr (std::is_trivially_copyable_v<InputInfo>) {
+			UseMemoryRecorder recorder;
+			auto              replay = runtime;
+			replay.userdata                   = &recorder;
+			replay.read_specialization_memory = RecordingGuestRead;
+			replay.image_heap                 = nullptr;
+			ShaderRecompiler::IR::ResourceSnapshot       snapshot;
+			ShaderRecompiler::IR::ResourceSpecialization specialization;
+			if (!ShaderRecompiler::IR::MaterializeResources(program.resource_plan, replay, snapshot,
+			                                                specialization)) {
+				Common::ShaderRegLedger::NoteUseSkipped("materialization_failed");
+				return;
+			}
+			Common::ShaderRegLedger::UseRecord record;
+			record.stage             = UseStageName(options.stage);
+			record.hash              = params.hash;
+			record.options_wave_size = options.wave_size;
+			record.user_data_base    = options.user_data_base;
+			record.push_begin        = push_data.begin;
+			record.push_end          = push_data.end;
+			record.shader_base       = params.Base();
+			record.uses_image_heap   = std::ranges::any_of(
+                program.resource_plan.info.images, &ShaderRecompiler::IR::ImageResource::heap);
+			record.memory_truncated  = recorder.truncated;
+			record.user_data.assign(user_data.begin(), user_data.end());
+			record.back_code.assign(params.back_code.begin(), params.back_code.end());
+			record.ranges = std::move(recorder.ranges);
+			record.memory = std::move(recorder.memory);
+			if constexpr (std::is_same_v<InputInfo, ShaderComputeInputInfo>) {
+				for (size_t axis = 0; axis < 3; axis++) {
+					record.workgroup_counts[axis] = input_info.workgroup_counts[axis];
+				}
+				record.indirect_args_address = input_info.indirect_args_address;
+			}
+			InputInfo copy = input_info;
+			copy.stage     = {};
+			record.input_info.resize(sizeof(InputInfo));
+			std::memcpy(record.input_info.data(), &copy, sizeof(InputInfo));
+			Common::ShaderRegLedger::DumpUse(std::move(record));
+		} else {
+			Common::ShaderRegLedger::NoteUseSkipped("input_not_copyable");
+		}
+	};
+	capture_use();
 	const auto finish_options = [&] {
 		options.shader_hash     = params.hash;
 		options.user_data       = user_data;
@@ -622,10 +739,23 @@ const ShaderModule* PipelineCache::GetProgramImpl(const ShaderParams& params, In
 			return nullptr;
 		}
 	}
+	// A suspended dispatch asks again every few milliseconds: the request is counted once, at its
+	// first call, and a request that ends without a module is open until its retry.
+	const uint64_t request_identity = ProgramVariantKey();
+	const bool     first_attempt    = m_requests.Begin(request_identity);
+	struct RequestGuard {
+		PipelineCache* cache;
+		uint64_t       identity;
+		~RequestGuard() {
+			if (cache->m_last_deferred) {
+				cache->m_requests.Retry(identity);
+			}
+		}
+	} request_guard {this, request_identity};
 	bool source_changed = false;
 	if (entry != m_program_cache.end()) {
 		auto& cached = entry->second;
-		if (!cached.skip_dispatch) {
+		if (!cached.skip_dispatch && first_attempt) {
 			m_lookup_stats.lookups++;
 		}
 		if (cached.skip_dispatch) {
@@ -642,25 +772,40 @@ const ShaderModule* PipelineCache::GetProgramImpl(const ShaderParams& params, In
 		}
 		ShaderModule* module       = nullptr;
 		bool          materialized = true;
+		std::string   mat_error;
 		if (cached.call_source) {
 			source_changed = cached.RefreshCallSource(runtime);
-			if (!source_changed) module = cached.FindModule<true>(runtime, push_data, &materialized);
+			if (!source_changed) {
+				module = cached.FindModule<true>(runtime, push_data, &materialized, &mat_error);
+			}
 		} else {
-			module = cached.FindModule<false>(runtime, push_data, &materialized);
+			module = cached.FindModule<false>(runtime, push_data, &materialized, &mat_error);
 		}
 		if (module != nullptr) {
-			m_lookup_stats.hit++;
+			(first_attempt ? m_lookup_stats.hit : m_lookup_stats.served_late)++;
+			if (m_lookahead_modules.erase(module->id) != 0) {
+				m_prefetch.lookahead_hits++;
+			}
 			return bind(*module);
 		}
 		if (materialized && !source_changed) {
-			NoteLookupMiss(m_lookup_key, &cached, push_data);
+			NoteLookupMiss(m_lookup_key, &cached, push_data, first_attempt);
 		}
 		if (!cached.call_source && !materialized) {
-			PipelineCacheLog("!!! SHADER DISPATCH SKIP (resource materialization failed) "
+			const std::string reason =
+			    mat_error.empty() ? "resource materialization failed"
+			                      : fmt::format("resource materialization failed: {}", mat_error);
+			PipelineCacheLog("!!! SHADER DISPATCH SKIP ({}) "
 			                 "shader=0x{:016x}; rendering is incomplete",
-			                 params.hash);
+			                 reason, params.hash);
 			if (cached.modules.empty()) {
-				cached.skip_dispatch = true;
+				cached.skip_dispatch  = true;
+				cached.logged_neg_hit = true;
+				cached.failure_reason = reason;
+				PipelineCacheLog(
+				    "ShaderRecompiler {} translation end: hash=0x{:016x} outcome=failed ({})",
+				    ShaderRecompiler::StageName(options.stage), params.hash, cached.failure_reason);
+				StoreFailedProgram(m_lookup_key, cached.failure_reason);
 				if (m_async != nullptr) {
 					m_async->translations.erase(m_lookup_key);
 				}
@@ -670,8 +815,10 @@ const ShaderModule* PipelineCache::GetProgramImpl(const ShaderParams& params, In
 	}
 
 	if (entry == m_program_cache.end()) {
-		m_lookup_stats.lookups++;
-		NoteLookupMiss(m_lookup_key, nullptr, push_data);
+		if (first_attempt) {
+			m_lookup_stats.lookups++;
+		}
+		NoteLookupMiss(m_lookup_key, nullptr, push_data, first_attempt);
 	}
 	finish_options();
 	// Compute programs with GPU-selected calls are linked on the render thread; their module is
@@ -738,6 +885,7 @@ const ShaderModule* PipelineCache::GetProgramImpl(const ShaderParams& params, In
 	}
 	bool        tracking_failed = false;
 	std::string tracking_error;
+	const auto  translate_begin = std::chrono::steady_clock::now();
 	try {
 	if (reused) {
 	} else if (current != nullptr) {
@@ -758,6 +906,8 @@ const ShaderModule* PipelineCache::GetProgramImpl(const ShaderParams& params, In
 		tracking_error  = e.what();
 		tracking_failed = true;
 	}
+	uint64_t translate_us = reused ? 0 : BuildTiming::ElapsedUs(translate_begin);
+	uint64_t plan_us      = 0;
 	if (tracking_failed) {
 		auto& prog = (entry == m_program_cache.end())
 		                 ? m_program_cache.emplace(m_lookup_key, Program {.skip_dispatch = true})
@@ -776,31 +926,43 @@ const ShaderModule* PipelineCache::GetProgramImpl(const ShaderParams& params, In
 		auto retained = !source.calls.empty()
 		                    ? std::make_unique<ShaderRecompiler::ShaderSource>(std::move(source))
 		                    : nullptr;
+		const auto plan_begin = std::chrono::steady_clock::now();
 		entry = m_program_cache.emplace(m_lookup_key, Program {
 		    .call_source   = std::move(retained),
 		    .resource_plan = ShaderRecompiler::IR::ExtractResourcePlan(translated.program),
 		}).first;
-		auto& program = entry->second;
+		plan_us = BuildTiming::ElapsedUs(plan_begin);
+		auto&       program = entry->second;
+		std::string mat_error;
 		if (!ShaderRecompiler::IR::MaterializeResources(program.resource_plan, runtime,
-		                                                program.resources, program.specialization)) {
-			PipelineCacheLog("!!! SHADER DISPATCH SKIP (resource materialization failed) "
+		                                                program.resources, program.specialization,
+		                                                &mat_error)) {
+			const std::string reason =
+			    mat_error.empty() ? "resource materialization failed"
+			                      : fmt::format("resource materialization failed: {}", mat_error);
+			PipelineCacheLog("!!! SHADER DISPATCH SKIP ({}) "
 			                 "shader=0x{:016x}; rendering is incomplete",
-			                 params.hash);
+			                 reason, params.hash);
 			program.skip_dispatch  = true;
 			program.logged_neg_hit = true;
-			program.failure_reason = "resource materialization failed";
+			program.failure_reason = reason;
 			PipelineCacheLog(
 			    "ShaderRecompiler {} translation end: hash=0x{:016x} outcome=failed ({})",
 			    ShaderRecompiler::StageName(options.stage), params.hash, program.failure_reason);
 			StoreFailedProgram(m_lookup_key, program.failure_reason);
 			return nullptr;
 		}
+		capture_use();
 	} else if (source_changed) {
 		entry->second.resource_plan = ShaderRecompiler::IR::ExtractResourcePlan(translated.program);
 		if (const auto* module = entry->second.FindModule<true>(runtime, push_data)) {
-			PipelineCacheLog(
-			    "ShaderRecompiler {} translation end: hash=0x{:016x} outcome=served from store",
-			    ShaderRecompiler::StageName(options.stage), params.hash);
+			// Once per hash, with the use count: a line per use hides the real repeats.
+			if (const auto use = m_served.Note(params.hash); use == 1) {
+				PipelineCacheLog(
+				    "ShaderRecompiler {} translation end: hash=0x{:016x} outcome=served from "
+				    "store (use #1, later uses are counted in the [store] line)",
+				    ShaderRecompiler::StageName(options.stage), params.hash);
+			}
 			return bind(*module);
 		}
 	}
@@ -820,12 +982,27 @@ const ShaderModule* PipelineCache::GetProgramImpl(const ShaderParams& params, In
 			return nullptr;
 		}
 	}
-	auto& built = CompileModule(entry->second, entry->first, options, std::move(translated),
-	                            push_data);
+	const auto compile_begin = std::chrono::steady_clock::now();
+	auto&      built         = CompileModule(entry->second, entry->first, options,
+	                                          std::move(translated), push_data);
 	{
 		const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
 		                    std::chrono::steady_clock::now() - sync_begin)
 		                    .count();
+		BuildTiming::Build build {
+		    .stage  = ShaderRecompiler::StageName(options.stage),
+		    .hash   = params.hash,
+		    .words  = m_last_compile_words,
+		    .where  = "render",
+		    .reason = std::is_same_v<InputInfo, ShaderComputeInputInfo> ? "dispatch" : "draw",
+		};
+		build.steps = m_last_compile_steps;
+		build.steps.translate_us  = translate_us;
+		build.steps.plan_us       = plan_us;
+		build.steps.queue_wait_us = 0;
+		build.steps.total_us      = BuildTiming::ElapsedUs(sync_begin);
+		(void)compile_begin;
+		NoteBuild(build);
 		if (ms >= 50) {
 			std::printf("[sync-build] %s hash=0x%016" PRIx64
 			            ": the render thread built the stage in %lld ms (%s)\n",
@@ -858,7 +1035,9 @@ PipelineCache::PipelineCache(GraphicContext&                         graphics,
 	if (Config::AsyncShaderCompileEnabled()) {
 		const auto threads = ShaderWorkerCount(std::thread::hardware_concurrency(),
 		                                       Config::AsyncWorkers());
-		m_async            = std::make_unique<Async>(threads);
+		m_async = std::make_unique<Async>(threads);
+		m_async->build_totals = &m_build_totals;
+		m_async->skipped_dispatches = &m_skipped_dispatches;
 		PipelineCacheLog("Async shader compile: {} worker threads", threads);
 	}
 }
@@ -979,8 +1158,9 @@ void PipelineCache::Save() {
 	m_store.Finish();
 	if (m_async != nullptr) {
 		m_async->ReportStore(m_store.GetCounts());
-	}
-	ReportLookups();
+		}
+		ReportLookups();
+		ReportPrefetch();
 	if (m_driver_cache_dirty) {
 		m_driver_cache_dirty = false;
 		WriteDriverCache();
@@ -1384,6 +1564,8 @@ const ShaderModule* PipelineCache::GetComputeProgram(const HW::ComputeShaderInfo
 	const auto* module = GetProgram(params, input_info, push_data, mode);
 	if (module == nullptr && m_last_deferred && pending != nullptr) {
 		*pending = true;
+		m_pending_compute_hash     = params.hash;
+		m_pending_compute_identity = ProgramVariantKey();
 		return nullptr;
 	}
 	// HW_ID2 reads are translated with the graphics compute queue's values.
@@ -1393,12 +1575,17 @@ const ShaderModule* PipelineCache::GetComputeProgram(const HW::ComputeShaderInfo
 }
 
 bool PipelineCache::PrefetchComputeProgram(const HW::CsStageRegisters& cs_regs,
-                                           bool dispatch_thread_dimensions, bool async_compute) {
+                                           bool dispatch_thread_dimensions, bool async_compute,
+                                           const HW::UserSgprInfo* user_data) {
 	if (m_async == nullptr || cs_regs.data_addr == 0) {
 		return false;
 	}
+	m_prefetch.requested++;
 	HW::ComputeShaderInfo regs {};
 	regs.cs_regs = cs_regs;
+	if (user_data != nullptr) {
+		regs.cs_user_sgpr = *user_data;
+	}
 	ShaderComputeInputInfo input_info {};
 	input_info.async_compute              = async_compute;
 	input_info.dispatch_thread_dimensions = dispatch_thread_dimensions;
@@ -1406,7 +1593,16 @@ bool PipelineCache::PrefetchComputeProgram(const HW::CsStageRegisters& cs_regs,
 	ShaderParams                                 params;
 	std::shared_ptr<const std::vector<uint32_t>> code_owner;
 	if (!TryPrepareComputeProgram(regs, input_info, params, code_owner)) {
+		m_prefetch.unmapped++;
 		return false;
+	}
+	// The program's user data, as far as the scan could follow them: the translation does not
+	// depend on them, but a module built from them is only right if they are the dispatch's.
+	const bool user_data_known = user_data != nullptr && Config::AsyncLookaheadEnabled();
+	if (user_data_known) {
+		std::copy_n(regs.cs_user_sgpr.value,
+		            std::min<size_t>(params.user_data_count, params.user_data.size()),
+		            params.user_data.begin());
 	}
 	LimitComputeSubgroup(input_info);
 	input_info.lds_storage = input_info.lds_size_dwords * 4u >
@@ -1417,10 +1613,12 @@ bool PipelineCache::PrefetchComputeProgram(const HW::CsStageRegisters& cs_regs,
 	BuildStageStaticKey(input_info, m_lookup_key.static_state);
 	if (m_program_cache.contains(m_lookup_key) || m_async->translations.contains(m_lookup_key) ||
 	    m_async->sync_only_keys.contains(m_lookup_key)) {
+		m_prefetch.known++;
 		return false;
 	}
 	const auto translating = FlightId(m_lookup_key, {UINT32_MAX, UINT32_MAX}, nullptr);
 	if (m_async->in_flight.contains(translating)) {
+		m_prefetch.in_flight++;
 		return false;
 	}
 	ShaderRecompiler::CompileOptions options {
@@ -1433,8 +1631,10 @@ bool PipelineCache::PrefetchComputeProgram(const HW::CsStageRegisters& cs_regs,
 	    .back_code       = params.back_code,
 	};
 	options.input_info.compute = &input_info;
+	m_prefetch.queued++;
+	m_prefetch.with_data += user_data_known ? 1u : 0u;
 	RequestAsync(m_lookup_key, nullptr, params, input_info, options, {}, AsyncMode::PrefetchOnly,
-	             false);
+	             false, user_data_known);
 	return true;
 }
 
