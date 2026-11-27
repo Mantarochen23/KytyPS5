@@ -413,10 +413,15 @@ bool PipelineCache::Program::Materialize(const ShaderRecompiler::IR::SrtRuntime&
 		}
 		count_stats();
 		++materialization_memo_hits;
+		memo.store_gate.Note(true);
 		note(true);
 		return true;
 	}
 	count_stats();
+	memo.store_gate.Note(false);
+	// A program whose memo keeps missing skips the store (and the hashing of the walk's reads)
+	// for a while (MemoizedMaterialization::StoreGate).
+	const bool store = memo.store_gate.Allows();
 	switch (outcome) {
 		case MemoOutcome::Empty: Common::FrameCost::Add(Counter::MemoMissEmpty); break;
 		case MemoOutcome::HeapPlan: Common::FrameCost::Add(Counter::MemoMissHeapPlan); break;
@@ -437,12 +442,12 @@ bool PipelineCache::Program::Materialize(const ShaderRecompiler::IR::SrtRuntime&
 	resource_plan.capture_specialization_reads = true;
 	RecordingImageHeap recorder(runtime.image_heap);
 	WalkReadHashes     walk_hashes;
-	auto               walk = walk_hashes.Wrap(runtime);
-	bool skipped_reads = false;
-	walk.memory_changes = settings.stamps;
-	walk.skipped_reads  = &skipped_reads;
+	auto               walk = store ? walk_hashes.Wrap(runtime) : runtime;
+	bool               skipped_reads = false;
+	walk.memory_changes              = settings.stamps;
+	walk.skipped_reads               = &skipped_reads;
 	// Only a memo that keeps heap plans needs what the heap hands out.
-	if (runtime.image_heap != nullptr && memo.Capacity() >= 2u) walk.image_heap = &recorder;
+	if (store && runtime.image_heap != nullptr && memo.Capacity() >= 2u) walk.image_heap = &recorder;
 	if (!ShaderRecompiler::IR::MaterializeResources(resource_plan, walk, resources,
 	                                                specialization, failure_reason)) {
 		note(false);
@@ -451,6 +456,11 @@ bool PipelineCache::Program::Materialize(const ShaderRecompiler::IR::SrtRuntime&
 	specialization_hash = SpecializationHash(specialization);
 	MemoLookupStats store_stats;
 	uint32_t        evicted = 0;
+	if (!store) {
+		Common::FrameCost::Add(Counter::MemoNotStored);
+		note(false);
+		return true;
+	}
 	if (const auto* stored = skipped_reads ? nullptr : memo.Store(runtime, resources, specialization, specialization_hash,
 	                                    recorder, uses_heap, evicted, store_stats, &walk_hashes)) {
 		memo.current = stored->serial;

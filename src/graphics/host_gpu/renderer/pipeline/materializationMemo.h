@@ -194,6 +194,37 @@ public:
 	[[nodiscard]] size_t   Size() const { return m_entries.size(); }
 	[[nodiscard]] uint64_t ApproximateBytes() const;
 
+	// Storing costs a read and a hash of every range the walk read (hundreds of KiB for a large
+	// table walk). A program whose key changes on nearly every call (per-object user data) never
+	// gets that back: its entry is evicted before the next lookup can hit. The gate counts the
+	// lookups of a window; with fewer than MinHits hits in Window lookups, the next Cooldown
+	// misses are not stored. Then it measures again, so a program that settles down is memoized.
+	struct StoreGate {
+		static constexpr uint32_t Window   = 64;
+		static constexpr uint32_t MinHits  = 4;
+		static constexpr uint32_t Cooldown = 1024;
+
+		uint32_t lookups  = 0;
+		uint32_t hits     = 0;
+		uint32_t cooldown = 0;
+
+		void Note(bool hit) {
+			if (cooldown != 0) {
+				cooldown--;
+				return;
+			}
+			lookups++;
+			hits += hit ? 1u : 0u;
+			if (lookups >= Window) {
+				if (hits < MinHits) cooldown = Cooldown;
+				lookups = 0;
+				hits    = 0;
+			}
+		}
+		[[nodiscard]] bool Allows() const { return cooldown == 0; }
+	};
+	StoreGate store_gate;
+
 private:
 	bool KeyMatches(const Entry& entry, const ShaderRecompiler::IR::SrtRuntime& runtime,
 	                MemoOutcome& why, size_t user_data_words = AllUserData) const;
