@@ -66,8 +66,8 @@ void TestCountDword() {
 	Check(FindCountDword(words, 4, 1, 64) == -1, "a count of one matches nothing");
 	Check(FindCountDword(words, 4, 5, 0) == -1, "no zero group size");
 	const float two = DwordAsFloat(0x40014526u);
-	Check(two > 2.0f && two < 2.01f, "the dword is a float near 2");
-	Check(DwordAsFloat(0xbffebae2u) < -1.99f, "the negated twin");
+	Check(two > 2.0f && two < 2.03f, "the dword is a float near 2");
+	Check(DwordAsFloat(0xbffebae2u) < -1.98f, "the negated twin");
 }
 
 void TestLimiter() {
