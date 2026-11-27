@@ -59,6 +59,7 @@ enum class Counter : uint8_t {
 	MemoBytesCompared,
 	MemoRangesTracked,
 	MemoRangesUntracked,
+	MemoWalkChanged,
 	Count
 };
 
