@@ -1131,7 +1131,8 @@ static bool BuildResourceSpecialization(const ResourcePlan& program, ResourceSna
 		    !storage && base.unfiltered_access_only && format == Prospero::BufferFormat::k16UInt &&
 		    static_cast<Prospero::TileMode>((descriptor.dwords[3] >> 20u) & 0x1fu) ==
 		        Prospero::TileMode::kDepth;
-		image.conversion_format = depth_bits ? format : ImageConversionFormat(format);
+		const bool atomic_u8 = base.atomic && !base.atomic64 && format == Prospero::BufferFormat::k8UInt;
+		image.conversion_format = depth_bits || atomic_u8 ? format : ImageConversionFormat(format);
 		// SKIP_DEGAMMA (S# bit 31) reads sRGB texels as stored.
 		image.skip_degamma = Prospero::IsSrgbFormat(format) &&
 		    std::ranges::any_of(program.info.sampled_pairs, [&](const auto& pair) {

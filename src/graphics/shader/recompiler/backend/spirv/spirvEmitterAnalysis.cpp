@@ -118,12 +118,17 @@ uint32_t ImageType(EmitterState& state, const IR::ImageResource& image) {
 		sampled = 2;
 		if (image.atomic) {
 			EXIT_IF(image.numeric_class != Prospero::TextureNumericClass::Uint);
-			format = image.atomic64 ? spv::ImageFormatR64ui : spv::ImageFormatR32ui;
-			if (image.atomic64) {
-				state.builder.RequireExtension("SPV_EXT_shader_image_int64");
-				state.builder.RequireCapability(spv::CapabilityInt64);
-				state.builder.RequireCapability(spv::CapabilityInt64Atomics);
-				state.builder.RequireCapability(spv::CapabilityInt64ImageEXT);
+			if (IR::IsAtomicUint8Image(image)) {
+				format = spv::ImageFormatR8ui;
+				state.builder.RequireCapability(spv::CapabilityStorageImageExtendedFormats);
+			} else {
+				format = image.atomic64 ? spv::ImageFormatR64ui : spv::ImageFormatR32ui;
+				if (image.atomic64) {
+					state.builder.RequireExtension("SPV_EXT_shader_image_int64");
+					state.builder.RequireCapability(spv::CapabilityInt64);
+					state.builder.RequireCapability(spv::CapabilityInt64Atomics);
+					state.builder.RequireCapability(spv::CapabilityInt64ImageEXT);
+				}
 			}
 		}
 	} else {
@@ -155,6 +160,9 @@ void DecorateNonUniformDescriptor(EmitterState& state, uint32_t id, spv::Capabil
 
 ImageDefinition& ImageDescriptorDefinition(EmitterState& state, const IR::ImageResource& image,
                                            IR::DescriptorBindingKind kind) {
+	if (IR::IsAtomicUint8Image(image)) {
+		return state.atomic_u8_images[IR::AtomicUint8ImageIndex(image.dimension)];
+	}
 	return (image.heap ? state.heap_images : state.images)[IR::ImageBindingIndex(kind)];
 }
 } // namespace

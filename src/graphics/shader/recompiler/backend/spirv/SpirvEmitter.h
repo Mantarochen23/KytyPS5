@@ -27,6 +27,8 @@ struct Profile {
 	// Debug (--loop-guard): after this many evaluated loop exits an invocation leaves every loop and
 	// records its shader hash and loop in the fault buffer. 0 = off. Mesh shaders are not guarded.
 	uint32_t loop_guard_limit = 0;
+	// VK_EXT_fragment_shader_interlock pixel interlock for emulated 8-bit image atomics in pixel shaders.
+	bool fragment_shader_pixel_interlock = false;
 };
 
 inline constexpr Profile DefaultProfile {};
