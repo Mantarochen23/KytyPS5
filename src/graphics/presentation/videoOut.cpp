@@ -1,5 +1,8 @@
 #include "graphics/presentation/videoOut.h"
 
+#include <cinttypes>
+#include <cstdio>
+
 #include "common/abi.h"
 #include "common/assert.h"
 #include "common/common.h"
@@ -254,6 +257,11 @@ private:
 	// Present thread only: since when frames with skipped draws have been held back.
 	bool                                  m_holding = false;
 	std::chrono::steady_clock::time_point m_hold_since {};
+	// Since the first held frame of this run of held frames; bounds the hold however busy the
+	// workers stay (a shader that never finishes must not stop presenting).
+	std::chrono::steady_clock::time_point m_hold_first {};
+	uint64_t                              m_held_frames   = 0;
+	bool                                  m_hold_expired  = false;
 };
 
 struct VideoOutDriver::Impl {
@@ -1166,14 +1174,42 @@ bool FlipQueue::Flip() {
 			const bool     incomplete   =
 			    std::any_of(requests.begin(), requests.begin() + count,
 			                [](const auto& r) { return r.incomplete; });
+			constexpr auto MaxHoldTotal = std::chrono::seconds {10};
 			if (!incomplete) {
-				m_holding = false;
+				if (m_holding && m_held_frames != 0) {
+					std::printf("[hold] released after %" PRIu64 " held frames, %lld ms%s\n",
+					            m_held_frames,
+					            static_cast<long long>(
+					                std::chrono::duration_cast<std::chrono::milliseconds>(
+					                    now - m_hold_first).count()),
+					            m_hold_expired ? " (bound reached earlier)" : "");
+				}
+				m_holding      = false;
+				m_held_frames  = 0;
+				m_hold_expired = false;
 			} else if (!m_holding || workers_busy) {
+				if (!m_holding) {
+					m_hold_first   = now;
+					m_held_frames  = 0;
+					m_hold_expired = false;
+				}
 				m_holding    = true;
 				m_hold_since = now;
 			}
-			if (incomplete && (workers_busy || now - m_hold_since < MaxHold) &&
+			const bool within_total = now - m_hold_first < MaxHoldTotal;
+			if (incomplete && !within_total && !m_hold_expired) {
+				m_hold_expired = true;
+				std::printf("[hold] bound reached: %" PRIu64 " frames held for %lld ms (workers_busy=%d);"
+				            " presenting incomplete frames until one is complete\n",
+				            m_held_frames,
+				            static_cast<long long>(
+				                std::chrono::duration_cast<std::chrono::milliseconds>(
+				                    now - m_hold_first).count()),
+				            workers_busy ? 1 : 0);
+			}
+			if (incomplete && within_total && (workers_busy || now - m_hold_since < MaxHold) &&
 			    m_presenter.PresentLastFrame()) {
+				m_held_frames++;
 				for (size_t i = 0; i < layer_count; i++) {
 					m_presenter.Discard(*layers[i].frame);
 				}

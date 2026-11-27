@@ -110,8 +110,11 @@ public:
 	}
 
 	// Probes pending entries in FIFO submission order:
-	// - Ready entries are extracted and returned in order to be replayed.
-	// - Failed or expired entries are dropped.
+	// - Ready entries are extracted and returned in order to be replayed, unless an earlier entry
+	//   that stays queued (still building) touches the same memory with a write on either side:
+	//   replaying the later one first would read or overwrite data the earlier one has yet to
+	//   produce, so it waits behind it (and blocks what depends on it in turn).
+	// - Failed or expired entries are dropped (they block nothing).
 	// - Pending entries stay queued.
 	template <typename Probe>
 	[[nodiscard]] std::vector<Entry> TakeReady(uint64_t now_ms, Probe&& probe) {
@@ -120,18 +123,18 @@ public:
 		kept.reserve(m_entries.size());
 		for (auto& entry: m_entries) {
 			const auto state = probe(entry);
-			if (state == ProbeState::Ready) {
-				ready.push_back(std::move(entry));
-				m_stats.replayed++;
-				continue;
-			}
 			if (state == ProbeState::Failed) {
 				m_stats.dropped_failed++;
 				continue;
 			}
-			if (m_max_age_ms != 0 && now_ms >= entry.skipped_at_ms &&
+			if (state != ProbeState::Ready && m_max_age_ms != 0 && now_ms >= entry.skipped_at_ms &&
 			    now_ms - entry.skipped_at_ms > m_max_age_ms) {
 				m_stats.dropped_expired++;
+				continue;
+			}
+			if (state == ProbeState::Ready && !ConflictsWithAny(entry, kept)) {
+				ready.push_back(std::move(entry));
+				m_stats.replayed++;
 				continue;
 			}
 			kept.push_back(std::move(entry));
@@ -141,6 +144,22 @@ public:
 	}
 
 private:
+	// True when `entry` overlaps an earlier queued entry in memory and at least one side writes it.
+	static bool ConflictsWithAny(const Entry& entry, const std::vector<Entry>& earlier) {
+		for (const auto& other: earlier) {
+			for (const auto& a: entry.uses) {
+				if (a.size == 0) continue;
+				for (const auto& b: other.uses) {
+					if (b.size == 0 || (!a.written && !b.written)) continue;
+					if (a.address < b.address + b.size && b.address < a.address + a.size) {
+						return true;
+					}
+				}
+			}
+		}
+		return false;
+	}
+
 	uint64_t           m_max_age_ms;
 	std::vector<Entry> m_entries;
 	Stats              m_stats;

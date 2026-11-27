@@ -100,9 +100,44 @@ void TestCatchUpReplaysProducerBeforeConsumer() {
 	      "permanent failure drops queued entry");
 }
 
+// A ready consumer must not replay ahead of an earlier producer that is still building.
+void TestReadyEntryWaitsBehindPendingProducer() {
+	SkipCatchUp::Queue<uint32_t> queue(5000);
+	const std::vector<Use>       prod {{0x2000, 256, false, true}};
+	const std::vector<Use>       cons {{0x2000, 256, true, false}, {0x3000, 256, false, true}};
+	const std::vector<Use>       other {{0x9000, 256, false, true}};
+	queue.Enqueue(1, 1, prod, 1u, 0);
+	queue.Enqueue(2, 2, cons, 2u, 0);
+	queue.Enqueue(3, 3, other, 3u, 0);
+	const auto probe = [](const auto& e) {
+		return e.payload == 1u ? SkipCatchUp::ProbeState::Pending : SkipCatchUp::ProbeState::Ready;
+	};
+	auto ready = queue.TakeReady(10, probe);
+	Check(ready.size() == 1 && ready[0].payload == 3u, "only the independent entry replays");
+	Check(queue.Size() == 2, "producer and its consumer stay queued");
+	ready = queue.TakeReady(20, [](const auto&) { return SkipCatchUp::ProbeState::Ready; });
+	Check(ready.size() == 2 && ready[0].payload == 1u && ready[1].payload == 2u,
+	      "producer then consumer once the producer is ready");
+	// Two readers of the same buffer do not order each other.
+	queue.Enqueue(4, 4, {{0x5000, 16, true, false}}, 4u, 30);
+	queue.Enqueue(5, 5, {{0x5000, 16, true, false}}, 5u, 30);
+	ready = queue.TakeReady(40, [](const auto& e) {
+		return e.payload == 4u ? SkipCatchUp::ProbeState::Pending : SkipCatchUp::ProbeState::Ready;
+	});
+	Check(ready.size() == 1 && ready[0].payload == 5u, "read-read does not conflict");
+	// A failed earlier producer blocks nothing.
+	queue.Enqueue(6, 6, prod, 6u, 50);
+	queue.Enqueue(7, 7, cons, 7u, 50);
+	ready = queue.TakeReady(60, [](const auto& e) {
+		return e.payload == 6u ? SkipCatchUp::ProbeState::Failed : SkipCatchUp::ProbeState::Ready;
+	});
+	Check(ready.size() == 1 && ready[0].payload == 7u, "failed producer does not block");
+}
+
 } // namespace
 
 int main() {
+	TestReadyEntryWaitsBehindPendingProducer();
 	TestFollowsData();
 	TestClearAndSplit();
 	TestTransitiveAndExpiry();
