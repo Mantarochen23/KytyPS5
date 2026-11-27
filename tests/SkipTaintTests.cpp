@@ -131,7 +131,8 @@ void TestReadyEntryWaitsBehindPendingProducer() {
 	ready = queue.TakeReady(60, [](const auto& e) {
 		return e.payload == 6u ? SkipCatchUp::ProbeState::Failed : SkipCatchUp::ProbeState::Ready;
 	});
-	Check(ready.size() == 1 && ready[0].payload == 7u, "failed producer does not block");
+	Check(ready.size() == 2 && ready[0].payload == 4u && ready[1].payload == 7u,
+	      "failed producer does not block");
 }
 
 } // namespace
