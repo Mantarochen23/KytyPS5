@@ -433,6 +433,9 @@ bool PipelineCache::Program::Materialize(const ShaderRecompiler::IR::SrtRuntime&
 	RecordingImageHeap recorder(runtime.image_heap);
 	WalkReadHashes     walk_hashes;
 	auto               walk = walk_hashes.Wrap(runtime);
+	bool skipped_reads = false;
+	walk.memory_changes = settings.stamps;
+	walk.skipped_reads  = &skipped_reads;
 	// Only a memo that keeps heap plans needs what the heap hands out.
 	if (runtime.image_heap != nullptr && memo.Capacity() >= 2u) walk.image_heap = &recorder;
 	if (!ShaderRecompiler::IR::MaterializeResources(resource_plan, walk, resources,
@@ -443,7 +446,7 @@ bool PipelineCache::Program::Materialize(const ShaderRecompiler::IR::SrtRuntime&
 	specialization_hash = SpecializationHash(specialization);
 	MemoLookupStats store_stats;
 	uint32_t        evicted = 0;
-	if (const auto* stored = memo.Store(runtime, resources, specialization, specialization_hash,
+	if (const auto* stored = skipped_reads ? nullptr : memo.Store(runtime, resources, specialization, specialization_hash,
 	                                    recorder, uses_heap, evicted, store_stats, &walk_hashes)) {
 		memo.current = stored->serial;
 		Common::FrameCost::Add(Counter::MemoStored);

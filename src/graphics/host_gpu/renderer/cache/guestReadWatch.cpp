@@ -12,7 +12,29 @@ constexpr uint64_t PageSize = TRACKER_PAGE_SIZE;
 // Tables and user data blocks are small. A range over this many pages is compared by its bytes: it
 // would hold the watch mutex for a long arming and fault on any write into megabytes of data.
 constexpr uint64_t MaxTrackedPages = 1024;
+constexpr uint32_t RevalidateEvery = 64;
 }
+
+class GuestReadWatch::Stamp final: public ShaderRecompiler::IR::MemoryChangeStamp {
+public:
+	Stamp(GuestReadWatch& owner, uint64_t address, uint64_t size, std::vector<PageStamp> pages)
+	    : m_owner(owner), m_address(address), m_size(size), m_pages(std::move(pages)) {}
+
+	[[nodiscard]] bool Unchanged() const override {
+		if (!m_owner.Unchanged(m_pages) || m_owner.GpuHolds(m_address, m_size)) return false;
+		// A guest protection change drops the read-only state without a fault, and some host calls
+		// fill guest buffers unannounced: neither bumps a page generation. Bound that staleness by
+		// reading the bytes again after a fixed number of consecutive replays.
+		return m_hits.fetch_add(1u, std::memory_order_relaxed) % RevalidateEvery != RevalidateEvery - 1u;
+	}
+
+private:
+	GuestReadWatch&       m_owner;
+	uint64_t              m_address = 0;
+	uint64_t              m_size    = 0;
+	std::vector<PageStamp> m_pages;
+	mutable std::atomic<uint32_t> m_hits {0};
+};
 
 GuestReadWatch::~GuestReadWatch() {
 	std::scoped_lock lock {m_mutex};
@@ -79,6 +101,13 @@ bool GuestReadWatch::Unchanged(std::span<const PageStamp> stamps) {
 
 bool GuestReadWatch::GpuHolds(uint64_t address, uint64_t size) {
 	return m_environment.gpu_holds == nullptr || m_environment.gpu_holds(m_environment.user, address, size);
+}
+
+std::shared_ptr<ShaderRecompiler::IR::MemoryChangeStamp> GuestReadWatch::Track(
+    uint64_t address, uint64_t size) {
+	std::vector<PageStamp> pages;
+	if (!Track(address, size, pages)) return {};
+	return std::make_shared<Stamp>(*this, address, size, std::move(pages));
 }
 
 void GuestReadWatch::Written(uint64_t address, uint64_t size) {

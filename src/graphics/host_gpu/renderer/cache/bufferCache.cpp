@@ -391,6 +391,7 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 			    total_size += Common::AlignUp(end - start, 64);
 		    });
 		    m_gpu_modified_ranges.Subtract(address, bytes);
+		    ++m_ownership_release_epoch;
 		    ForgetColorMetadataChecks(address, bytes);
 	    });
 	if (copies.empty()) {
@@ -534,6 +535,7 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 			if (DownloadBufferMemory<false>(buffer, start, end - start)) {
 				WaitDiag::Global().NoteReadback(start, end - start, WaitDiag::NowMs());
 				m_memory_tracker.UnmarkRegionAsGpuModified(start, end - start);
+				++m_ownership_release_epoch;
 			}
 		}
 		if (is_write) {
@@ -935,8 +937,11 @@ void BufferCache::InvalidateRuntimeTables(uint64_t vaddr, uint64_t size) {
 }
 
 void BufferCache::MarkRuntimeTableWritten(const std::shared_ptr<RuntimeTableState>& state) {
-	if (state == nullptr) return;
+	if (state == nullptr || !state->BeginMark(m_scheduler.CurrentTick(), m_ownership_release_epoch)) return;
+	Common::FrameCost::Add(Common::FrameCost::Counter::TableMarks);
+	uint64_t range_count = 0;
 	state->WriteRanges().ForEach([&](uint64_t begin, uint64_t end) {
+		++range_count;
 		const auto size = end - begin;
 		// FindBuffers/PrepareBda has already uploaded CPU-owned bytes. This transition only
 		// establishes GPU ownership for a dispatch which may select any member of the union.
@@ -945,8 +950,12 @@ void BufferCache::MarkRuntimeTableWritten(const std::shared_ptr<RuntimeTableStat
 		m_gpu_modified_ranges.Add(begin, size);
 		NoteWrite(begin, size);
 		ForgetColorMetadataChecks(begin, size);
-		m_texture_cache.InvalidateMemoryFromGPU(begin, size);
 	});
+	// Resolve all real image overlaps under one cache lock and one generation bump. The exact
+	// candidate ranges, rather than their much wider backing buffers, keep unrelated descriptor
+	// tables and image-heap entries out of GPU ownership.
+	m_texture_cache.InvalidateMemoryFromGPU(state->WriteRanges());
+	Common::FrameCost::Add(Common::FrameCost::Counter::TableMarkRanges, range_count);
 }
 
 bool BufferCache::IsRegionGpuModified(uint64_t vaddr, uint64_t size) {
@@ -1012,6 +1021,7 @@ void BufferCache::RunGarbageCollector() {
 	for (const auto id: dirty_buffers) {
 		auto& buffer = m_slot_buffers[id];
 		m_memory_tracker.UnmarkRegionAsGpuModified(buffer.CpuAddress(), buffer.Size());
+		++m_ownership_release_epoch;
 		m_memory_tracker.MarkRegionAsCpuModified(buffer.CpuAddress(), buffer.Size());
 		Unregister(id);
 		EraseBufferSlot(id);

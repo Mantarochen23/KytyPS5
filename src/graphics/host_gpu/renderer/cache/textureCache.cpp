@@ -316,6 +316,28 @@ void TextureCache::TouchResolutionGenerationLocked(uint64_t address, uint64_t si
 	            [this, generation](uint64_t page) { m_resolution_page_table[page] = generation; });
 }
 
+void TextureCache::TouchResolutionGenerationLocked(const RangeSet& ranges,
+                                                   Common::FrameCost::Counter site) {
+	bool valid = false;
+	ranges.ForEach([&](uint64_t address, uint64_t end) {
+		valid |= GuestRange {address, end - address}.Valid();
+	});
+	if (!valid) return;
+	Common::FrameCost::Add(site);
+	const auto generation = m_resolution_generation.fetch_add(1u, std::memory_order_relaxed) + 1u;
+	ranges.ForEach([&](uint64_t address, uint64_t end) {
+		const auto size = end - address;
+		if (!GuestRange {address, size}.Valid()) return;
+		if (m_resolution_changes.size() >= MaxResolutionChanges) {
+			m_resolution_changes.clear();
+			m_resolution_journal_floor = generation;
+		}
+		m_resolution_changes.push_back({{address, size}, generation});
+		ForEachPage(address, size,
+		            [this, generation](uint64_t page) { m_resolution_page_table[page] = generation; });
+	});
+}
+
 uint64_t TextureCache::TakeResolutionChangesSince(uint64_t generation,
 	                                               std::vector<GuestRange>& changes,
 	                                               bool* incomplete) {
@@ -2110,30 +2132,47 @@ uint64_t TextureCache::WriteBackTick(uint64_t address, uint64_t size) {
 }
 
 void TextureCache::InvalidateMemoryFromGPU(uint64_t address, uint64_t size) {
+	RangeSet ranges;
+	ranges.Add(address, size);
+	InvalidateMemoryFromGPU(ranges);
+}
+
+void TextureCache::InvalidateMemoryFromGPU(const RangeSet& ranges) {
 	Common::FrameCost::Add(Common::FrameCost::Counter::GpuInvalidateCalls);
 	// A GPU write to pages no image covers (nearly all of them) changes no image and no resolution:
 	// take neither the lock nor a new generation, which would make every resident image-heap entry
 	// look changed (the same fast skip as the CPU-write path, upstream PR 1284).
-	ImagePageTable::PageRange pages {};
-	if (ImagePageTable::TryGetPageRange(address, size, pages) &&
-	    !m_registered_pages.Any(pages.first, pages.last_exclusive)) {
+	bool registered = false;
+	ranges.ForEach([&](uint64_t address, uint64_t end) {
+		if (registered) return;
+		ImagePageTable::PageRange pages {};
+		registered = !ImagePageTable::TryGetPageRange(address, end - address, pages) ||
+		             m_registered_pages.Any(pages.first, pages.last_exclusive);
+	});
+	if (!registered) {
 		Common::FrameCost::Add(Common::FrameCost::Counter::GpuInvalidateSkipped);
 		return;
 	}
 	std::scoped_lock lock {m_lock};
-	bool             overlapped = false;
-	ForEachImageInRegion(address, size, [&](ImageId, Image& image) {
-		overlapped = true;
-		if (image.info.data.address != address) {
-			return;
-		}
-		image.ClearGpuModified();
-		image.MarkBufferModified();
+	RangeSet         changed;
+	std::vector<ImageId> marked;
+	ranges.ForEach([&](uint64_t address, uint64_t end) {
+		bool overlapped = false;
+		ForEachImageInRegion(address, end - address, [&](ImageId id, Image& image) {
+			overlapped = true;
+			if (image.info.data.address != address || std::ranges::find(marked, id) != marked.end()) {
+				return;
+			}
+			marked.push_back(id);
+			image.ClearGpuModified();
+			image.MarkBufferModified();
+		});
+		if (overlapped) changed.Add(address, end - address);
 	});
 	// Registered pages without an overlapping image (a neighbour in the same page) change nothing.
-	if (overlapped) {
+	if (!changed.Empty()) {
 		Common::FrameCost::Add(Common::FrameCost::Counter::GpuInvalidateGenBumps);
-		TouchResolutionGenerationLocked(address, size,
+		TouchResolutionGenerationLocked(changed,
 		                                Common::FrameCost::Counter::CacheBumpGpuInvalidate);
 	} else {
 		Common::FrameCost::Add(Common::FrameCost::Counter::GpuInvalidateSkipped);

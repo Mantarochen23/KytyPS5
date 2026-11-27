@@ -95,7 +95,7 @@ bool HasShaderBufferWrites(const ShaderStageRuntime& runtime) {
 		    !program.info.buffers[table.root_resource].written) {
 			continue;
 		}
-		has_writes |= table.has_live_range;
+		has_writes |= table.candidates->has_live_range;
 	}
 	return has_writes;
 }
