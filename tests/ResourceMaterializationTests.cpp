@@ -2,6 +2,7 @@
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
 #include "SrtWalkerTestMemory.h"
+#include "common/ports.h"
 
 #include <bit>
 #include <cstdio>
@@ -1514,7 +1515,9 @@ void DbgExitIfHandler(const char *file, const char *, int line) {
 
 } // namespace Common
 
-int main() {
+int main(int argc, char **argv) {
+  // --old-layout: without the canonical-resources port.
+  if (argc > 1 && std::string_view(argv[1]) == "--old-layout") Config::SetDisabledPorts({"canonical-resources"});
   TestWalkerLoadsBypassSpecializationReader();
   TestNativeNestedSrtRefresh();
   TestIntegerRuntimeValueFollowsSrtReads();
