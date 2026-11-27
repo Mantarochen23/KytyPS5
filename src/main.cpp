@@ -185,7 +185,10 @@ static void PrintUsage() {
 	         "                                       Default: off.\n"
 	         "  --mem-limit-gb <n>                   When the process's RSS + swap passes n GB, print the\n"
 	         "                                       [mem] table and drop caches; if still over 10 s later\n"
-	         "                                       stop the run with a message. 0 = off. Default: 0.\n");
+	         "                                       stop the run with a message. 0 = off. Default: 0.\n"
+	         "  --max-spirv-words <n>                Refuse any emitted or stored shader module larger than\n"
+	         "                                       n SPIR-V words before it reaches the driver. 0 = off.\n"
+	         "                                       Default: 2000000.\n");
 }
 
 static bool NextArg(int argc, char* argv[], int& index, std::string& out) {
@@ -652,6 +655,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 		} else if (arg == "--mem-limit-gb") {
 			if (!ParseUint32(value, options.config.mem_limit_gb)) {
 				::printf("invalid memory limit value: %s\n", value.c_str());
+				return false;
+			}
+		} else if (arg == "--max-spirv-words") {
+			if (!ParseUint32(value, options.config.max_spirv_words)) {
+				::printf("invalid max SPIR-V words value: %s\n", value.c_str());
 				return false;
 			}
 		} else {

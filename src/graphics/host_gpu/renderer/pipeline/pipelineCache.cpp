@@ -1120,8 +1120,38 @@ const ShaderModule* PipelineCache::GetProgramImpl(const ShaderParams& params, In
 		}
 	}
 	const auto compile_begin = std::chrono::steady_clock::now();
-	auto&      built         = CompileModule(entry->second, entry->first, options,
-	                                          std::move(translated), push_data);
+	ShaderModule* built_ptr  = nullptr;
+	try {
+		built_ptr = &CompileModule(entry->second, entry->first, options, std::move(translated),
+		                           push_data);
+	} catch (const ShaderRecompiler::SpirvWordBudgetError& e) {
+		BuildTiming::Build oversized {
+		    .stage             = ShaderRecompiler::StageName(options.stage),
+		    .hash              = params.hash,
+		    .words             = e.words,
+		    .where             = "render",
+		    .reason            = "budget-refused",
+		    .top_contributors  = e.emit_stats.top_contributors,
+		    .contributor_count = e.emit_stats.contributor_count,
+		};
+		if (const auto warn = BuildTiming::WarningLine(oversized); !warn.empty()) {
+			Log::WriteToConsoleAndLog(warn + "\n");
+		}
+		PipelineCacheLog("!!! SHADER DISPATCH SKIP ({}) shader=0x{:016x}; rendering is incomplete",
+		                 e.what(), params.hash);
+		if (entry->second.modules.empty()) {
+			entry->second.skip_dispatch  = true;
+			entry->second.logged_neg_hit = true;
+			entry->second.failure_reason = e.what();
+			PipelineCacheLog(
+			    "ShaderRecompiler {} translation end: hash=0x{:016x} outcome=failed ({})",
+			    ShaderRecompiler::StageName(options.stage), params.hash,
+			    entry->second.failure_reason);
+			StoreFailedProgram(m_lookup_key, entry->second.failure_reason);
+		}
+		return nullptr;
+	}
+	auto& built = *built_ptr;
 	{
 		const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
 		                    std::chrono::steady_clock::now() - sync_begin)

@@ -273,6 +273,21 @@ void PipelineCache::RequestAsync(const ProgramKey& key, Program* program,
 					fail_reason = e.what();
 					fail_file   = e.file;
 					fail_line   = e.line;
+				} catch (const ShaderRecompiler::SpirvWordBudgetError& e) {
+					BuildTiming::Build oversized {
+					    .stage             = ShaderRecompiler::StageName(inputs->key.stage),
+					    .hash              = inputs->key.hash,
+					    .words             = e.words,
+					    .where             = "worker",
+					    .reason            = "budget-refused",
+					    .top_contributors  = e.emit_stats.top_contributors,
+					    .contributor_count = e.emit_stats.contributor_count,
+					};
+					if (const auto warn = BuildTiming::WarningLine(oversized); !warn.empty()) {
+						Log::WriteToConsoleAndLog(warn + "\n");
+					}
+					failed      = true;
+					fail_reason = e.what();
 				} catch (const std::exception& e) {
 					failed      = true;
 					fail_reason = e.what();
@@ -615,6 +630,21 @@ bool PipelineCache::PostCallProgramModule(const ProgramKey& key, Program& progra
 			    compiled.steps.queue_wait_us = queue_wait_us;
 			    compiled.steps.total_us      = BuildTiming::ElapsedUs(post_time);
 			    pending = std::make_unique<Async::PendingStage>(device, std::move(compiled));
+		    } catch (const ShaderRecompiler::SpirvWordBudgetError& e) {
+			    BuildTiming::Build oversized {
+			        .stage             = ShaderRecompiler::StageName(inputs->key.stage),
+			        .hash              = inputs->key.hash,
+			        .words             = e.words,
+			        .where             = "worker",
+			        .reason            = "budget-refused",
+			        .top_contributors  = e.emit_stats.top_contributors,
+			        .contributor_count = e.emit_stats.contributor_count,
+			    };
+			    if (const auto warn = BuildTiming::WarningLine(oversized); !warn.empty()) {
+				    Log::WriteToConsoleAndLog(warn + "\n");
+			    }
+			    failed      = true;
+			    fail_reason = e.what();
 		    } catch (const std::exception& e) {
 			    failed      = true;
 			    fail_reason = e.what();

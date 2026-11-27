@@ -303,6 +303,17 @@ void PipelineCache::PrepareStoreModule(StoreItem& item, bool keep, WarmUpTimes& 
 	}
 	item.spirv_words        = item.spirv.size();
 	item.module.spirv_words = item.spirv_words;
+	if (const uint32_t budget = Config::MaxSpirvWords(); budget != 0u && item.spirv_words > budget) {
+		item.failed = true;
+		item.reason = fmt::format("stored SPIR-V exceeds word budget ({} > {})",
+		                          item.spirv_words, budget);
+		Log::WriteToConsoleAndLog(fmt::format(
+		    "[store] WARNING stage={} hash=0x{:016x} outcome=failed ({})\n",
+		    ShaderRecompiler::StageName(item.module.info.stage), item.module.info.shader_hash,
+		    item.reason));
+		item.spirv = {};
+		return;
+	}
 	const auto begin = Clock::now();
 	if (keep) {
 		Common::RecoverableScope scope;
