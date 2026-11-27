@@ -34,6 +34,7 @@
 #include <array>
 #include <atomic>
 #include <bit>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -643,6 +644,57 @@ static bool HasStorageWrites(const ShaderComputeInputInfo& input_info,
 	       });
 }
 
+// The guest buffers a compute program names through descriptors, with how it uses them. Memory it
+// reaches through pointers it computes itself is not listed.
+static std::vector<SkipTaint::Use> ComputeBufferUses(const ShaderStageRuntime& stage) {
+	std::vector<SkipTaint::Use> uses;
+	const auto& metadata  = stage.module->info.info.buffers;
+	const auto& snapshot  = stage.resources->buffers;
+	for (uint32_t i = 0; i < metadata.size() && i < snapshot.size(); i++) {
+		if (metadata[i].descriptor_index == UINT32_MAX) continue;
+		const auto descriptor = DecodeNativeDescriptor<ShaderBufferResource>(snapshot[i]);
+		auto       size       = ShaderRecompiler::IR::BufferBindingSize(metadata[i], descriptor);
+		if (descriptor.NumRecords() == UINT32_MAX) size = std::min<uint64_t>(size, 256u << 20u);
+		if (descriptor.Base48() == 0 || size == 0) continue;
+		uses.push_back({descriptor.Base48(), size, metadata[i].read || !metadata[i].written,
+		                metadata[i].written});
+	}
+	return uses;
+}
+
+static uint64_t SteadyNowMs() {
+	return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+	                                 std::chrono::steady_clock::now().time_since_epoch())
+	                                 .count());
+}
+
+void RenderExecutor::TaintSkippedDispatch() {
+	m_skip_taint.Taint(m_pending_uses, SteadyNowMs());
+	m_pending_uses.clear();
+}
+
+// Before a ready dispatch records: true when it reads memory a skipped dispatch was to write. It is
+// then skipped itself and its outputs are tainted. Otherwise what it writes is fresh again.
+// Only with --async-compute-wait-ms; costs one empty() test while nothing was skipped.
+static bool SkipOnTaintedInput(SkipTaint& taint, const ShaderStageRuntime& stage) {
+	if (Config::AsyncComputeWaitMs() == 0) return false;
+	if (taint.Empty()) return false;
+	const auto uses = ComputeBufferUses(stage);
+	const auto now  = SteadyNowMs();
+	if (taint.ReadsTainted(uses, now)) {
+		taint.Taint(uses, now);
+		static std::atomic<uint32_t> log_count {0};
+		if (log_count.fetch_add(1, std::memory_order_relaxed) < 64) {
+			LOGF("[skip] cs hash=0x%016" PRIx64 " reads a buffer a skipped dispatch was to write; "
+			     "skipped too (tainted ranges=%zu)\n",
+			     stage.module->info.shader_hash, taint.Size());
+		}
+		return true;
+	}
+	taint.ClearWritten(uses);
+	return false;
+}
+
 bool RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group_x,
                                     uint32_t thread_group_y, uint32_t thread_group_z, uint32_t mode,
                                     bool async_compute, bool allow_async) {
@@ -661,6 +713,7 @@ bool RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 	}
 
 	Common::LockGuard lock(m_context.GetMutex());
+	m_pending_uses.clear();
 	if (sh_ctx.GetCs().cs_regs.data_addr == 0) {
 		LOGF("GraphicsRenderDispatchDirect: temporary: ignoring dispatch with null CS shader, "
 		     "groups=%ux%ux%u mode=%u\n",
@@ -726,7 +779,13 @@ bool RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 		return true;
 	}
 	if (allow_async && !m_context.GetPipelineCache().EnsureComputePipeline(input_info, pending)) {
+		if (pending && Config::AsyncComputeWaitMs() != 0) {
+			m_pending_uses = ComputeBufferUses(input_info.stage);
+		}
 		return !pending;
+	}
+	if (allow_async && SkipOnTaintedInput(m_skip_taint, input_info.stage)) {
+		return true;
 	}
 
 	if (use_thread_dimensions) {
@@ -881,6 +940,7 @@ bool RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 	        (mode & Pm4::COMPUTE_DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS) != 0);
 	m_context.GetCommandScheduler().PopPendingOperations();
 	Common::LockGuard lock(m_context.GetMutex());
+	m_pending_uses.clear();
 	vk::DispatchIndirectCommand args {};
 	if (!m_context.GetBufferCache().HasGpuDirtyBytes(args_addr, sizeof(args)) &&
 	    LibKernel::Memory::TryReadBacking(args_addr, &args, sizeof(args)) &&
@@ -901,7 +961,13 @@ bool RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 		return !pending;
 	}
 	if (allow_async && !m_context.GetPipelineCache().EnsureComputePipeline(input_info, pending)) {
+		if (pending && Config::AsyncComputeWaitMs() != 0) {
+			m_pending_uses = ComputeBufferUses(input_info.stage);
+		}
 		return !pending;
+	}
+	if (allow_async && SkipOnTaintedInput(m_skip_taint, input_info.stage)) {
+		return true;
 	}
 	buffer.EndRendering();
 	auto& pipeline = m_context.GetPipelineCache().GetComputePipeline(input_info);

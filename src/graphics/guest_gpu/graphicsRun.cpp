@@ -779,6 +779,7 @@ void CommandProcessor::SuspendOrSkipDispatch() {
 		if (step.action == FlowPlan::WaitAction::Skip) {
 			Common::LockGuard lock(m_renderer.GetMutex());
 			m_renderer.GetPipelineCache().NoteDispatchSkipped(step.waited_ms);
+			m_renderer.GetRenderExecutor().TaintSkippedDispatch();
 			return;
 		}
 	}

@@ -541,6 +541,11 @@ add_executable(flow_plan_tests EXCLUDE_FROM_ALL
 target_include_directories(flow_plan_tests PRIVATE ${inc_headers})
 target_link_libraries(flow_plan_tests fmt::fmt)
 
+add_executable(skip_taint_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/SkipTaintTests.cpp"
+)
+target_include_directories(skip_taint_tests PRIVATE ${inc_headers})
+
 add_executable(wait_diagnostics_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/WaitDiagnosticsTests.cpp"
 )
