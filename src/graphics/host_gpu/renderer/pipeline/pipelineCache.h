@@ -137,6 +137,9 @@ struct ShaderModule {
 	bool                                         legacy_checked = true;
 	// Runtime only: emitted SPIR-V word count, for worker fault-report activity tags.
 	uint64_t                                     spirv_words    = 0;
+	// Runtime lookup keys, computed once when the module enters its program.
+	uint64_t                                     specialization_hash = 0;
+	uint64_t                                     function_code_hash  = 0;
 };
 
 // A draw's depth target and its first color_count color targets.
@@ -337,10 +340,13 @@ private:
 		ShaderRecompiler::IR::ResourcePlan           resource_plan;
 		ShaderRecompiler::IR::ResourceSnapshot       resources;
 		ShaderRecompiler::IR::ResourceSpecialization specialization;
+		uint64_t                                     specialization_hash = 0;
+		uint64_t                                     function_code_hash  = 0;
 		MaterializationMemo                          materialization_memo;
 		uint64_t                                     materialization_memo_hits = 0;
 		// A deque, so pipelines being made on workers keep valid pointers to their modules.
 		std::deque<ShaderModule>                     modules;
+		std::unordered_multimap<uint64_t, ShaderModule*> module_index;
 		bool                                         skip_dispatch   = false;
 		bool                                         logged_neg_hit  = false;
 		std::string                                  failure_reason;
