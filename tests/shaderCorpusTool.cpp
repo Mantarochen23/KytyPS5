@@ -233,7 +233,10 @@ void PopulateComputeInfo(const CorpusEntry& entry, ShaderComputeInputInfo& input
 	input.float_mode          = JsonValue(info, "float_mode", uint8_t {0xc0});
 	input.thread_ids_num      = static_cast<int>(JsonValue(info, "thread_ids_num", 0u));
 	input.tg_size_en          = info.value("tg_size_en", false);
-	input.workgroup_register  = static_cast<int>(JsonValue(info, "workgroup_register", 0u));
+	// The workgroup registers follow the user SGPRs; a dump from before this field was recorded
+	// has the same value in user_data_count (both come from COMPUTE_PGM_RSRC2.USER_SGPR).
+	input.workgroup_register = static_cast<int>(
+	    JsonValue(info, "workgroup_register", JsonValue(entry.record, "user_data_count", 0u)));
 	input.dispatch_thread_dimensions = info.value("dispatch_thread_dimensions", false);
 }
 
