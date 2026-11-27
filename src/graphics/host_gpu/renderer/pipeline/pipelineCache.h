@@ -461,7 +461,10 @@ private:
 	void        DestroyPipeline(const Pipeline& pipeline) const;
 	// Records the first use of a module in this run once per module the store has no rank for.
 	void        NoteModuleUse(const ShaderModule& module);
-	std::unique_ptr<WarmUpLoader>          m_warmup;
+	struct WarmUpLoaderDelete {
+		void operator()(WarmUpLoader* loader) const; // Where the type is complete.
+	};
+	std::unique_ptr<WarmUpLoader, WarmUpLoaderDelete> m_warmup;
 	std::atomic_bool                       m_warmup_ready {false};
 	std::unordered_map<uint64_t, uint32_t> m_use_rank; // Module id -> first-use rank.
 	uint32_t                               m_next_use_rank = 0;

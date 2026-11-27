@@ -357,6 +357,10 @@ struct PipelineCache::WarmUpLoader {
 	std::jthread                                               thread;
 };
 
+void PipelineCache::WarmUpLoaderDelete::operator()(WarmUpLoader* loader) const {
+	delete loader;
+}
+
 void PipelineCache::RunWarmUpLoader(std::stop_token stop) {
 	auto&             loader  = *m_warmup;
 	const auto        threads = Common::ParallelThreads();
@@ -788,7 +792,7 @@ void PipelineCache::WarmUp(const std::filesystem::path& path) {
 		    "[warmup] budget {} s: the title starts after {} of {} modules and {} of {} pipelines; "
 		    "the rest loads in the background\n",
 		    budget_ms / 1000u, prepared, modules.size(), created, pipeline_jobs.size()));
-		m_warmup                = std::make_unique<WarmUpLoader>();
+		m_warmup.reset(new WarmUpLoader());
 		auto& loader            = *m_warmup;
 		loader.start            = Clock::now();
 		loader.applied          = module_map;
