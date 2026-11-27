@@ -76,7 +76,7 @@ static void PrintUsage() {
 	         "                                       Implies --vulkan-validation; very slow.\n");
 	::printf("  --shader-validation                  Enable shader validation.\n");
 	::printf("  --auto-cross <seconds>               Debug: for unattended runs, report Cross pressed for 0.15 s\n"
-	         "                                       every 2 s during the first <seconds> of the run.\n");
+	         "                                       every 2 s for <seconds> from the title's first pad read.\n");
 	::printf("  --trace-calls[=<lib[,lib]>]          Debug: log system library calls (1st-4th and powers\n"
 	         "                                       of two; with <lib[,lib]>, log every call with args/result).\n");
 	::printf("  --keep-going                         Debug: skip draws and dispatches whose shader fails to\n"

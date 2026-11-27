@@ -1002,7 +1002,10 @@ void GameController::ReadState(ControllerState* state, bool* flag, int* count) {
 
 	// --auto-cross: unattended runs get past "press Cross" screens.
 	if (const auto seconds = Config::AutoCrossSeconds(); seconds > 0) {
-		const auto ms = static_cast<uint64_t>(Loader::Timer::GetTimeMs());
+		// The window starts at the title's first pad read, not at process start: a long shader
+		// store load before the title runs must not use it up.
+		static const auto first_read_ms = static_cast<uint64_t>(Loader::Timer::GetTimeMs());
+		const auto        ms            = static_cast<uint64_t>(Loader::Timer::GetTimeMs()) - first_read_ms;
 		if (ms < static_cast<uint64_t>(seconds) * 1000u && ms % 2000u < 150u) {
 			state->buttons |= PAD_BUTTON_CROSS;
 		}
