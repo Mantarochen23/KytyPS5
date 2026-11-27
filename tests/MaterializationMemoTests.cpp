@@ -427,7 +427,33 @@ void TestWriteBetweenWalkAndStore() {
   Check(Store(plain, inputs, reads) != nullptr, "no walk hashes: stored as before");
 }
 
+// A program whose memo keeps missing stops storing for Cooldown misses, then measures again; one
+// that hits often enough keeps storing.
+void TestStoreGate() {
+  using Gate = Libs::Graphics::MemoizedMaterialization::StoreGate;
+  Gate busy;
+  for (uint32_t i = 0; i < Gate::Window; i++) {
+    Check(busy.Allows(), "stores while measuring");
+    busy.Note(i % 8 == 0); // 8 hits in 64: enough
+  }
+  Check(busy.Allows(), "enough hits keep storing");
+
+  Gate missing;
+  for (uint32_t i = 0; i < Gate::Window - 1; i++) missing.Note(i < Gate::MinHits - 1);
+  Check(missing.Allows(), "not judged before the window is full");
+  missing.Note(false);
+  Check(!missing.Allows(), "too few hits: stores stop");
+  for (uint32_t i = 0; i < Gate::Cooldown - 1; i++) missing.Note(false);
+  Check(!missing.Allows(), "still cooling down one lookup before the end");
+  missing.Note(false);
+  Check(missing.Allows(), "measures again after the cooldown");
+  // The new window starts from zero.
+  for (uint32_t i = 0; i < Gate::Window; i++) missing.Note(true);
+  Check(missing.Allows(), "a program that settled down is stored again");
+}
+
 int main() {
+  TestStoreGate();
   TestHitWithoutChange();
   TestStampsSkipReads();
   TestWriteToEachRange();
