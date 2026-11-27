@@ -682,28 +682,34 @@ auto EmitImageAccess(ValueEmitContext& ctx, const IR::Inst& inst, uint32_t resul
 		ctx.Fail(inst, "has no indirect image runtime mapping");
 	}
 	const auto words_before = state.builder.FunctionWordCount();
-	const auto finish = [&](uint32_t value) {
-		RecordEmitContributor(state, image.heap ? "indirect-image-heap" : "indirect-image",
-		                      mem.resource, static_cast<uint32_t>(image.indirect_resources.size()),
-		                      1u, state.builder.FunctionWordCount() - words_before);
-		return value;
-	};
+	struct ContributorGuard {
+		EmitterState& state;
+		const char*   kind;
+		uint32_t      resource;
+		uint32_t      candidates;
+		size_t        before;
+		~ContributorGuard() {
+			RecordEmitContributor(state, kind, resource, candidates, 1u,
+			                      state.builder.FunctionWordCount() - before);
+		}
+	} contributor_guard {state, image.heap ? "indirect-image-heap" : "indirect-image", mem.resource,
+	                     static_cast<uint32_t>(image.indirect_resources.size()), words_before};
 	if (image.heap) {
 		const auto entry = EmitImageHeapEntry(state, key, image.indirect_mapping_offset);
 		const auto kinds = static_cast<uint32_t>(image.indirect_resources.size()) - 1u;
 		// One kind leaves every slot word a bare element.
-		if (kinds == 1u) return finish(emit(image.indirect_resources[1], entry));
+		if (kinds == 1u) return emit(image.indirect_resources[1], entry);
 		const auto element = Binary(state, spv::OpBitwiseAnd, TypeU32(state), entry,
 		                            ConstantU32(state, (1u << IR::ImageHeapKindShift) - 1u));
 		const auto EmitKind = [&](uint32_t kind) {
 			return emit(image.indirect_resources[kind + 1u], element);
 		};
-		return finish(EmitIndexSwitch(state,
+		return EmitIndexSwitch(state,
 		                       EmitImageHeapArm(state,
 		                                        Binary(state, spv::OpShiftRightLogical, TypeU32(state),
 		                                               entry, ConstantU32(state, IR::ImageHeapKindShift)),
 		                                        image.indirect_mapping_offset, kinds),
-		                       kinds, result_type, EmitKind));
+		                       kinds, result_type, EmitKind);
 	}
 	const auto selected = EmitIndirectResourceIndex(
 	    state, key, image.indirect_mapping_offset, image.indirect_search_iterations, 0u);
@@ -755,10 +761,10 @@ auto EmitImageAccess(ValueEmitContext& ctx, const IR::Inst& inst, uint32_t resul
 		const auto& group = groups[index];
 		return emit(group.resource, group.count == 1u ? 0u : slot);
 	};
-	return finish(groups.size() == 1u
+	return groups.size() == 1u
 	           ? EmitGroup(0u)
 	           : EmitIndexSwitch(state, group_index, static_cast<uint32_t>(groups.size()),
-	                             result_type, EmitGroup));
+	                             result_type, EmitGroup);
 }
 
 template <typename Emit>
