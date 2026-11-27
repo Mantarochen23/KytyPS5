@@ -140,6 +140,34 @@ enum class Counter : uint8_t {
 	PrefetchSkipped,
 	PumpAsyncCalls,
 	PumpAsyncSkipped,
+	// Why an image-heap rebind missed its fast return (one per failed condition, so a miss can count
+	// several), and which call sites bumped the two generations it compares. HeapSelfBump counts
+	// slow rebinds that ended with the heap-change generation already past the one they stored.
+	HeapMissPending,
+	HeapMissDescriptorGen,
+	HeapMissCacheGen,
+	HeapMissHeapGen,
+	HeapSelfBump,
+	CacheSelfBump,
+	HeapRepointCalls,
+	HeapRepointSlots,
+	HeapLayoutQuiet,
+	HeapBumpCpuDirty,
+	HeapBumpMaybeDirty,
+	HeapBumpBufferModified,
+	HeapBumpLayoutLeave,
+	HeapBumpUntrackHead,
+	HeapBumpUntrackTail,
+	HeapBumpUnregister,
+	HeapBumpUnmap,
+	CacheBumpRegister,
+	CacheBumpUnregister,
+	CacheBumpStencil,
+	CacheBumpGpuInvalidate,
+	CacheBumpCpuInvalidate,
+	CacheBumpClearMeta,
+	CacheBumpTouchMeta,
+	CacheBumpOther,
 	Count
 };
 
@@ -270,6 +298,7 @@ struct ReportLines {
 	std::string summary;
 	std::string arch;
 	std::string cuts;
+	std::string heap;
 };
 
 [[nodiscard]] std::array<uint64_t, CounterCount> SnapshotCounters();

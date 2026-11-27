@@ -71,6 +71,14 @@ private:
 	enum class State : uint8_t { Live, Stale, Buried };
 	enum class RetryKind : uint8_t { None, Dcc, Held };
 
+	// A slot of a view that selects an element. Lists may keep entries that no longer select it;
+	// readers check, and a list over twice its element's refs is compacted.
+	struct SlotRef {
+		uint64_t view = 0;
+		uint32_t slot = 0;
+		auto operator<=>(const SlotRef&) const = default;
+	};
+
 	struct Element {
 		Key      key;
 		ImageId  image;
@@ -85,6 +93,7 @@ private:
 		RetryKind retry = RetryKind::None;
 		uint64_t retry_stamp = 0; // Invalidates page-index entries when the element changes.
 		uint64_t candidate_stamp = 0;
+		std::vector<SlotRef> slot_refs;
 	};
 
 	struct ElementRef {
@@ -96,6 +105,7 @@ private:
 
 	struct View {
 		Memory&                      memory;
+		uint64_t                     id = 0;
 		uint64_t                     step    = 0;
 		uint64_t                     first   = 0;
 		uint64_t                     count   = 0;
@@ -139,6 +149,9 @@ private:
 	template <typename Fn>
 	bool     ForEachChanged(Fn&& fn, uint64_t* visited = nullptr);
 	void     Repoint();
+	void     AddSlotRef(uint32_t index, uint64_t view, uint32_t slot);
+	void     SweepResolutionIndex();
+	void     SweepImageIndex();
 	void     TakeChanges();
 	ImageId  CurrentImage(const Image::HeapChange& change);
 	uint32_t Allocate();
@@ -172,6 +185,7 @@ private:
 	uint64_t                                          m_entries_skipped = 0; // Test-visible proof count.
 	uint64_t                                          m_entries_resolved = 0; // Test-visible proof count.
 	uint64_t                                          m_resolve_calls    = 0; // Test-visible proof count.
+	uint64_t                                          m_repoint_slots    = 0; // Test-visible proof count.
 	std::deque<std::pair<uint64_t, uint32_t>>         m_retired; // Tick, element.
 	std::vector<std::pair<size_t, size_t>>            m_runs;
 	std::vector<uint32_t>                             m_scratch;
@@ -179,6 +193,12 @@ private:
 	std::vector<GuestRange>                           m_resolution_changes;
 	std::vector<uint64_t>                             m_changed_pages;
 	std::vector<uint32_t>                             m_retry_candidates;
+	std::unordered_map<uint64_t, View*>               m_views;  // By View::id.
+	uint64_t                                          m_next_view = 1;
+	std::vector<uint32_t>                             m_marked;  // Marked with slots still to move.
+	std::vector<uint32_t>                             m_repointing;
+	size_t m_resolution_refs = 0, m_resolution_refs_floor = 0; // Page index entries, and after a sweep.
+	size_t m_image_refs = 0, m_image_refs_floor = 0;           // m_image_elements entries, likewise.
 	std::vector<std::pair<uint32_t, vk::DescriptorImageInfo>> m_writes;
 	vk::DescriptorSetLayout                           m_layout = nullptr;
 	vk::DescriptorPool                                m_pool   = nullptr;

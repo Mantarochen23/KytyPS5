@@ -298,7 +298,9 @@ private:
 	void                      DeleteImage(ImageId id);
 	void                      FreeImage(ImageId id);
 	void                      TouchImage(Image& image);
-	void                      TouchResolutionGenerationLocked(uint64_t address, uint64_t size);
+	void                      TouchResolutionGenerationLocked(
+	    uint64_t address, uint64_t size,
+	    Common::FrameCost::Counter site = Common::FrameCost::Counter::CacheBumpOther);
 	// Returns the ranges whose discovery state changed after `generation`, together with one
 	// coherent generation that covers the returned records. ImageHeap is the sole consumer.
 	// `incomplete` is set when records after `generation` were dropped to bound the journal.

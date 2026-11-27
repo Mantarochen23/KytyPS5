@@ -327,6 +327,28 @@ ReportLines FormatWindow(const std::array<uint64_t, CounterCount>& delta, double
 	    Mean(delta, Counter::PrefetchSkipped, frames), Mean(delta, Counter::PumpAsyncCalls, frames),
 	    Mean(delta, Counter::PumpAsyncSkipped, frames), Config::FrameTimerSample(),
 	    Config::PrefetchBackoffExponent());
+	const auto total = [&](Counter counter) { return delta[static_cast<size_t>(counter)]; };
+	lines.heap = fmt::format(
+	    "[frame] heap rebinds={:.2f} fast={:.2f} miss_pending={} miss_descriptor_gen={} "
+	    "miss_cache_gen={} miss_heap_gen={} self_bump={} cache_self_bump={} layout_quiet={} repoint_calls={} "
+	    "repoint_slots={} heap_gen_bumps cpu_dirty={} maybe_dirty={} buffer_modified={} "
+	    "layout_leave={} untrack_head={} untrack_tail={} unregister={} unmap={} "
+	    "cache_gen_bumps register={} unregister={} stencil={} gpu_invalidate={} "
+	    "cpu_invalidate={} clear_meta={} touch_meta={} other={}\n",
+	    Mean(delta, Counter::ImageHeapRebindCalls, frames),
+	    Mean(delta, Counter::ImageHeapRebindFastCalls, frames), total(Counter::HeapMissPending),
+	    total(Counter::HeapMissDescriptorGen), total(Counter::HeapMissCacheGen),
+	    total(Counter::HeapMissHeapGen), total(Counter::HeapSelfBump), total(Counter::CacheSelfBump),
+	    total(Counter::HeapLayoutQuiet), total(Counter::HeapRepointCalls),
+	    total(Counter::HeapRepointSlots), total(Counter::HeapBumpCpuDirty),
+	    total(Counter::HeapBumpMaybeDirty), total(Counter::HeapBumpBufferModified),
+	    total(Counter::HeapBumpLayoutLeave), total(Counter::HeapBumpUntrackHead),
+	    total(Counter::HeapBumpUntrackTail), total(Counter::HeapBumpUnregister),
+	    total(Counter::HeapBumpUnmap), total(Counter::CacheBumpRegister),
+	    total(Counter::CacheBumpUnregister), total(Counter::CacheBumpStencil),
+	    total(Counter::CacheBumpGpuInvalidate), total(Counter::CacheBumpCpuInvalidate),
+	    total(Counter::CacheBumpClearMeta), total(Counter::CacheBumpTouchMeta),
+	    total(Counter::CacheBumpOther));
 	return lines;
 }
 
@@ -409,6 +431,7 @@ void FramePresented() noexcept {
 		Log::WriteToConsoleAndLog(lines.summary);
 		Log::WriteToConsoleAndLog(lines.arch);
 		Log::WriteToConsoleAndLog(lines.cuts);
+		Log::WriteToConsoleAndLog(lines.heap);
 	}
 	if (g_store_loaded.load(std::memory_order_relaxed) && !g_bad_warned) {
 		const auto hits   = delta[static_cast<size_t>(Counter::FindModuleHits)];

@@ -202,7 +202,7 @@ Image::Barriers Image::GetBarriers(vk::ImageLayout                      destinat
 		    return barrier.oldLayout == ReadLayout() &&
 		           barrier.srcAccessMask == vk::AccessFlagBits2::eShaderRead;
 	    })) {
-		HeapChanged();
+		HeapLayoutLeft();
 	}
 	state = {destination_stage, destination_access, destination_layout};
 	return barriers;

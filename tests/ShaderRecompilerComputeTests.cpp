@@ -353,6 +353,15 @@ struct ImageHeapTestAccess {
   static uint64_t EntriesVisited(const ImageHeap &heap) { return heap.m_entries_visited; }
   static uint64_t EntriesSkipped(const ImageHeap &heap) { return heap.m_entries_skipped; }
   static uint64_t EntriesResolved(const ImageHeap &heap) { return heap.m_entries_resolved; }
+  static uint64_t RepointSlots(const ImageHeap &heap) { return heap.m_repoint_slots; }
+  static size_t ResolutionRefs(const ImageHeap &heap) { return heap.m_resolution_refs; }
+  static void ToggleRetry(ImageHeap &heap, uint32_t entry, size_t times) {
+    const auto index = entry & ((1u << ShaderRecompiler::IR::ImageHeapKindShift) - 1u);
+    for (size_t i = 0; i < times; ++i) {
+      heap.SetRetry(index, ImageHeap::RetryKind::Dcc);
+      heap.SetRetry(index, ImageHeap::RetryKind::None);
+    }
+  }
   static void RetryEveryDraw(ImageHeap &heap, uint32_t entry) {
     heap.SetRetry(entry & ((1u << ShaderRecompiler::IR::ImageHeapKindShift) - 1u),
                   ImageHeap::RetryKind::Dcc);
@@ -6895,10 +6904,15 @@ public:
       Require(name, "descriptor entry resolved", ImageHeapTestAccess::ResolveCalls(heap) == ++resolves,
               "changed descriptor words did not resolve the entry");
       ImageHeapTestAccess::RetryEveryDraw(heap, filtered.slots[40]);
+      const auto repoint_before = ImageHeapTestAccess::RepointSlots(heap);
       textures.UnmapMemory(texture(2), 0x1000u);
       Require(name, "eviction discovery", acquire(sampled), "the view was declined");
       draw();
       const auto eviction_resolves = ImageHeapTestAccess::ResolveCalls(heap);
+      Require(name, "repoint visits only the moved slots",
+              ImageHeapTestAccess::RepointSlots(heap) > repoint_before &&
+                  ImageHeapTestAccess::RepointSlots(heap) - repoint_before <= 8u,
+              "an element change visited slots that do not select it");
       Require(name, "evicted entry resolved", eviction_resolves > resolves,
               "an evicted backing image did not resolve the entry");
       resolves = eviction_resolves;
@@ -6991,6 +7005,34 @@ public:
               image.backing.state.layout == vk::ImageLayout::eShaderReadOnlyOptimal &&
                   queued() == 0,
               "commit did not return a resident image to its read layout");
+      // Leaving the read layout alone does not take a rebind off its fast return, and the
+      // queue it fills is still drained by the commit.
+      Require(name, "settled", acquire(sampled), "the view was declined");
+      draw();
+      Require(name, "settled again", acquire(sampled), "the view was declined");
+      {
+        const auto fast_before = ImageHeapTestAccess::FastRebinds(heap);
+        image.Transit(vk::ImageLayout::eGeneral, vk::AccessFlagBits2::eShaderWrite, {},
+                      scheduler.Current().Handle());
+        heap.Rebind(executor);
+        Require(name, "layout leave stays fast",
+                ImageHeapTestAccess::FastRebinds(heap) == fast_before + 1u,
+                "a layout-only change of a resident image forced a full rebind");
+        heap.Commit(scheduler.Current(), vk::PipelineBindPoint::eCompute, layout);
+        Require(name, "layout leave returned",
+                image.backing.state.layout == vk::ImageLayout::eShaderReadOnlyOptimal &&
+                    queued() == 0,
+                "a layout-only change was not returned without a rebind");
+        scheduler.Finish();
+        heap.BeginDraw();
+      }
+      // Page index entries of elements that stopped waiting do not pile up.
+      ImageHeapTestAccess::ToggleRetry(heap, filtered.slots[0], 70000u);
+      TextureCacheTestAccess::TouchResolution(textures, base + 0x1f0000u, 0x1000u);
+      Require(name, "sweep discovery", acquire(sampled), "the view was declined");
+      draw();
+      Require(name, "retry index bounded", ImageHeapTestAccess::ResolutionRefs(heap) < 1024u,
+              "stale retry index entries were never dropped");
       // One that leaves it after discovery, as for a download, returns at commit too.
       Require(name, "late transit", acquire(sampled), "the view was declined");
       heap.Rebind(executor);

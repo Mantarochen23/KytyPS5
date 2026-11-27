@@ -126,6 +126,8 @@ ImageHeap::ImageHeap(RenderContext& context, PageManager& page_manager)
 	allocate.pSetLayouts        = &m_layout;
 	EXIT_IF(graphics.device.allocateDescriptorSets(&allocate, &m_set) != vk::Result::eSuccess);
 	graphics.image_heap_layout = m_layout;
+	Image::heap_layout_quiet.store(Config::PortEnabled(Config::Port::ImageHeapIncremental),
+	                               std::memory_order_relaxed);
 	// Slot word 0 selects element 0, which stays a null image.
 	m_elements.emplace_back();
 	m_writes.push_back({0u, {nullptr, nullptr, vk::ImageLayout::eShaderReadOnlyOptimal}});
@@ -136,6 +138,7 @@ ImageHeap::~ImageHeap() {
 	for (const auto& memory: m_memories) Unwatch(*memory);
 	auto& graphics             = m_context.GetGraphics();
 	graphics.image_heap_layout = nullptr;
+	Image::heap_layout_quiet.store(false, std::memory_order_relaxed);
 	graphics.device.destroyDescriptorPool(m_pool, nullptr);
 	graphics.device.destroyDescriptorSetLayout(m_layout, nullptr);
 }
@@ -191,6 +194,8 @@ bool ImageHeap::Acquire(const IR::ImageHeapRequest& request, IR::ImageHeapView& 
 		                                                  .count   = count,
 		                                                  .limit   = limit,
 		                                                  .root    = root});
+		created->id = m_next_view++;
+		m_views[created->id] = created.get();
 		created->slots.resize(bytes / 4u + 1u);
 		created->buffer = SlotBuffer(m_context, bytes);
 		UpdateProbes(*created, 0u, bytes);
@@ -331,6 +336,9 @@ void ImageHeap::Assign(View& view, size_t slot, uint32_t entry) {
 	const auto previous = std::exchange(view.slots[slot], entry);
 	Release(previous);
 	if (previous != entry) {
+		if ((entry & ElementMask) != 0u) {
+			AddSlotRef(entry & ElementMask, view.id, static_cast<uint32_t>(slot));
+		}
 		Widen(view.dirty_begin, view.dirty_end, slot, slot + 1u);
 		++m_descriptor_generation;
 	}
@@ -386,6 +394,7 @@ void ImageHeap::Retire() {
 void ImageHeap::Mark(uint32_t index, State state) {
 	auto& element = m_elements[index];
 	element.state = state;
+	if (element.refs != 0u) m_marked.push_back(index);
 	SetRetry(index, RetryKind::None);
 	if (const auto found = m_index.find(element.key);
 	    found != m_index.end() && found->second == index) {
@@ -408,6 +417,7 @@ void ImageHeap::SetRetry(uint32_t index, RetryKind retry) {
 		if (range.Empty()) return;
 		textures.ForEachPage(range.address, range.size, [&](uint64_t page) {
 			m_resolution_elements[page].push_back({index, element.retry_stamp});
+			++m_resolution_refs;
 		});
 	};
 	index_range(element.data);
@@ -434,23 +444,82 @@ bool ImageHeap::ForEachChanged(Fn&& fn, uint64_t* visited) {
 	return found;
 }
 
-// Moves the slots of every view off marked elements; pending draws keep reading those.
+void ImageHeap::AddSlotRef(uint32_t index, uint64_t view, uint32_t slot) {
+	auto& refs = m_elements[index].slot_refs;
+	refs.push_back({view, slot});
+	if (refs.size() <= 2u * static_cast<size_t>(m_elements[index].refs) + 32u) return;
+	// Slots that moved away leave their entries; keep the ones that still select the element.
+	std::ranges::sort(refs);
+	refs.erase(std::ranges::unique(refs).begin(), refs.end());
+	std::erase_if(refs, [&](const SlotRef& ref) {
+		const auto found = m_views.find(ref.view);
+		return found == m_views.end() || ref.slot >= found->second->slots.size() ||
+		       (found->second->slots[ref.slot] & ElementMask) != index;
+	});
+}
+
+// Moves the slots that select a marked element; pending draws keep reading those. Only the
+// slots of elements marked since the last call are visited.
 void ImageHeap::Repoint() {
-	for (const auto& memory: m_memories) {
-		for (const auto& view: memory->views) {
-			for (uint64_t probe = 0; probe < view->count; ++probe) {
-				const auto  slot    = (view->first + probe * view->step) / 4u;
-				const auto& element = m_elements[view->slots[slot] & ElementMask];
-				if (element.state == State::Buried) {
-					memory->dead[slot] = Hash(element.key.value);
-					Assign(*view, slot, 0u);
-				} else if (element.state == State::Stale) {
-					const auto key = element.key; // Intern may grow m_elements.
-					Assign(*view, slot, Intern(*view, element.kind, key));
-				}
+	Common::FrameCost::Add(Common::FrameCost::Counter::HeapRepointCalls);
+	m_repointing.clear();
+	m_repointing.swap(m_marked);
+	uint64_t visited = 0;
+	for (const auto index: m_repointing) {
+		auto refs = std::move(m_elements[index].slot_refs);
+		m_elements[index].slot_refs.clear();
+		for (const auto ref: refs) {
+			const auto found = m_views.find(ref.view);
+			if (found == m_views.end()) continue;
+			auto& view = *found->second;
+			if (ref.slot >= view.slots.size() || (view.slots[ref.slot] & ElementMask) != index) {
+				continue;
+			}
+			++visited;
+			const auto& element = m_elements[index];
+			if (element.state == State::Buried) {
+				view.memory.dead[ref.slot] = Hash(element.key.value);
+				Assign(view, ref.slot, 0u);
+			} else if (element.state == State::Stale) {
+				const auto key  = element.key; // Intern may grow m_elements.
+				const auto kind = element.kind;
+				Assign(view, ref.slot, Intern(view, kind, key));
 			}
 		}
 	}
+	m_repoint_slots += visited;
+	Common::FrameCost::Add(Common::FrameCost::Counter::HeapRepointSlots, visited);
+}
+
+// Page index entries of elements that no longer wait leave once they outnumber the live ones.
+void ImageHeap::SweepResolutionIndex() {
+	size_t kept = 0;
+	for (auto page = m_resolution_elements.begin(); page != m_resolution_elements.end();) {
+		std::erase_if(page->second, [&](const ElementRef& ref) {
+			const auto& element = m_elements[ref.index];
+			return element.retry == RetryKind::None || element.retry_stamp != ref.stamp;
+		});
+		kept += page->second.size();
+		page = page->second.empty() ? m_resolution_elements.erase(page) : std::next(page);
+	}
+	m_resolution_refs = m_resolution_refs_floor = kept;
+}
+
+// Elements of images that changed identity or left stay in m_image_elements until swept.
+void ImageHeap::SweepImageIndex() {
+	size_t kept = 0;
+	for (auto entry = m_image_elements.begin(); entry != m_image_elements.end();) {
+		std::erase_if(entry->second, [&](uint32_t index) {
+			const auto& element = m_elements[index];
+			return element.state != State::Live || !element.image ||
+			       element.serial != entry->first;
+		});
+		std::ranges::sort(entry->second);
+		entry->second.erase(std::ranges::unique(entry->second).begin(), entry->second.end());
+		kept += entry->second.size();
+		entry = entry->second.empty() ? m_image_elements.erase(entry) : std::next(entry);
+	}
+	m_image_refs = m_image_refs_floor = kept;
 }
 
 void ImageHeap::TakeChanges() {
@@ -542,10 +611,12 @@ void ImageHeap::Rebind(RenderExecutor& executor) {
 	const auto cache_generation     = textures.ResolutionGeneration();
 	const auto heap_change_generation =
 	    Image::heap_change_generation.load(std::memory_order_acquire);
-	if (Config::PortEnabled(Config::Port::ImageHeapIncremental) && m_pending.empty() &&
-	    m_descriptor_generation == m_rebound_descriptor_generation &&
-	    cache_generation == m_cache_generation &&
-	    heap_change_generation == m_heap_change_generation) {
+	const bool pending_clear = m_pending.empty();
+	const bool descriptor_ok = m_descriptor_generation == m_rebound_descriptor_generation;
+	const bool cache_ok      = cache_generation == m_cache_generation;
+	const bool heap_ok       = heap_change_generation == m_heap_change_generation;
+	if (Config::PortEnabled(Config::Port::ImageHeapIncremental) && pending_clear && descriptor_ok &&
+	    cache_ok && heap_ok) {
 		const auto skipped = static_cast<uint64_t>(m_retry_elements.size());
 		++m_fast_rebinds;
 		m_entries_skipped += skipped;
@@ -553,6 +624,11 @@ void ImageHeap::Rebind(RenderExecutor& executor) {
 		Common::FrameCost::Add(Common::FrameCost::Counter::ImageHeapEntriesSkipped, skipped);
 		return;
 	}
+	// Each failed condition counts, so one run names what keeps a rebind off the fast return.
+	if (!pending_clear) Common::FrameCost::Add(Common::FrameCost::Counter::HeapMissPending);
+	if (!descriptor_ok) Common::FrameCost::Add(Common::FrameCost::Counter::HeapMissDescriptorGen);
+	if (!cache_ok) Common::FrameCost::Add(Common::FrameCost::Counter::HeapMissCacheGen);
+	if (!heap_ok) Common::FrameCost::Add(Common::FrameCost::Counter::HeapMissHeapGen);
 	uint64_t entries_visited  = 0;
 	uint64_t entries_skipped  = 0;
 	uint64_t entries_resolved = 0;
@@ -629,6 +705,13 @@ void ImageHeap::Rebind(RenderExecutor& executor) {
 				element.candidate_stamp = candidate_stamp;
 				m_retry_candidates.push_back(ref.index);
 			}
+			// Entries of elements that stopped waiting are dropped when their page is visited.
+			const auto before = indexed->second.size();
+			std::erase_if(indexed->second, [&](const ElementRef& ref) {
+				const auto& element = m_elements[ref.index];
+				return element.retry == RetryKind::None || element.retry_stamp != ref.stamp;
+			});
+			m_resolution_refs -= before - indexed->second.size();
 		}
 		entries_skipped = m_retry_elements.size() - m_retry_candidates.size();
 	} else {
@@ -652,6 +735,7 @@ void ImageHeap::Rebind(RenderExecutor& executor) {
 			binding.layout     = image.ReadLayout();
 			binding.image_view = textures.FindTexture(binding.image_id, binding.desc);
 			m_image_elements[image.serial].push_back(index);
+			++m_image_refs;
 			if (binding.desc.info.metadata.kind == ImageMetadataKind::Dcc) {
 				SetRetry(index, RetryKind::Dcc);
 			}
@@ -668,6 +752,16 @@ void ImageHeap::Rebind(RenderExecutor& executor) {
 	m_cache_generation =
 	    textures.TakeResolutionChangesSince(m_cache_generation, m_resolution_changes);
 	m_rebound_descriptor_generation = m_descriptor_generation;
+	// A generation already past the stored one makes the next rebind slow again: a bump by this
+	// rebind's own work (or another thread's), named here so the heap line tells them apart.
+	if (Image::heap_change_generation.load(std::memory_order_acquire) != m_heap_change_generation) {
+		Common::FrameCost::Add(Common::FrameCost::Counter::HeapSelfBump);
+	}
+	if (textures.ResolutionGeneration() != m_cache_generation) {
+		Common::FrameCost::Add(Common::FrameCost::Counter::CacheSelfBump);
+	}
+	if (m_resolution_refs > 2u * m_resolution_refs_floor + 65536u) SweepResolutionIndex();
+	if (m_image_refs > 2u * m_image_refs_floor + 65536u) SweepImageIndex();
 	m_entries_visited += entries_visited;
 	m_entries_skipped += entries_skipped;
 	m_entries_resolved += entries_resolved;
@@ -711,6 +805,12 @@ void ImageHeap::Commit(CommandBuffer& buffer, vk::PipelineBindPoint bind_point,
 	{
 		std::scoped_lock lock {Image::heap_mutex};
 		m_changes.assign(Image::heap_changes.begin(), Image::heap_changes.end());
+		// Layout-only changes need nothing but this return, so they leave the queue here instead
+		// of waiting for a rebind that may not run.
+		if (Image::heap_layout_quiet.load(std::memory_order_relaxed)) {
+			std::erase_if(Image::heap_changes,
+			              [](const Image::HeapChange& change) { return change.layout_only; });
+		}
 	}
 	std::ranges::sort(m_changes, {}, &Image::HeapChange::serial);
 	std::erase_if(m_changes, [&](const Image::HeapChange& change) {
@@ -757,6 +857,7 @@ void ImageHeap::UnmapMemory(uint64_t address, uint64_t size) {
 		std::ranges::copy_if(m_changes, std::back_inserter(Image::heap_changes), other);
 		if (Image::heap_changes.size() != before) {
 			Image::heap_change_generation.fetch_add(1u, std::memory_order_release);
+			Common::FrameCost::Add(Common::FrameCost::Counter::HeapBumpUnmap);
 		}
 	}
 	std::erase_if(m_changes, other);
@@ -789,6 +890,7 @@ void ImageHeap::Drop(Memory& memory) {
 	Unwatch(memory);
 	for (auto& view: memory.views) {
 		std::erase(m_active, view.get());
+		m_views.erase(view->id);
 		for (uint64_t probe = 0; probe < view->count; ++probe) {
 			Release(view->slots[(view->first + probe * view->step) / 4u]);
 		}
