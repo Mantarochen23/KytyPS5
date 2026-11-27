@@ -23281,7 +23281,10 @@ public:
           shaders.SetEsShaderBase(vertex_shader);
           TextureCacheTestAccess::ClearImage(cache, scheduler.Current(), sparse_color.image_id,
               {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}, {});
-          const DrawIndirectArgs records{args_address + first * stride, 2, stride, offsets};
+          const DrawIndirectArgs records{.address = args_address + first * stride,
+                                         .count = 2,
+                                         .stride = stride,
+                                         .offsets = offsets};
           const bool drawn = indexed
               ? RenderExecutorTestAccess::DrawIndex(executor, scheduler.Current(),
                     {.index_count = 3, .index_addr = reinterpret_cast<const void *>(index_address),
@@ -23488,8 +23491,10 @@ public:
                                bool covered = true) {
           TextureCacheTestAccess::ClearImage(cache, scheduler.Current(), sparse_color.image_id,
               {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}, {});
-          const DrawIndirectArgs records{mesh_args_address + first * stride, count, stride,
-                                         offsets};
+          const DrawIndirectArgs records{.address = mesh_args_address + first * stride,
+                                         .count = count,
+                                         .stride = stride,
+                                         .offsets = offsets};
           read_covered(step, indexed
               ? RenderExecutorTestAccess::DrawIndex(executor, scheduler.Current(),
                     {.index_count = index_buffer_size,
