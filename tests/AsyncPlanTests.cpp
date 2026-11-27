@@ -51,7 +51,7 @@ struct Stage {
 			case Action::PostTranslation:
 				translation_job = true;
 				translation_jobs_posted++;
-				speculated = AsyncPlan::MaySpeculate(true, true, has_program);
+				speculated = AsyncPlan::MaySpeculate(1, true, has_program, true);
 				break;
 			default: break;
 		}
@@ -103,10 +103,13 @@ void TestLoadedFromStore() {
 // A speculative module that did not serve the dispatch that came back must not repeat: the second
 // translation is kept for the dispatch's own key.
 void TestSpeculationEndsAfterOneRound() {
-	Check(AsyncPlan::MaySpeculate(true, true, false), "first request may speculate");
-	Check(!AsyncPlan::MaySpeculate(true, true, true), "a known program may not");
-	Check(!AsyncPlan::MaySpeculate(true, false, false), "graphics stages may not");
-	Check(!AsyncPlan::MaySpeculate(false, true, false), "off means off");
+	Check(AsyncPlan::MaySpeculate(1, true, false, true), "first request may speculate");
+	Check(!AsyncPlan::MaySpeculate(1, true, true, true), "a known program may not");
+	Check(!AsyncPlan::MaySpeculate(1, false, false, true), "graphics stages may not");
+	Check(!AsyncPlan::MaySpeculate(0, true, false, true), "off means off");
+	// A prefetch from registration has no user data: its module would be built from zeros.
+	Check(!AsyncPlan::MaySpeculate(1, true, false, false), "no user data, no module by default");
+	Check(AsyncPlan::MaySpeculate(2, true, false, false), "the old behaviour can be turned on");
 
 	Stage stage;
 	Check(stage.Request(false, 0) == Action::PostTranslation, "request");

@@ -147,9 +147,11 @@ static void PrintUsage() {
 	         "                                       async shader jobs; 0 = unlimited. Default: 2.\n"
 	         "  --async-workers <n>                  Shader worker threads. 0 = hardware threads minus 4, at\n"
 	         "                                       least 2. Default: 0.\n"
-	         "  --async-speculative-modules <0|1>    Build the module of a finished compute translation on\n"
-	         "                                       the worker when its resources need no guest memory, so it\n"
-	         "                                       is stored at once. Default: 1.\n"
+	         "  --async-speculative-modules <0|1|2>  Build the module of a compute translation on the worker\n"
+	         "                                       when its resources need no guest memory, so it is stored at\n"
+	         "                                       once. 1 = only with the user data of a dispatch or of the\n"
+	         "                                       command scan; 2 = also for registration prefetches, which\n"
+	         "                                       have none (old behaviour). Default: 1.\n"
 	         "  --render-stall-report-s <n>          When no frame was recorded for n seconds, print one line\n"
 	         "                                       with what the render thread is doing, then every n\n"
 	         "                                       seconds. 0 = off. Default: 5.\n"
@@ -167,7 +169,14 @@ static void PrintUsage() {
 	         "                                       was recorded for more than <ms> and the render side is\n"
 	         "                                       busy with shaders. 0 = off. Default: 0.\n"
 	         "  --dump-registered-shaders <dir>      Write each distinct registered shader and index.jsonl\n"
-	         "                                       through a bounded background queue. Default: off.\n");
+	         "                                       through a bounded background queue. Default: off.\n"
+	         "  --async-compute-wait-ms <n>          Bring-up: a compute dispatch whose shader is not ready\n"
+	         "                                       suspends its queue at most n ms, then is skipped for this\n"
+	         "                                       use (its outputs stay as they were) while the build goes\n"
+	         "                                       on. 0 = wait for ever. Default: 0.\n"
+	         "  --async-lookahead <0|1>              The scan of submitted commands also reads compute user\n"
+	         "                                       data, so shaders whose resources follow from it are\n"
+	         "                                       built before their dispatch is reached. Default: 1.\n");
 }
 
 static bool NextArg(int argc, char* argv[], int& index, std::string& out) {
@@ -614,6 +623,16 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				return false;
 			}
 			options.config.dump_registered_shaders_folder = Common::PathFromUtf8(value);
+		} else if (arg == "--async-compute-wait-ms") {
+			if (!ParseUint32(value, options.config.async_compute_wait_ms)) {
+				::printf("invalid async compute wait value: %s\n", value.c_str());
+				return false;
+			}
+		} else if (arg == "--async-lookahead") {
+			if (!ParseUint32(value, options.config.async_lookahead)) {
+				::printf("invalid async lookahead value: %s\n", value.c_str());
+				return false;
+			}
 		} else {
 			::printf("unknown option: %s\n", arg.c_str());
 			return false;

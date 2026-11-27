@@ -506,6 +506,18 @@ uint32_t AsyncWorkers() {
 	return g_config != nullptr ? g_config->async_workers : 0u;
 }
 
+uint32_t AsyncSpeculativeModulesMode() {
+	return g_config != nullptr ? g_config->async_speculative_modules : 1u;
+}
+
+uint32_t AsyncComputeWaitMs() {
+	return g_config != nullptr ? g_config->async_compute_wait_ms : 0u;
+}
+
+bool AsyncLookaheadEnabled() {
+	return g_config == nullptr || g_config->async_lookahead != 0u;
+}
+
 bool AsyncSpeculativeModules() {
 	return g_config == nullptr || g_config->async_speculative_modules != 0u;
 }

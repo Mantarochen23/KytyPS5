@@ -5,6 +5,7 @@
 #include "common/emulatorConfig.h"
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/guest_gpu/pssr.h"
+#include "graphics/host_gpu/renderer/pipeline/flowPlan.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 
@@ -52,6 +53,8 @@ private:
 	bool                      m_suspended            = false;
 	bool                      m_suspended_for_shader = false;
 	bool                      m_made_progress        = false;
+	// How long the dispatch this execution is suspended at has waited for its shader.
+	FlowPlan::DispatchWait    m_shader_wait;
 };
 
 class CommandProcessor {
@@ -129,6 +132,11 @@ private:
 	void ProcessPm4(Pm4Execution& execution);
 	void SuspendPm4();
 	void SuspendPm4ForShader();
+	// The dispatch just tried is not ready (its shader is being built): true when it has waited
+	// as long as --async-compute-wait-ms allows, so that it is skipped; otherwise suspends the queue.
+	void SuspendOrSkipDispatch();
+	// The dispatch ran (or is over); its wait starts afresh.
+	void NoteDispatchDone();
 	void                CountDraw();
 	uint32_t            NumInstances();
 	const void*         IndexAddress(uint32_t first_index) const;

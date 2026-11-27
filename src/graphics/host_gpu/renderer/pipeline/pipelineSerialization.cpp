@@ -312,10 +312,11 @@ PipelineCache::LoadRecordStatus PipelineCache::LoadRecord(std::span<const uint8_
 				m_program_cache.erase(program);
 				return LoadRecordStatus::Failed;
 			}
+			const auto module_begin = std::chrono::steady_clock::now();
 			if (keep_on_error) {
-				Common::RecoverableScope scope;
-				try {
-					module.module = CompileSPV(spirv, m_graphics.device);
+			Common::RecoverableScope scope;
+			try {
+			module.module = CompileSPV(spirv, m_graphics.device);
 				} catch (const Common::RecoverableFailure&) {
 					if (inserted) {
 						m_program_cache.erase(program);
@@ -328,7 +329,18 @@ PipelineCache::LoadRecordStatus PipelineCache::LoadRecord(std::span<const uint8_
 					return LoadRecordStatus::Failed;
 				}
 			} else {
-				module.module = CompileSPV(spirv, m_graphics.device);
+			module.module = CompileSPV(spirv, m_graphics.device);
+			}
+			{
+			// One line per stored module made at start: the driver's share of the warm boot.
+			BuildTiming::Build build {.stage = ShaderRecompiler::StageName(module.info.stage),
+			.hash = module.info.shader_hash,
+			.words = spirv.size(),
+			.where = "render",
+			.reason = "warmup"};
+			build.steps.module_us = BuildTiming::ElapsedUs(module_begin);
+			build.steps.total_us = build.steps.module_us;
+			NoteBuild(build);
 			}
 			program->second.modules.push_back(std::move(module));
 			break;

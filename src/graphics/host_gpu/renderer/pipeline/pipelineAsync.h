@@ -57,6 +57,9 @@ struct PipelineCache::Async {
 		uint64_t asked = 0;
 		// Estimated memory of the translated IR.
 		uint64_t bytes = 0;
+		// What the translation job spent, to show in the build line of the module made from it.
+		uint64_t translate_us = 0;
+		uint64_t plan_us      = 0;
 	};
 
 	// A job a worker has or will run for a program, and what it does.
@@ -150,6 +153,9 @@ struct PipelineCache::Async {
 	};
 	Counters counters;
 	uint64_t last_store_report_ms = 0;
+	// Owned by the PipelineCache: the builds and the skipped dispatches of the status period.
+	BuildTiming::Totals*   build_totals = nullptr;
+	FlowPlan::SkipLedger*  skipped_dispatches = nullptr;
 
 	// Render thread only: when the game last drew into each render target, and in which of the
 	// frames before that.

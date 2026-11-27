@@ -133,7 +133,7 @@ void PipelineCache::RequestAsync(const ProgramKey& key, Program* program,
                                  const ShaderParams& params, const InputInfo& input_info,
                                  const ShaderRecompiler::CompileOptions& options,
                                  ShaderRecompiler::IR::PushData::Window push_data, AsyncMode mode,
-                                 bool urgent_translate) {
+                                 bool urgent_translate, bool user_data_known) {
 	static_assert(std::is_same_v<InputInfo, ShaderVertexInputInfo> ||
 	              std::is_same_v<InputInfo, ShaderPixelInputInfo> ||
 	              std::is_same_v<InputInfo, ShaderComputeInputInfo>);
@@ -171,11 +171,15 @@ void PipelineCache::RequestAsync(const ProgramKey& key, Program* program,
 			auto translation = async->translations.extract(found);
 			auto inputs      = std::move(translation.mapped().inputs);
 			async->counters.module_jobs++;
+			const char* reason = std::is_same_v<InputInfo, ShaderComputeInputInfo> ? "dispatch" : "draw";
 			auto job = async->workers.Post([this, async, device = m_graphics.device, inputs,
-			                                compiling, push_data,
-			                                specialization = program->specialization,
-			                                translated = std::move(translation.mapped().translated)]() mutable {
-				std::optional<Common::RecoverableScope> scope;
+			compiling, push_data, reason, post_time = std::chrono::steady_clock::now(),
+			translate_us = translation.mapped().translate_us,
+			plan_us = translation.mapped().plan_us,
+			specialization = program->specialization,
+			translated = std::move(translation.mapped().translated)]() mutable {
+			const auto queue_wait_us = BuildTiming::ElapsedUs(post_time);
+			std::optional<Common::RecoverableScope> scope;
 				if (Config::KeepGoingEnabled()) {
 					scope.emplace();
 				}
@@ -188,8 +192,12 @@ void PipelineCache::RequestAsync(const ProgramKey& key, Program* program,
 					auto compiled = CompileStage(device, inputs->key, inputs->options,
 					                             std::move(*translated), specialization,
 					                             push_data, {});
-					pending = std::make_unique<Async::PendingStage>(device, std::move(compiled));
-				} catch (const Common::RecoverableFailure& e) {
+					                             compiled.steps.translate_us = translate_us;
+					                             compiled.steps.plan_us = plan_us;
+					                             compiled.steps.queue_wait_us = queue_wait_us;
+					                             compiled.steps.total_us = BuildTiming::ElapsedUs(post_time);
+					                             pending = std::make_unique<Async::PendingStage>(device, std::move(compiled));
+					                             } catch (const Common::RecoverableFailure& e) {
 					failed      = true;
 					fail_reason = e.what();
 					fail_file   = e.file;
@@ -198,9 +206,9 @@ void PipelineCache::RequestAsync(const ProgramKey& key, Program* program,
 					failed      = true;
 					fail_reason = e.what();
 				}
-				async->Finish([this, inputs, compiling, push_data, failed,
-				               fail_reason = std::move(fail_reason), fail_file, fail_line,
-				               pending     = std::move(pending)]() mutable {
+				async->Finish([this, inputs, compiling, push_data, failed, reason,
+				fail_reason = std::move(fail_reason), fail_file, fail_line,
+				pending = std::move(pending)]() mutable {
 					m_async->Settle(compiling);
 					if (failed) {
 						m_async->counters.module_failed++;
@@ -230,10 +238,16 @@ void PipelineCache::RequestAsync(const ProgramKey& key, Program* program,
 						return;
 					}
 					pending->taken = true;
+					NoteBuild({.stage = ShaderRecompiler::StageName(inputs->key.stage),
+					.hash = inputs->key.hash,
+					.words = pending->stage.spirv.size(),
+					.steps = pending->stage.steps,
+					.where = "worker",
+					.reason = reason});
 					AddModule(cached, inputs->key, std::move(pending->stage));
 					m_async->counters.modules_ready++;
 					AsyncLog(
-					    "ShaderRecompiler {} translation end: hash=0x{:016x} outcome=emitted (async)",
+					"ShaderRecompiler {} translation end: hash=0x{:016x} outcome=emitted (async)",
 					    ShaderRecompiler::StageName(inputs->key.stage), inputs->key.hash);
 				}, compiling);
 			}, ShaderWorkers::Priority::Urgent, /*waited=*/true);
@@ -262,10 +276,20 @@ void PipelineCache::RequestAsync(const ProgramKey& key, Program* program,
 
 	async->counters.requested++;
 	const bool speculate = AsyncPlan::MaySpeculate(
-	    Config::AsyncSpeculativeModules(), std::is_same_v<InputInfo, ShaderComputeInputInfo>,
-	    has_program);
-	auto job = async->workers.Post([this, async, inputs, translating, speculate,
+	    Config::AsyncSpeculativeModulesMode(), std::is_same_v<InputInfo, ShaderComputeInputInfo>,
+	    has_program, user_data_known);
+	// Whose user data the module is built from: the scan of the command stream's (lookahead), or
+	// the dispatch's own.
+	const bool        from_scan = speculate && mode == AsyncMode::PrefetchOnly && user_data_known;
+	const char* const reason    = mode == AsyncMode::PrefetchOnly ? "prefetch"
+	                              : std::is_same_v<InputInfo, ShaderComputeInputInfo> ? "dispatch"
+	                                                                                  : "draw";
+	auto job = async->workers.Post([this, async, inputs, translating, speculate, from_scan, reason,
+	                                post_time = std::chrono::steady_clock::now(),
 	                                device = m_graphics.device] {
+		const auto queue_wait_us = BuildTiming::ElapsedUs(post_time);
+		uint64_t   translate_us = 0;
+		uint64_t   plan_us      = 0;
 		std::optional<Common::RecoverableScope> scope;
 		if (Config::KeepGoingEnabled()) {
 			scope.emplace();
@@ -353,7 +377,8 @@ void PipelineCache::RequestAsync(const ProgramKey& key, Program* program,
 			} catch (const std::exception&) {
 			}
 		}
-		async->Finish([this, inputs, translating, failed, sync_only, speculated, lost,
+		async->Finish([this, inputs, translating, failed, sync_only, speculated, lost, from_scan,
+		               reason, translate_us, plan_us,
 		               fail_reason = std::move(fail_reason), fail_file, fail_line,
 		               translated  = std::move(translated),
 		               plan        = std::move(plan),
@@ -396,7 +421,17 @@ void PipelineCache::RequestAsync(const ProgramKey& key, Program* program,
 				auto& cached = m_program_cache.at(inputs->key);
 				if (cached.FindCandidate(pending->stage.module.specialization, {}) == nullptr) {
 					pending->taken = true;
-					AddModule(cached, inputs->key, std::move(pending->stage));
+					NoteBuild({.stage  = ShaderRecompiler::StageName(inputs->key.stage),
+					           .hash   = inputs->key.hash,
+					           .words  = pending->stage.spirv.size(),
+					           .steps  = pending->stage.steps,
+					           .where  = "worker",
+					           .reason = reason});
+					const auto& added = AddModule(cached, inputs->key, std::move(pending->stage));
+					if (from_scan) {
+						m_lookahead_modules.insert(added.id);
+						m_prefetch.lookahead_modules_built++;
+					}
 				}
 				m_async->counters.speculative++;
 				m_async->counters.modules_ready++;
@@ -407,7 +442,7 @@ void PipelineCache::RequestAsync(const ProgramKey& key, Program* program,
 			const auto bytes = EstimateIrBytes(*translated);
 			m_async->translations.insert_or_assign(
 			    inputs->key, Async::Translation {inputs, std::move(translated), AskClockMs(),
-			                                     AskClockMs(), bytes});
+			                                     AskClockMs(), bytes, translate_us, plan_us});
 		}, translating);
 	}, urgent_translate ? ShaderWorkers::Priority::Urgent : ShaderWorkers::Priority::Normal,
 	   mode == AsyncMode::On);
@@ -422,19 +457,50 @@ void PipelineCache::RequestAsync(const ProgramKey& key, Program* program,
 template void PipelineCache::RequestAsync<ShaderVertexInputInfo>(
     const ProgramKey&, Program*, const ShaderParams&, const ShaderVertexInputInfo&,
     const ShaderRecompiler::CompileOptions&, ShaderRecompiler::IR::PushData::Window, AsyncMode,
-    bool);
+    bool, bool);
 template void PipelineCache::RequestAsync<ShaderPixelInputInfo>(
     const ProgramKey&, Program*, const ShaderParams&, const ShaderPixelInputInfo&,
     const ShaderRecompiler::CompileOptions&, ShaderRecompiler::IR::PushData::Window, AsyncMode,
-    bool);
+    bool, bool);
 template void PipelineCache::RequestAsync<ShaderComputeInputInfo>(
     const ProgramKey&, Program*, const ShaderParams&, const ShaderComputeInputInfo&,
     const ShaderRecompiler::CompileOptions&, ShaderRecompiler::IR::PushData::Window, AsyncMode,
-    bool);
+    bool, bool);
 
 // A compute program with GPU-selected calls is translated and linked on the render thread (it
 // reads the callees from guest memory), but compiling the module from that translation takes the
 // longest, and needs nothing but copies: it runs on a worker and the dispatch is suspended.
+void PipelineCache::NoteDispatchSkipped(uint64_t waited_ms) {
+	// The dispatch is not retried: its request is over.
+	(void)m_requests.Begin(m_pending_compute_identity);
+	const auto hash = m_pending_compute_hash;
+	const auto use  = m_skipped_dispatches.Note(hash, waited_ms);
+	if (use == 1) {
+		std::printf("[skip] cs hash=0x%016" PRIx64 " waited=%" PRIu64 "ms use=#1\n", hash,
+		            waited_ms);
+	}
+}
+
+void PipelineCache::ReportPrefetch() const {
+const auto& p = m_prefetch;
+const auto registrations = ShaderComputePrefetchQueueStats();
+std::printf("[prefetch] registrations: compute %" PRIu64 " (nonzero code offset %" PRIu64
+") queued %" PRIu64 " dropped-queue-full %" PRIu64 "\n",
+registrations.registered, registrations.nonzero_offset, registrations.queued,
+registrations.queue_full);
+	std::printf("[prefetch] scan/registration calls=%" PRIu64 " queued=%" PRIu64
+	            " (with user data %" PRIu64 ") not-registered=%" PRIu64 " known=%" PRIu64
+	            " in-flight=%" PRIu64 "; lookahead modules built=%" PRIu64 " used=%" PRIu64
+	            " unused=%" PRIu64 "; served from store: %" PRIu64 " hashes, %" PRIu64
+	            " uses; skipped dispatches: %" PRIu64 " hashes, %" PRIu64 " uses, %" PRIu64
+	            " ms waited\n",
+	            p.requested, p.queued, p.with_data, p.unmapped, p.known, p.in_flight,
+	            p.lookahead_modules_built, p.lookahead_hits,
+	            p.lookahead_modules_built - std::min(p.lookahead_hits, p.lookahead_modules_built),
+	            m_served.Hashes(), m_served.Uses(), m_skipped_dispatches.Hashes(),
+	            m_skipped_dispatches.Total(), m_skipped_dispatches.WaitedMs());
+}
+
 bool PipelineCache::PostCallProgramModule(const ProgramKey& key, Program& program,
                                           const ShaderParams&                     params,
                                           const ShaderComputeInputInfo&           input_info,
@@ -447,10 +513,12 @@ bool PipelineCache::PostCallProgramModule(const ProgramKey& key, Program& progra
 	async->counters.module_jobs++;
 	auto job = async->workers.Post(
 	    [this, async, device = m_graphics.device, inputs, compiling, push_data,
+	     post_time = std::chrono::steady_clock::now(),
 	     specialization = program.specialization,
 	     function_code  = std::vector<uint32_t>(program.FunctionCode().begin(),
 	                                            program.FunctionCode().end()),
 	     translated = std::make_unique<ShaderRecompiler::TranslateResult>(std::move(translated))]() mutable {
+		    const auto queue_wait_us = BuildTiming::ElapsedUs(post_time);
 		    std::optional<Common::RecoverableScope> scope;
 		    if (Config::KeepGoingEnabled()) {
 			    scope.emplace();
@@ -462,6 +530,8 @@ bool PipelineCache::PostCallProgramModule(const ProgramKey& key, Program& progra
 			    auto compiled = CompileStage(device, inputs->key, inputs->options,
 			                                 std::move(*translated), specialization, push_data,
 			                                 function_code);
+			    compiled.steps.queue_wait_us = queue_wait_us;
+			    compiled.steps.total_us      = BuildTiming::ElapsedUs(post_time);
 			    pending = std::make_unique<Async::PendingStage>(device, std::move(compiled));
 		    } catch (const std::exception& e) {
 			    failed      = true;
@@ -483,6 +553,12 @@ bool PipelineCache::PostCallProgramModule(const ProgramKey& key, Program& progra
 				    return;
 			    }
 			    pending->taken = true;
+			    NoteBuild({.stage  = ShaderRecompiler::StageName(inputs->key.stage),
+			               .hash   = inputs->key.hash,
+			               .words  = pending->stage.spirv.size(),
+			               .steps  = pending->stage.steps,
+			               .where  = "worker",
+			               .reason = "dispatch"});
 			    // Programs with calls are not stored: they depend on their callees' code.
 			    AddModule(cached, inputs->key, std::move(pending->stage));
 			    m_async->counters.modules_ready++;
@@ -562,6 +638,7 @@ void PipelineCache::PumpAsync() {
 		m_async->last_store_report_ms = now;
 		m_async->ReportStore(m_store.GetCounts());
 		ReportLookups();
+		ReportPrefetch();
 	}
 }
 
@@ -680,8 +757,10 @@ void PipelineCache::Async::ReportStatus() {
 	const auto skipped_total = TotalDrawsSkippedForShaders();
 	const auto skipped       = skipped_total - reported_skipped;
 	reported_skipped         = skipped_total;
+	const auto skipped_dispatches_now =
+	skipped_dispatches != nullptr ? skipped_dispatches->TakePeriod() : uint64_t {0};
 	const bool busy = !in_flight.empty() || !translations.empty() || pipelines_building != 0 ||
-	                  skipped != 0 || !backlog.empty();
+	skipped != 0 || !backlog.empty() || skipped_dispatches_now != 0;
 	if (busy) {
 		const auto   finished = workers.FinishedJobs();
 		const double window_s = static_cast<double>(std::max<uint64_t>(now - last_status_ms, 1)) / 1000.0;
@@ -692,7 +771,8 @@ void PipelineCache::Async::ReportStatus() {
 		            " (failed %" PRIu64 "), module-compiling %zu of %" PRIu64 " jobs, modules ready %" PRIu64
 		            " (speculative %" PRIu64 ", lost %" PRIu64 ", failed %" PRIu64
 		            "), pipeline-compiling %u of %" PRIu64 " jobs, pipelines ready %" PRIu64
-		            " (failed %" PRIu64 "), expired %" PRIu64 ", wanted %zu\n",
+		            " (failed %" PRIu64 "), expired %" PRIu64 ", wanted %zu; skipped dispatches %" PRIu64
+		            "/2s (%" PRIu64 " total); %s\n",
 		            translating, compiling, translations.size(),
 		            static_cast<double>(oldest) / 1000.0, pipelines_building, workers.Queued(),
 		            skipped, redrawn, targets.size(), workers.Busy(), workers.ThreadCount(),
@@ -703,13 +783,19 @@ void PipelineCache::Async::ReportStatus() {
 		            compiling, counters.module_jobs, counters.modules_ready, counters.speculative,
 		            counters.speculative_lost, counters.module_failed, pipelines_building,
 		            counters.pipeline_jobs, counters.pipelines_ready, counters.pipeline_failed,
-		            counters.expired, wanted.size());
-		reported_finished = finished;
+		            counters.expired, wanted.size(), skipped_dispatches_now,
+		            skipped_dispatches != nullptr ? skipped_dispatches->Total() : uint64_t {0},
+		            build_totals != nullptr && !build_totals->Empty() ? build_totals->Text().c_str()
+		            : "no builds");
+		            reported_finished = finished;
 	} else if (was_busy) {
 		std::printf("Async: idle\n");
 	}
-	was_busy            = busy;
-	pump_us             = 0;
+	was_busy = busy;
+	if (build_totals != nullptr) {
+	*build_totals = {};
+	}
+	pump_us = 0;
 	pump_worst_us       = 0;
 	pump_applied        = 0;
 	reported_finished   = workers.FinishedJobs();
@@ -762,8 +848,12 @@ bool PipelineCache::EnsureGraphicsPipeline(const CommandBuffer&   command,
 		m_async->counters.pipeline_jobs++;
 		// The map's nodes do not move, and the stages' modules sit in deques that only grow.
 		m_async->workers.Post([this, async = m_async.get(), &graphics = m_graphics,
-		                       driver_cache = m_driver_cache, &pipeline, key, stages] {
-			std::optional<Common::RecoverableScope> scope;
+		driver_cache = m_driver_cache, &pipeline, key, stages,
+		post_time = std::chrono::steady_clock::now(),
+		hash = stages[0] != nullptr ? stages[0]->info.shader_hash : uint64_t {0}] {
+		const auto queue_wait_us = BuildTiming::ElapsedUs(post_time);
+		uint64_t pipeline_us = 0;
+		std::optional<Common::RecoverableScope> scope;
 			if (Config::KeepGoingEnabled()) {
 				scope.emplace();
 			}
@@ -774,13 +864,16 @@ bool PipelineCache::EnsureGraphicsPipeline(const CommandBuffer&   command,
 				    Common::DebugCounters::Counter::PipelinesCreated,
 				    Common::DebugCounters::Counter::PipelineCreateNs,
 				    Common::DebugCounters::Peak::PipelineCreateNs);
+				const auto begin = std::chrono::steady_clock::now();
 				CreatePipelineInternal(graphics, pipeline, key, stages, driver_cache);
-			} catch (const std::exception& e) {
-				failed      = true;
+				pipeline_us = BuildTiming::ElapsedUs(begin);
+				} catch (const std::exception& e) {
+				failed = true;
 				fail_reason = e.what();
-			}
-			async->Finish([this, &pipeline, key, failed,
-			               fail_reason = std::move(fail_reason)]() mutable {
+				}
+				const auto total_us = BuildTiming::ElapsedUs(post_time);
+				async->Finish([this, &pipeline, key, failed, hash, pipeline_us, queue_wait_us, total_us,
+				fail_reason = std::move(fail_reason)]() mutable {
 				m_async->pipelines_building--;
 				pipeline.pending = false;
 				if (failed) {
@@ -791,6 +884,11 @@ bool PipelineCache::EnsureGraphicsPipeline(const CommandBuffer&   command,
 					return;
 				}
 				m_async->counters.pipelines_ready++;
+				NoteBuild({.stage = "pipeline-gfx",
+				.hash = hash,
+				.steps = {.pipeline_us = pipeline_us, .queue_wait_us = queue_wait_us, .total_us = total_us},
+				.where = "worker",
+				.reason = "draw"});
 				StorePipeline(key);
 				CheckpointDriverCache();
 			});
@@ -821,8 +919,11 @@ bool PipelineCache::EnsureComputePipeline(const ShaderComputeInputInfo& input_in
 		m_async->counters.pipeline_jobs++;
 		// Map nodes stay stable and program module deques only grow while workers run.
 		m_async->workers.Post([this, async = m_async.get(), &graphics = m_graphics,
-		                       driver_cache = m_driver_cache, &pipeline, &module] {
-			std::optional<Common::RecoverableScope> scope;
+		driver_cache = m_driver_cache, &pipeline, &module,
+		post_time = std::chrono::steady_clock::now()] {
+		const auto queue_wait_us = BuildTiming::ElapsedUs(post_time);
+		uint64_t pipeline_us = 0;
+		std::optional<Common::RecoverableScope> scope;
 			if (Config::KeepGoingEnabled()) {
 				scope.emplace();
 			}
@@ -833,13 +934,16 @@ bool PipelineCache::EnsureComputePipeline(const ShaderComputeInputInfo& input_in
 				    Common::DebugCounters::Counter::PipelinesCreated,
 				    Common::DebugCounters::Counter::PipelineCreateNs,
 				    Common::DebugCounters::Peak::PipelineCreateNs);
+				const auto begin = std::chrono::steady_clock::now();
 				CreatePipelineInternal(graphics, pipeline, module, driver_cache);
-			} catch (const std::exception& e) {
-				failed      = true;
+				pipeline_us = BuildTiming::ElapsedUs(begin);
+				} catch (const std::exception& e) {
+				failed = true;
 				fail_reason = e.what();
-			}
-			async->Finish([this, &pipeline, hash = module.info.shader_hash, failed,
-			               fail_reason = std::move(fail_reason)]() mutable {
+				}
+				const auto total_us = BuildTiming::ElapsedUs(post_time);
+				async->Finish([this, &pipeline, hash = module.info.shader_hash, failed, pipeline_us,
+				queue_wait_us, total_us, fail_reason = std::move(fail_reason)]() mutable {
 				m_async->pipelines_building--;
 				pipeline.pending = false;
 				if (failed) {
@@ -851,16 +955,25 @@ bool PipelineCache::EnsureComputePipeline(const ShaderComputeInputInfo& input_in
 					return;
 				}
 				m_async->counters.pipelines_ready++;
+				NoteBuild({.stage = "pipeline-cs",
+				.hash = hash,
+				.steps = {.pipeline_us = pipeline_us, .queue_wait_us = queue_wait_us, .total_us = total_us},
+				.where = "worker",
+				.reason = "dispatch"});
 				CheckpointDriverCache();
-			});
+				});
 		}, ShaderWorkers::Priority::Urgent, /*waited=*/true);
 	}
 	if (pipeline.failed) {
 		return false;
 	}
 	if (pipeline.pending) {
-		pending = true;
-		RenderActivity::NoteDetail("pipeline compiling");
+	pending = true;
+	// The dispatch comes back until the pipeline is ready: one request, not many.
+	m_requests.Retry(ProgramVariantKey());
+	m_pending_compute_hash = module.info.shader_hash;
+	m_pending_compute_identity = ProgramVariantKey();
+	RenderActivity::NoteDetail("pipeline compiling");
 		return false;
 	}
 	return true;
