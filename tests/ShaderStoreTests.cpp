@@ -4,6 +4,7 @@
 #include "graphics/host_gpu/renderer/pipeline/shaderStoreFile.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderStoreIdentity.h"
 #include "common/ports.h"
+#include "graphics/shader/recompiler/ShaderRecompiler.h"
 #include "graphics/shader/shaderCompiler.h"
 
 #include <algorithm>
