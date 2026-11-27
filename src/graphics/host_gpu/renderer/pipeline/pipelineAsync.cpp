@@ -320,6 +320,7 @@ void PipelineCache::RequestAsync(const ProgramKey& key, Program* program,
 						failed_program.skip_dispatch  = true;
 						failed_program.logged_neg_hit = true;
 						failed_program.failure_reason = fail_reason;
+						m_async->RetireWaiting(inputs->key, "module-failed");
 						AsyncLog(
 						    "ShaderRecompiler {} translation end: hash=0x{:016x} outcome=failed ({})",
 						    ShaderRecompiler::StageName(inputs->key.stage), inputs->key.hash,
@@ -505,6 +506,7 @@ void PipelineCache::RequestAsync(const ProgramKey& key, Program* program,
 				program.skip_dispatch  = true;
 				program.logged_neg_hit = true;
 				program.failure_reason = fail_reason;
+				m_async->RetireWaiting(inputs->key, "translate-failed");
 				AsyncLog("ShaderRecompiler {} translation end: hash=0x{:016x} outcome=failed ({})",
 				         ShaderRecompiler::StageName(inputs->key.stage), inputs->key.hash,
 				         fail_reason);
@@ -551,7 +553,8 @@ void PipelineCache::RequestAsync(const ProgramKey& key, Program* program,
 			                   (inputs->code.size() + inputs->back_code.size()) * sizeof(uint32_t);
 			m_async->translations.insert_or_assign(
 			    inputs->key, Async::Translation {inputs, std::move(translated), AskClockMs(),
-			                                     AskClockMs(), bytes, translate_us, plan_us});
+			                                     AskClockMs(), bytes, translate_us, plan_us,
+			                                     reason});
 		}, translating);
 	}, urgent_translate ? ShaderWorkers::Priority::Urgent : ShaderWorkers::Priority::Normal,
 	   mode == AsyncMode::On);
@@ -848,6 +851,28 @@ void PipelineCache::Async::NoteStall(bool pipeline, std::chrono::steady_clock::t
 	stalls.worst_us = std::max(stalls.worst_us, us);
 }
 
+bool PipelineCache::Async::RetireWaiting(const ProgramKey& key, const char* reason) {
+	const auto it = translations.find(key);
+	if (it == translations.end()) {
+		return false;
+	}
+	const auto now        = AskClockMs();
+	const auto last       = AsyncPlan::LastRequested(it->second);
+	const auto age_ms     = now >= last ? now - last : uint64_t {0};
+	const auto origin     = it->second.origin != nullptr ? it->second.origin : "unknown";
+	const auto bytes      = it->second.bytes;
+	auto       retired_it = translations.extract(it);
+	counters.retired++;
+	std::printf("[async] retired waiting translation stage=%s hash=0x%016" PRIx64
+	            " origin=%s reason=%s age=%.1fs bytes=%.1fMiB\n",
+	            ShaderRecompiler::StageName(key.stage), key.hash, origin, reason,
+	            static_cast<double>(age_ms) / 1000.0, static_cast<double>(bytes) / 1048576.0);
+	std::vector<Translation> dropped;
+	dropped.push_back(std::move(retired_it.mapped()));
+	(void)workers.Post([dropped = std::move(dropped)]() mutable { dropped.clear(); });
+	return true;
+}
+
 void PipelineCache::Async::ReportStatus() {
 	const auto now = AskClockMs();
 	if (now - last_report_ms < 2000) {
@@ -855,9 +880,37 @@ void PipelineCache::Async::ReportStatus() {
 	}
 	const auto last_status_ms = last_report_ms;
 	last_report_ms = now;
-	// Translations are kept while their shader may still be drawn; only over the IR budget are the
-	// least recently requested dropped. The IR of a thousand translations takes the render thread
-	// seconds to free, so the dropped ones are freed by a worker.
+	// Retire unclaimed waiting translations whose TTL has elapsed so nothing waits forever.
+	// Free the IR on a worker thread so the render thread stays responsive.
+	std::vector<Translation> retired;
+	const auto ttl_retired =
+	    AsyncPlan::TakeExpired(translations, now, AsyncPlan::DefaultWaitingTtlMs, retired);
+	counters.retired += ttl_retired.count;
+	if (!retired.empty()) {
+		RenderActivity::Scope activity("retire-translations");
+		std::string details;
+		const size_t shown = std::min<size_t>(retired.size(), 6);
+		for (size_t i = 0; i < shown; i++) {
+			const auto& entry  = retired[i];
+			const auto  last   = AsyncPlan::LastRequested(entry);
+			const auto  age_ms = now >= last ? now - last : uint64_t {0};
+			details += fmt::format(" {}:{:016x}({},{}s)",
+			                       ShaderRecompiler::StageName(entry.inputs->key.stage),
+			                       entry.inputs->key.hash,
+			                       entry.origin != nullptr ? entry.origin : "unknown",
+			                       age_ms / 1000u);
+		}
+		if (retired.size() > shown) {
+			details += fmt::format(" (+{} more)", retired.size() - shown);
+		}
+		std::printf("[async] retired %zu unclaimed waiting translations (%.1f MiB, reason=unclaimed-ttl"
+		            " >=%.0fs, kept %zu / %.1f MiB):%s\n",
+		            ttl_retired.count, static_cast<double>(ttl_retired.bytes) / 1048576.0,
+		            static_cast<double>(AsyncPlan::DefaultWaitingTtlMs) / 1000.0, ttl_retired.kept,
+		            static_cast<double>(ttl_retired.kept_bytes) / 1048576.0, details.c_str());
+		(void)workers.Post([retired = std::move(retired)]() mutable { retired.clear(); });
+	}
+	// If remaining translations still exceed the IR budget, drop the least recently requested.
 	std::vector<Translation> dropped;
 	const auto budget = AsyncPlan::TakeOverBudget(
 	    translations, now, static_cast<uint64_t>(Config::AsyncIrBudgetMb()) << 20, dropped);
@@ -912,7 +965,7 @@ void PipelineCache::Async::ReportStatus() {
 		            " (failed %" PRIu64 "), module-compiling %zu of %" PRIu64 " jobs, modules ready %" PRIu64
 		            " (speculative %" PRIu64 ", lost %" PRIu64 ", failed %" PRIu64
 		            "), pipeline-compiling %u of %" PRIu64 " jobs, pipelines ready %" PRIu64
-		            " (failed %" PRIu64 "), expired %" PRIu64 ", wanted %zu; skipped dispatches %" PRIu64
+		            " (failed %" PRIu64 "), expired %" PRIu64 ", retired %" PRIu64 ", wanted %zu; skipped dispatches %" PRIu64
 		            "/2s (%" PRIu64 " total); %s\n",
 		            translating, compiling, translations.size(),
 		            static_cast<double>(oldest) / 1000.0, pipelines_building, workers.Queued(),
@@ -924,7 +977,7 @@ void PipelineCache::Async::ReportStatus() {
 		            compiling, counters.module_jobs, counters.modules_ready, counters.speculative,
 		            counters.speculative_lost, counters.module_failed, pipelines_building,
 		            counters.pipeline_jobs, counters.pipelines_ready, counters.pipeline_failed,
-		            counters.expired, wanted.size(), skipped_dispatches_now,
+		            counters.expired, counters.retired, wanted.size(), skipped_dispatches_now,
 		            skipped_dispatches != nullptr ? skipped_dispatches->Total() : uint64_t {0},
 		            build_totals != nullptr && !build_totals->Empty() ? build_totals->Text().c_str()
 		            : "no builds");

@@ -1013,6 +1013,9 @@ const ShaderModule* PipelineCache::GetProgramImpl(const ShaderParams& params, In
 			m_lookup_stats.lookups++;
 		}
 		if (cached.skip_dispatch) {
+			if (m_async != nullptr) {
+				m_async->RetireWaiting(m_lookup_key, "negative-cache");
+			}
 			if (!cached.logged_neg_hit) {
 				cached.logged_neg_hit = true;
 				PipelineCacheLog(
@@ -1066,6 +1069,9 @@ const ShaderModule* PipelineCache::GetProgramImpl(const ShaderParams& params, In
 			                                  &materialization_error);
 		}
 		if (module != nullptr) {
+			if (m_async != nullptr) {
+				m_async->RetireWaiting(m_lookup_key, "module-hit");
+			}
 			(first_attempt ? m_lookup_stats.hit : m_lookup_stats.served_late)++;
 			if (!module->legacy_checked) {
 				// First hit of a stored module: would the old layout's key have found it?
@@ -1102,7 +1108,7 @@ const ShaderModule* PipelineCache::GetProgramImpl(const ShaderParams& params, In
 				    ShaderRecompiler::StageName(options.stage), params.hash, cached.failure_reason);
 				StoreFailedProgram(m_lookup_key, cached.failure_reason);
 				if (m_async != nullptr) {
-					m_async->translations.erase(m_lookup_key);
+					m_async->RetireWaiting(m_lookup_key, "materialization-failed");
 				}
 			}
 			return nullptr;
@@ -1970,7 +1976,7 @@ bool PipelineCache::PrefetchComputeProgram(const HW::CsStageRegisters& cs_regs,
 	m_lookup_key.user_data_count = params.user_data_count;
 	BuildStageStaticKey(input_info, m_lookup_key.static_state);
 	if (m_program_cache.contains(m_lookup_key) || m_async->translations.contains(m_lookup_key) ||
-	    m_async->sync_only_keys.contains(m_lookup_key)) {
+	    m_async->sync_only_keys.contains(m_lookup_key) || WarmUpPending(m_lookup_key)) {
 		m_prefetch.known++;
 		return false;
 	}
