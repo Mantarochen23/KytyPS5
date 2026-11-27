@@ -36,7 +36,8 @@ enum class Record : uint8_t { Module, GraphicsPipeline, TessellationLayout, Fail
 
 // Explicit store format version. Bump manually only when recompiler output, SPIR-V profile, or
 // store record layout changes so rebuilds across branches keep reusing compatible warm stores.
-constexpr uint64_t kShaderStoreFormatVersion = 6; // 5: CompiledShaderInfo::subgroup_size, 6: KeyIndex
+// 5: CompiledShaderInfo::subgroup_size, 6: KeyIndex, 7: compute keys hold lds_storage
+constexpr uint64_t kShaderStoreFormatVersion = 7;
 
 // What every record depends on besides its own fields.
 std::vector<uint8_t> StoreHeader(const GraphicContext& graphics) {

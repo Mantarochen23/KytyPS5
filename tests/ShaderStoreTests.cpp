@@ -73,6 +73,10 @@ void TestKeyIgnoresGuestAddresses() {
 	other.host_subgroup_size = 64;
 	BuildStageStaticKey(other, key_c);
 	Check(key_c != key_a, "and the host subgroup size");
+	other = MakeCompute();
+	other.lds_storage = !other.lds_storage;
+	BuildStageStaticKey(other, key_c);
+	Check(key_c != key_a, "and where the shared memory lives (a store built for another device limit)");
 }
 
 std::vector<uint8_t> Record(uint8_t seed, size_t size) {
