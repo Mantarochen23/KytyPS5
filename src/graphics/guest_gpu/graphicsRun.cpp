@@ -1,5 +1,6 @@
 #include "graphics/guest_gpu/graphicsRun.h"
 
+#include "common/faultReport.h"
 #include "common/assert.h"
 #include "common/debugCounters.h"
 #include "common/emulatorConfig.h"
@@ -497,6 +498,7 @@ void GuestGpu::ThreadRun(void* data) {
 	auto* gpu = static_cast<GuestGpu*>(data);
 	EXIT_IF(gpu == nullptr);
 	KYTY_PROFILER_THREAD("Thread_Gpu");
+	Common::FaultReport::SetThreadTag("render", "gpu-render");
 	g_gpu_state = gpu;
 	if (const auto processor = Common::Thread::ReserveCoreForCurrentThread(); processor >= 0) {
 		Log::WriteToConsoleAndLog(fmt::format(

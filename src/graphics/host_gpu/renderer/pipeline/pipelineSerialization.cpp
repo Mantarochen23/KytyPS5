@@ -4,9 +4,11 @@
 #include "graphics/host_gpu/renderer/pipeline/shaderStoreIdentity.h"
 
 #include "common/emulatorConfig.h"
+#include "common/faultReport.h"
 #include "common/logging/log.h"
 #include "common/memAccount.h"
 #include "common/parallelFor.h"
+#include "common/ports.h"
 #include "common/recoverable.h"
 #include "common/stringUtils.h"
 #include "graphics/host_gpu/vulkanCommon.h"
@@ -93,6 +95,7 @@ void ShaderStoreWriter::Open(const std::filesystem::path& path, std::span<const 
 
 ShaderStoreWriter::ShaderStoreWriter() {
 	m_thread = std::jthread([this](std::stop_token stop) {
+		Common::FaultReport::SetThreadTag("store write", "store-writer");
 		std::unique_lock lock(m_mutex);
 		// Once stop is requested the wait returns false only when the queue is empty.
 		while (m_ready.wait(lock, stop, [this] { return !m_jobs.empty(); })) {
@@ -179,6 +182,7 @@ struct PipelineCache::StoreItem {
 	uint64_t                                            layout_key = 0;
 	ShaderTessellationInputInfo                         layout;
 	uint64_t                                            capability_version = 0;
+	uint32_t                                            capability_ports   = 0; // FailedProgram.
 	std::string                                         reason;
 	uint64_t                                            module_id = 0; // UseOrder.
 };
@@ -201,6 +205,46 @@ struct PipelineCache::WarmUpTimes {
 	std::atomic<uint64_t> modules {0};
 	std::atomic<uint64_t> pipelines {0};
 };
+
+namespace {
+
+// One line at open: which store file, how many records, and under which port state. When another
+// store file of the same title and loop-guard variant has more records for a different mask of
+// code-affecting ports, the boot is probably rebuilding what that file already holds: say so with
+// both masks and the port names.
+void LogStoreIdentity(const std::filesystem::path& path, std::span<const uint8_t> header,
+                      std::span<const uint8_t> bytes) {
+	const auto name    = Common::PathToString(path.filename());
+	const auto mask    = Config::ShaderPortMask();
+	const bool matches = bytes.size() >= header.size() && std::ranges::equal(bytes.first(header.size()), header);
+	const auto records = bytes.size() >= header.size() ? CountShaderStoreRecords(bytes, header.size()) : 0u;
+	Log::WriteToConsoleAndLog(fmt::format(
+	    "[store] file {} records {} header {} codegen ports 0x{:x} ({}) widening ports 0x{:x} ({})\n",
+	    name, records, matches ? "matches" : (bytes.empty() ? "absent" : "differs"), mask,
+	    Config::PortNamesOfMask(mask), Config::CapabilityPortMask(),
+	    Config::PortNamesOfMask(Config::CapabilityPortMask())));
+	ShaderStoreName mine;
+	if (!ParseShaderStoreFileName(name, mine)) return;
+	std::error_code error;
+	for (const auto& entry: std::filesystem::directory_iterator(path.parent_path(), error)) {
+		const auto other = Common::PathToString(entry.path().filename());
+		ShaderStoreName theirs;
+		if (other == name || !ParseShaderStoreFileName(other, theirs) || theirs.title != mine.title ||
+		    theirs.suffix != mine.suffix) {
+			continue;
+		}
+		const auto other_mask = theirs.ports;
+		// The header size of another store is the same: its fields do not depend on the ports.
+		const auto other_records = CountShaderStoreRecordsInFile(entry.path(), header.size());
+		Log::WriteToConsoleAndLog(fmt::format(
+		    "[store] {}another store file {} holds {} records for codegen ports 0x{:x} ({}); this boot "
+		    "uses 0x{:x} ({}) and holds {}\n",
+		    other_records > records ? "WARNING: " : "", other, other_records, other_mask,
+		    Config::PortNamesOfMask(other_mask), mask, Config::PortNamesOfMask(mask), records));
+	}
+}
+
+} // namespace
 
 // Decompresses and reads one frame; no cache state, no Vulkan.
 void PipelineCache::ParseStoreItem(std::span<const uint8_t> frame, StoreItem& item) {
@@ -228,6 +272,8 @@ void PipelineCache::ParseStoreItem(std::span<const uint8_t> frame, StoreItem& it
 		case Record::FailedProgram:
 			IoKey(reader, item.key);
 			IoAll(reader, item.capability_version, item.reason);
+			// Failures stored before the field have none: they predate every widening port.
+			if (reader.ok && !reader.bytes.empty()) IoAll(reader, item.capability_ports);
 			break;
 		case Record::KeyIndex:
 			IoKey(reader, item.key);
@@ -324,7 +370,11 @@ bool PipelineCache::ApplyStoreItem(StoreItem& item, std::vector<vk::ShaderModule
 		case Record::FailedProgram:
 			// A translator fix starts a new capability generation: a failure recorded by an
 			// older translator is not evidence this one cannot translate the program.
-			if (FailureCacheApplies(item.capability_version) && !Config::ShaderCacheRetryFailed()) {
+			// A port that widens translation and was off when the failure was stored may translate
+			// it now (common/ports.h): the failure is retried, not carried over.
+			if (FailureCacheApplies(item.capability_version, item.capability_ports,
+			                        Config::CapabilityPortMask()) &&
+			    !Config::ShaderCacheRetryFailed()) {
 				auto& program          = m_program_cache.try_emplace(item.key).first->second;
 				program.skip_dispatch  = true;
 				program.failure_reason =
@@ -594,6 +644,7 @@ void PipelineCache::WarmUp(const std::filesystem::path& path) {
 		file.Read(bytes.data(), static_cast<uint32_t>(bytes.size()), &read);
 		bytes.resize(read);
 	}
+	LogStoreIdentity(path, header, bytes);
 	// Before the title starts nothing else runs: every core loads.
 	const auto threads = std::max<size_t>(1u, std::thread::hardware_concurrency());
 	Log::WriteToConsoleAndLog(fmt::format(
@@ -890,7 +941,10 @@ void PipelineCache::WarmUp(const std::filesystem::path& path) {
 		for (size_t i = created; i < pipeline_jobs.size(); ++i) {
 			if (pipeline_jobs[i].module != nullptr) loader.compute.push_back(pipeline_jobs[i].module->id);
 		}
-		loader.thread = std::jthread([this](std::stop_token stop) { RunWarmUpLoader(stop); });
+		loader.thread = std::jthread([this](std::stop_token stop) {
+			Common::FaultReport::SetThreadTag("store load", "store-load");
+			RunWarmUpLoader(stop);
+		});
 	}
 }
 
@@ -930,7 +984,8 @@ void PipelineCache::StoreFailedProgram(const ProgramKey& key, std::string_view r
 	std::string text(reason);
 	IoAll(record, Record::FailedProgram);
 	IoKey(record, key);
-	IoAll(record, kTranslatorCapabilityVersion, text);
+	auto capability_ports = Config::CapabilityPortMask();
+	IoAll(record, kTranslatorCapabilityVersion, text, capability_ports);
 	m_store.Append(std::move(record.bytes));
 }
 
