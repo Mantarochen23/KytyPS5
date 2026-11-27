@@ -164,12 +164,19 @@ struct FrameStallTracker {
 	uint64_t frame    = ~uint64_t {0};
 	uint64_t since_ms = 0;
 	bool     stalled  = false;
-	// Draws let through while stalled: in the current (or last) stall, and in all.
+	// Draws that were skipped because of the stall (their shaders were not ready): in the current
+	// (or last) stall, and in all. Draws whose shaders were ready ran and are not counted.
 	uint64_t deferred       = 0;
 	uint64_t deferred_total = 0;
 
+	// A draw the stall made deferrable was skipped while its shaders build.
+	void NoteDeferred() {
+		deferred++;
+		deferred_total++;
+	}
+
 	// Called for a draw that would otherwise wait for its shaders. True when it may be skipped.
-	// `change` reports the edges, for the log line.
+	// `change` reports the edges, for the log line. Callers skip it while the option is 0.
 	bool Update(uint64_t frame_now, uint64_t now_ms, uint32_t stall_ms, Change* change) {
 		Change edge = Change::None;
 		if (frame_now != frame) {
@@ -183,10 +190,6 @@ struct FrameStallTracker {
 			stalled  = true;
 			deferred = 0;
 			edge     = Change::Started;
-		}
-		if (stalled) {
-			deferred++;
-			deferred_total++;
 		}
 		if (change != nullptr) *change = edge;
 		return stalled;
