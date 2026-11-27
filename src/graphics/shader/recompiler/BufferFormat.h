@@ -245,6 +245,91 @@ constexpr uint32_t GetFormatComponentByteOffset(const BufferFormatInfo& info, ui
 	return info.packed_bitfield ? 0u : info.component_bit_offset[component] / 8u;
 }
 
+constexpr const char* BufferFormatName(Prospero::BufferFormat format) {
+	using F = Prospero::BufferFormat;
+	switch (format) {
+		case F::kInvalid: return "kInvalid";
+		case F::k8UNorm: return "k8UNorm";
+		case F::k8SNorm: return "k8SNorm";
+		case F::k8UScaled: return "k8UScaled";
+		case F::k8SScaled: return "k8SScaled";
+		case F::k8UInt: return "k8UInt";
+		case F::k8SInt: return "k8SInt";
+		case F::k16UNorm: return "k16UNorm";
+		case F::k16SNorm: return "k16SNorm";
+		case F::k16UScaled: return "k16UScaled";
+		case F::k16SScaled: return "k16SScaled";
+		case F::k16UInt: return "k16UInt";
+		case F::k16SInt: return "k16SInt";
+		case F::k16Float: return "k16Float";
+		case F::k8_8UNorm: return "k8_8UNorm";
+		case F::k8_8SNorm: return "k8_8SNorm";
+		case F::k8_8UScaled: return "k8_8UScaled";
+		case F::k8_8SScaled: return "k8_8SScaled";
+		case F::k8_8UInt: return "k8_8UInt";
+		case F::k8_8SInt: return "k8_8SInt";
+		case F::k32UInt: return "k32UInt";
+		case F::k32SInt: return "k32SInt";
+		case F::k32Float: return "k32Float";
+		case F::k16_16UNorm: return "k16_16UNorm";
+		case F::k16_16SNorm: return "k16_16SNorm";
+		case F::k16_16UScaled: return "k16_16UScaled";
+		case F::k16_16SScaled: return "k16_16SScaled";
+		case F::k16_16UInt: return "k16_16UInt";
+		case F::k16_16SInt: return "k16_16SInt";
+		case F::k16_16Float: return "k16_16Float";
+		case F::k11_11_10UNorm: return "k11_11_10UNorm";
+		case F::k11_11_10SNorm: return "k11_11_10SNorm";
+		case F::k11_11_10UScaled: return "k11_11_10UScaled";
+		case F::k11_11_10SScaled: return "k11_11_10SScaled";
+		case F::k11_11_10UInt: return "k11_11_10UInt";
+		case F::k11_11_10SInt: return "k11_11_10SInt";
+		case F::k11_11_10Float: return "k11_11_10Float";
+		case F::k10_11_11UNorm: return "k10_11_11UNorm";
+		case F::k10_11_11SNorm: return "k10_11_11SNorm";
+		case F::k10_11_11UScaled: return "k10_11_11UScaled";
+		case F::k10_11_11SScaled: return "k10_11_11SScaled";
+		case F::k10_11_11UInt: return "k10_11_11UInt";
+		case F::k10_11_11SInt: return "k10_11_11SInt";
+		case F::k10_11_11Float: return "k10_11_11Float";
+		case F::k2_10_10_10UNorm: return "k2_10_10_10UNorm";
+		case F::k2_10_10_10SNorm: return "k2_10_10_10SNorm";
+		case F::k2_10_10_10UScaled: return "k2_10_10_10UScaled";
+		case F::k2_10_10_10SScaled: return "k2_10_10_10SScaled";
+		case F::k2_10_10_10UInt: return "k2_10_10_10UInt";
+		case F::k2_10_10_10SInt: return "k2_10_10_10SInt";
+		case F::k10_10_10_2UNorm: return "k10_10_10_2UNorm";
+		case F::k10_10_10_2SNorm: return "k10_10_10_2SNorm";
+		case F::k10_10_10_2UScaled: return "k10_10_10_2UScaled";
+		case F::k10_10_10_2SScaled: return "k10_10_10_2SScaled";
+		case F::k10_10_10_2UInt: return "k10_10_10_2UInt";
+		case F::k10_10_10_2SInt: return "k10_10_10_2SInt";
+		case F::k8_8_8_8UNorm: return "k8_8_8_8UNorm";
+		case F::k8_8_8_8SNorm: return "k8_8_8_8SNorm";
+		case F::k8_8_8_8UScaled: return "k8_8_8_8UScaled";
+		case F::k8_8_8_8SScaled: return "k8_8_8_8SScaled";
+		case F::k8_8_8_8UInt: return "k8_8_8_8UInt";
+		case F::k8_8_8_8SInt: return "k8_8_8_8SInt";
+		case F::k32_32UInt: return "k32_32UInt";
+		case F::k32_32SInt: return "k32_32SInt";
+		case F::k32_32Float: return "k32_32Float";
+		case F::k16_16_16_16UNorm: return "k16_16_16_16UNorm";
+		case F::k16_16_16_16SNorm: return "k16_16_16_16SNorm";
+		case F::k16_16_16_16UScaled: return "k16_16_16_16UScaled";
+		case F::k16_16_16_16SScaled: return "k16_16_16_16SScaled";
+		case F::k16_16_16_16UInt: return "k16_16_16_16UInt";
+		case F::k16_16_16_16SInt: return "k16_16_16_16SInt";
+		case F::k16_16_16_16Float: return "k16_16_16_16Float";
+		case F::k32_32_32UInt: return "k32_32_32UInt";
+		case F::k32_32_32SInt: return "k32_32_32SInt";
+		case F::k32_32_32Float: return "k32_32_32Float";
+		case F::k32_32_32_32UInt: return "k32_32_32_32UInt";
+		case F::k32_32_32_32SInt: return "k32_32_32_32SInt";
+		case F::k32_32_32_32Float: return "k32_32_32_32Float";
+		default: return "kUnknown";
+	}
+}
+
 } // namespace Libs::Graphics::ShaderRecompiler::Format
 
 #endif /* EMULATOR_INCLUDE_EMULATOR_GRAPHICS_SHADER_RECOMPILER_BUFFERFORMAT_H_ */

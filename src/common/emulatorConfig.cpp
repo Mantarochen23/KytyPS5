@@ -514,6 +514,10 @@ uint32_t AsyncComputeWaitMs() {
 	return g_config != nullptr ? g_config->async_compute_wait_ms : 0u;
 }
 
+uint32_t MemLimitGb() {
+	return g_config != nullptr ? g_config->mem_limit_gb : 0u;
+}
+
 bool AsyncLookaheadEnabled() {
 	return g_config == nullptr || g_config->async_lookahead != 0u;
 }
@@ -545,6 +549,14 @@ uint32_t GuestClockHoldMs() {
 const std::filesystem::path& GetRegisteredShaderDumpFolder() {
 	static const std::filesystem::path none;
 	return g_config != nullptr ? g_config->dump_registered_shaders_folder : none;
+}
+
+uint32_t WarmUpBudgetSeconds() {
+	return g_config != nullptr ? g_config->warmup_budget_s : 0u;
+}
+
+bool SpirvCompactEnabled() {
+	return g_config != nullptr && g_config->spirv_compact_enabled;
 }
 
 } // namespace Config

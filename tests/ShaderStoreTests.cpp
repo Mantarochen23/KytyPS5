@@ -74,6 +74,10 @@ void TestKeyIgnoresGuestAddresses() {
 	other.host_subgroup_size = 64;
 	BuildStageStaticKey(other, key_c);
 	Check(key_c != key_a, "and the host subgroup size");
+	other = MakeCompute();
+	other.lds_storage = !other.lds_storage;
+	BuildStageStaticKey(other, key_c);
+	Check(key_c != key_a, "and where the shared memory lives (a store built for another device limit)");
 }
 
 std::vector<uint8_t> Record(uint8_t seed, size_t size) {
@@ -239,10 +243,15 @@ void TestLookupCounters() {
 		stats.described++;
 	}
 	Check(!stats.WantsDescription(), "and no more");
+	stats.canonical_checked = 7;
+	stats.canonical_saved   = 4;
+	Check(stats.CanonicalLine() == "[store] canonical: hits that the old key would have missed = 4 "
+	                               "(of 7 stored modules first hit with an old key)",
+	      "the canonical proof line has the documented fields");
 }
 
 void TestCapabilityVersionBumped() {
-	Check(kTranslatorCapabilityVersion >= 4u,
+	Check(kTranslatorCapabilityVersion >= 5u,
 	      "capability version was bumped to retry previously failed shaders");
 	Check(FailureCacheApplies(kTranslatorCapabilityVersion) &&
 	          !FailureCacheApplies(kTranslatorCapabilityVersion - 1u),

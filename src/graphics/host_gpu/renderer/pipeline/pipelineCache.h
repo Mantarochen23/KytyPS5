@@ -17,6 +17,7 @@
 #include "graphics/shader/rectListShader.h"
 #include "graphics/shader/shader.h"
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
@@ -129,6 +130,11 @@ struct ShaderModule {
 	std::vector<RectListParameter>               rect_parameters;
 	// Indirect mesh draw: a task shader reads the records and launches the groups.
 	bool                                         mesh_task = false;
+	// Port canonical-resources: the hash of the specialization the old resource layout gave the
+	// inputs this module was built for (ResourceSnapshot::legacy_hash), 0 if unknown.
+	uint64_t                                     legacy_hash = 0;
+	// Runtime only: a lookup compared legacy_hash with its own inputs (or it was built this run).
+	bool                                         legacy_checked = true;
 };
 
 // A draw's depth target and its first color_count color targets.
@@ -203,6 +209,7 @@ private:
 	std::atomic<uint64_t>                    m_appended {0};
 	std::atomic<uint64_t>                    m_written {0};
 	std::atomic<uint64_t>                    m_failed {0};
+	std::atomic<uint64_t>                    m_dropped {0};
 	std::mutex                               m_mutex;
 	std::condition_variable_any              m_ready;
 	std::queue<Common::UniqueFunction<void>> m_jobs;
@@ -263,12 +270,17 @@ public:
 	// its user data is built to its module ahead of the dispatch.
 	bool PrefetchComputeProgram(const HW::CsStageRegisters& cs_regs,
 	                            bool dispatch_thread_dimensions, bool async_compute,
-	                            const HW::UserSgprInfo* user_data = nullptr);
+	                            const HW::UserSgprInfo* user_data = nullptr,
+	                            bool                    from_registration = false);
 	// A dispatch gave up waiting for its shader (--async-compute-wait-ms) and is skipped. Counts it
 	// and logs the first skip of each shader. Render thread only.
 	void NoteDispatchSkipped(uint64_t waited_ms);
 	// The `[prefetch]` line.
 	void ReportPrefetch() const;
+	// The `[mem]` owners the cache can count (render thread, every 2 s); also drops on --mem-limit-gb.
+	void AccountMemory();
+	// Whether a program of this stage and hash is in the cache under any key.
+	[[nodiscard]] bool HasProgramOfHash(ShaderType stage, uint64_t hash) const;
 	// Counters of what the scans and registrations queued for translation, printed every 30 s.
 	struct PrefetchCounters {
 		uint64_t requested   = 0; // calls
@@ -279,6 +291,7 @@ public:
 		uint64_t with_data   = 0; // queued with the user data of a scan
 		uint64_t lookahead_modules_built = 0;
 		uint64_t lookahead_hits          = 0;
+		uint64_t registration_deferred   = 0; // registrations kept without a translation
 	};
 	// Registers a callback invoked on worker threads whenever an async shader/pipeline job
 	// finishes, so the guest command processor wakes without polling.
@@ -312,8 +325,18 @@ private:
 		bool                                         logged_neg_hit  = false;
 		std::string                                  failure_reason;
 
+		// Plans of the modules with calls, by CallCodeHash of their callee code (from the store or
+		// built this run); a program with calls loaded from the store has no call_source yet.
+		std::unordered_map<uint64_t, std::vector<uint8_t>> call_plans;
+		// Port canonical-resources diagnostics: old-layout hash by the hash of the specialization a
+		// missed lookup materialized, and the stored modules no lookup has compared yet.
+		std::unordered_map<uint64_t, uint64_t> legacy_of_specialization;
+		uint32_t                               legacy_unchecked = 0;
+
 		[[nodiscard]] std::span<const uint32_t> FunctionCode() const;
 		bool RefreshCallSource(const ShaderRecompiler::IR::SrtRuntime& runtime);
+		// Takes the plan stored for the current callee code; false if there is none.
+		bool UseStoredCallPlan();
 		template <bool HasCalls>
 		ShaderModule* FindModule(const ShaderRecompiler::IR::SrtRuntime& runtime,
 		                         ShaderRecompiler::IR::PushData::Window  push_data,
@@ -472,11 +495,36 @@ private:
 	void WriteDriverCache() const;
 
 	// pipelineSerialization.cpp
-	enum class LoadRecordStatus : uint8_t { Loaded, EndOfStream, Failed };
-	void             WarmUp(const std::filesystem::path& path);
-	LoadRecordStatus LoadRecord(std::span<const uint8_t>& records, bool keep_on_error);
-	void StoreModule(const ProgramKey& key, const Program& program, const ShaderModule& module,
-	                 const std::vector<uint32_t>& spirv);
+	// Loading the store: records are parsed and prepared on every core, in the first-use order of
+	// the runs that stored them; with --warmup-budget-s the rest loads in the background.
+	struct StoreItem;
+	struct WarmUpTimes;
+	struct WarmUpLoader;
+	void        WarmUp(const std::filesystem::path& path);
+	static void ParseStoreItem(std::span<const uint8_t> frame, StoreItem& item);
+	void        PrepareStoreModule(StoreItem& item, bool keep, WarmUpTimes& times) const;
+	bool        ApplyStoreItem(StoreItem& item, std::vector<vk::ShaderModule>* orphans = nullptr);
+	void        RunWarmUpLoader(std::stop_token stop);
+	// Applies what the background load finished; render thread.
+	void        DrainWarmUp();
+	// True if a stored module of `key` is still loading (and asks for it first).
+	bool        WarmUpPending(const ProgramKey& key);
+	void        StopWarmUp();
+	void        DestroyPipeline(const Pipeline& pipeline) const;
+	// Records the first use of a module in this run once per module the store has no rank for.
+	void        NoteModuleUse(const ShaderModule& module);
+	struct WarmUpLoaderDelete {
+		void operator()(WarmUpLoader* loader) const; // Where the type is complete.
+	};
+	std::unique_ptr<WarmUpLoader, WarmUpLoaderDelete> m_warmup;
+	// Tests: a warm-up budget in milliseconds instead of --warmup-budget-s; 0 starts everything in
+	// the background. Negative = the option.
+	static inline int64_t s_warmup_budget_ms_for_tests = -1;
+	std::atomic_bool                       m_warmup_ready {false};
+	std::unordered_map<uint64_t, uint32_t> m_use_rank; // Module id -> first-use rank.
+	uint32_t                               m_next_use_rank = 0;
+	void StoreModule(const ProgramKey& key, const std::vector<uint8_t>& plan,
+	                 const ShaderModule& module, const std::vector<uint32_t>& spirv);
 	void StoreFailedProgram(const ProgramKey& key, std::string_view reason);
 	bool RecordIndexedKey(const ProgramKey& key, bool persist);
 	void StoreKeyIndex(const ProgramKey& key);

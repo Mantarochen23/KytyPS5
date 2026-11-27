@@ -17,6 +17,7 @@
 #include "graphics/host_gpu/renderer/debug.h"
 #include "graphics/host_gpu/renderer/image/imageView.h"
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
+#include "graphics/host_gpu/renderer/pipeline/asyncPlan.h"
 #include "graphics/host_gpu/renderer/pipeline/blendMapping.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineAsync.h"
 #include "graphics/host_gpu/renderer/pipeline/renderActivity.h"
@@ -314,6 +315,31 @@ std::span<const uint32_t> PipelineCache::Program::FunctionCode() const {
 	    : std::span<const uint32_t>{};
 }
 
+static uint64_t SpecializationHash(const ShaderRecompiler::IR::ResourceSpecialization& specialization) {
+	ShaderRecompiler::IR::Writer writer;
+	auto                         copy = specialization;
+	ShaderRecompiler::IR::Io(writer, copy);
+	return XXH3_64bits(writer.bytes.data(), writer.bytes.size());
+}
+
+// Address-free: the callee code itself, wherever the guest placed it.
+static uint64_t CallCodeHash(std::span<const uint32_t> function_code) {
+	return XXH3_64bits(function_code.data(), function_code.size_bytes());
+}
+
+bool PipelineCache::Program::UseStoredCallPlan() {
+	const auto found = call_plans.find(CallCodeHash(FunctionCode()));
+	if (found == call_plans.end()) return false;
+	ShaderRecompiler::IR::ResourcePlan plan;
+	if (!ShaderRecompiler::IR::LoadResourcePlan(found->second, plan)) {
+		call_plans.erase(found);
+		return false;
+	}
+	resource_plan              = std::move(plan);
+	resource_plan.source_reads = call_source->reads;
+	return true;
+}
+
 bool PipelineCache::Program::RefreshCallSource(const ShaderRecompiler::IR::SrtRuntime& runtime) {
 	const auto revision = call_source->revision;
 	ShaderRecompiler::RefreshShaderSource(*call_source, runtime);
@@ -326,7 +352,11 @@ ShaderModule* PipelineCache::Program::FindModule(const ShaderRecompiler::IR::Srt
                                                  ShaderRecompiler::IR::PushData::Window push_data,
                                                  bool*        materialized,
                                                  std::string* materialization_error) {
-	if (!ShaderRecompiler::IR::MaterializeResources(resource_plan, runtime, resources,
+	// The old layout's hash is needed while stored modules wait for their first comparison, and
+	// for the module a miss will build.
+	auto probe        = runtime;
+	probe.legacy_hash = legacy_unchecked != 0;
+	if (!ShaderRecompiler::IR::MaterializeResources(resource_plan, probe, resources,
 	                                                specialization, materialization_error)) {
 		if (materialized != nullptr) {
 			*materialized = false;
@@ -345,8 +375,24 @@ ShaderModule* PipelineCache::Program::FindModule(const ShaderRecompiler::IR::Srt
 		}
 		if constexpr (HasCalls) {
 			if (!std::ranges::equal(candidate.function_code, FunctionCode())) continue;
+		} else {
+			if (!candidate.function_code.empty()) continue;
 		}
 		return &candidate;
+	}
+	if (!probe.legacy_hash && Config::PortEnabled(Config::Port::CanonicalResources) &&
+	    std::ranges::any_of(resource_plan.descriptor_sources, [](const auto& source) {
+		    return source.indirect_descriptor.has_value();
+	    })) {
+		probe.legacy_hash = true;
+		if (!ShaderRecompiler::IR::MaterializeResources(resource_plan, probe, resources,
+		                                                specialization)) {
+			resources.legacy_hash = 0;
+		}
+	}
+	if (resources.legacy_hash != 0) {
+		legacy_of_specialization.insert_or_assign(SpecializationHash(specialization),
+		                                          resources.legacy_hash);
 	}
 	return nullptr;
 }
@@ -442,6 +488,11 @@ ShaderModule& PipelineCache::AddModule(Program& program, const ProgramKey& key,
                                        CompiledStage compiled) {
 	auto& module = program.modules.emplace_back(std::move(compiled.module));
 	m_compiled[static_cast<size_t>(key.stage)]++;
+	NoteModuleUse(module);
+	if (const auto legacy = program.legacy_of_specialization.find(SpecializationHash(module.specialization));
+	    legacy != program.legacy_of_specialization.end()) {
+		module.legacy_hash = legacy->second;
+	}
 	// Guest geometry shaders are compiled through the host mesh stage.
 	std::printf("Shaders: VS %u | PS %u | CS %u | GS %u | LS %u | HS %u | TES %u\n",
 	            m_compiled[static_cast<size_t>(ShaderType::Vertex)],
@@ -451,9 +502,16 @@ ShaderModule& PipelineCache::AddModule(Program& program, const ProgramKey& key,
 	            m_compiled[static_cast<size_t>(ShaderType::Local)],
 	            m_compiled[static_cast<size_t>(ShaderType::TessellationControl)],
 	            m_compiled[static_cast<size_t>(ShaderType::TessellationEvaluation)]);
-	// Programs with GPU-selected calls depend on their callees' current code.
-	if (program.call_source == nullptr) {
-		StoreModule(key, program, module, compiled.spirv);
+	// A module with GPU-selected calls is stored with its callee code and the plan of that code;
+	// a later run links the callees and takes it only for the same code (FindModule<true>).
+	const bool calls = program.call_source != nullptr;
+	if (calls && !std::ranges::equal(module.function_code, program.FunctionCode())) {
+		return module; // The callees changed while it was built: the plan is of other code.
+	}
+	if (calls || m_store) {
+		auto plan = ShaderRecompiler::IR::SaveResourcePlan(program.resource_plan);
+		StoreModule(key, plan, module, compiled.spirv);
+		if (calls) program.call_plans.insert_or_assign(CallCodeHash(module.function_code), std::move(plan));
 	}
 	return module;
 }
@@ -614,6 +672,9 @@ void PipelineCache::NoteLookupMiss(const ProgramKey& key, const Program* program
 
 void PipelineCache::ReportLookups() const {
 	std::printf("%s\n", m_lookup_stats.Line().c_str());
+	if (Config::PortEnabled(Config::Port::CanonicalResources)) {
+		std::printf("%s\n", m_lookup_stats.CanonicalLine().c_str());
+	}
 }
 
 template <typename InputInfo>
@@ -621,6 +682,7 @@ const ShaderModule* PipelineCache::GetProgramImpl(const ShaderParams& params, In
                                                   ShaderRecompiler::IR::PushData::Window& push_data,
                                                   AsyncMode                               mode) {
 	m_last_deferred = false;
+	DrainWarmUp();
 	const auto user_data = std::span(params.user_data).first(params.user_data_count);
 	ShaderRecompiler::IR::SrtRuntime runtime {
 	    .user_data                  = user_data,
@@ -743,6 +805,7 @@ const ShaderModule* PipelineCache::GetProgramImpl(const ShaderParams& params, In
 	// first call, and a request that ends without a module is open until its retry.
 	const uint64_t request_identity = ProgramVariantKey();
 	const bool     first_attempt    = m_requests.Begin(request_identity);
+	std::string    materialization_error;
 	struct RequestGuard {
 		PipelineCache* cache;
 		uint64_t       identity;
@@ -772,17 +835,57 @@ const ShaderModule* PipelineCache::GetProgramImpl(const ShaderParams& params, In
 		}
 		ShaderModule* module       = nullptr;
 		bool          materialized = true;
-		std::string   mat_error;
-		if (cached.call_source) {
-			source_changed = cached.RefreshCallSource(runtime);
-			if (!source_changed) {
-				module = cached.FindModule<true>(runtime, push_data, &materialized, &mat_error);
+		bool          linked_now   = false;
+		if (!cached.call_source && !cached.call_plans.empty()) {
+			// Loaded from the store with calls: link the callees as they are now.
+			finish_options();
+			auto source = ShaderRecompiler::PrepareShaderSource(params.code, options);
+			if (source.calls.empty() || source.unsupported_call_pc != UINT32_MAX) {
+				// Not a program with calls after all: its stored call modules never serve
+				// (FindModule<false> skips modules with function code).
+				cached.call_plans.clear();
+			} else {
+				linked_now = true;
+				ShaderRecompiler::RefreshShaderSource(source, runtime);
+				cached.call_source = std::make_unique<ShaderRecompiler::ShaderSource>(std::move(source));
+				cached.resource_plan.source_reads = cached.call_source->reads;
+				source_changed = !cached.UseStoredCallPlan();
+				if (!source_changed) {
+					module = cached.FindModule<true>(runtime, push_data, &materialized,
+					                                 &materialization_error);
+					PipelineCacheLog("[store] linked cs hash=0x{:016x}: {} for the current callee code "
+					                 "({} callee sets stored)",
+					                 params.hash, module != nullptr ? "stored module" : "stored plan, no module",
+					                 cached.call_plans.size());
+				}
 			}
-		} else {
-			module = cached.FindModule<false>(runtime, push_data, &materialized, &mat_error);
+		}
+		if (cached.call_source) {
+			if (!linked_now) {
+				source_changed = cached.RefreshCallSource(runtime);
+				// Callees that changed to code built before (this run or a stored one) need no link.
+				if (source_changed && cached.UseStoredCallPlan()) source_changed = false;
+				if (!source_changed) {
+					module = cached.FindModule<true>(runtime, push_data, &materialized,
+					                                 &materialization_error);
+				}
+			}
+		} else if (cached.call_plans.empty()) {
+			module = cached.FindModule<false>(runtime, push_data, &materialized,
+			                                  &materialization_error);
 		}
 		if (module != nullptr) {
 			(first_attempt ? m_lookup_stats.hit : m_lookup_stats.served_late)++;
+			if (!module->legacy_checked) {
+				// First hit of a stored module: would the old layout's key have found it?
+				module->legacy_checked = true;
+				cached.legacy_unchecked--;
+				if (cached.resources.legacy_hash != 0) {
+					m_lookup_stats.canonical_checked++;
+					m_lookup_stats.canonical_saved += module->legacy_hash != cached.resources.legacy_hash;
+				}
+			}
+			NoteModuleUse(*module);
 			if (m_lookahead_modules.erase(module->id) != 0) {
 				m_prefetch.lookahead_hits++;
 			}
@@ -793,8 +896,9 @@ const ShaderModule* PipelineCache::GetProgramImpl(const ShaderParams& params, In
 		}
 		if (!cached.call_source && !materialized) {
 			const std::string reason =
-			    mat_error.empty() ? "resource materialization failed"
-			                      : fmt::format("resource materialization failed: {}", mat_error);
+			    materialization_error.empty()
+			        ? "resource materialization failed"
+			        : fmt::format("resource materialization failed: {}", materialization_error);
 			PipelineCacheLog("!!! SHADER DISPATCH SKIP ({}) "
 			                 "shader=0x{:016x}; rendering is incomplete",
 			                 reason, params.hash);
@@ -819,6 +923,12 @@ const ShaderModule* PipelineCache::GetProgramImpl(const ShaderParams& params, In
 			m_lookup_stats.lookups++;
 		}
 		NoteLookupMiss(m_lookup_key, nullptr, push_data, first_attempt);
+	}
+	// A stored module of this program is still loading in the background: it comes first there.
+	if (mode == AsyncMode::On && WarmUpPending(m_lookup_key)) {
+		m_last_deferred = true;
+		RenderActivity::NoteDetail("stored module loading");
+		return nullptr;
 	}
 	finish_options();
 	// Compute programs with GPU-selected calls are linked on the render thread; their module is
@@ -955,7 +1065,8 @@ const ShaderModule* PipelineCache::GetProgramImpl(const ShaderParams& params, In
 		capture_use();
 	} else if (source_changed) {
 		entry->second.resource_plan = ShaderRecompiler::IR::ExtractResourcePlan(translated.program);
-		if (const auto* module = entry->second.FindModule<true>(runtime, push_data)) {
+		if (const auto* module = entry->second.FindModule<true>(runtime, push_data, nullptr,
+		                                                        &materialization_error)) {
 			// Once per hash, with the use count: a line per use hides the real repeats.
 			if (const auto use = m_served.Note(params.hash); use == 1) {
 				PipelineCacheLog(
@@ -1044,6 +1155,7 @@ PipelineCache::PipelineCache(GraphicContext&                         graphics,
 
 PipelineCache::~PipelineCache() {
 	// Nothing may still be making modules or pipelines while they are destroyed.
+	StopWarmUp();
 	if (m_async != nullptr) {
 		m_async->workers.Stop();
 		m_async.reset();
@@ -1574,9 +1686,24 @@ const ShaderModule* PipelineCache::GetComputeProgram(const HW::ComputeShaderInfo
 	return module;
 }
 
+bool PipelineCache::HasProgramOfHash(ShaderType stage, uint64_t hash) const {
+	// The table is hashed by the shader hash, so the bucket holds the variants of one shader.
+	ProgramKey probe;
+	probe.stage = stage;
+	probe.hash  = hash;
+	const auto bucket = m_program_cache.bucket(probe);
+	for (auto it = m_program_cache.begin(bucket); it != m_program_cache.end(bucket); ++it) {
+		if (it->first.stage == stage && it->first.hash == hash) {
+			return true;
+		}
+	}
+	return false;
+}
+
 bool PipelineCache::PrefetchComputeProgram(const HW::CsStageRegisters& cs_regs,
                                            bool dispatch_thread_dimensions, bool async_compute,
-                                           const HW::UserSgprInfo* user_data) {
+                                           const HW::UserSgprInfo* user_data,
+                                           bool                    from_registration) {
 	if (m_async == nullptr || cs_regs.data_addr == 0) {
 		return false;
 	}
@@ -1619,6 +1746,11 @@ bool PipelineCache::PrefetchComputeProgram(const HW::CsStageRegisters& cs_regs,
 	const auto translating = FlightId(m_lookup_key, {UINT32_MAX, UINT32_MAX}, nullptr);
 	if (m_async->in_flight.contains(translating)) {
 		m_prefetch.in_flight++;
+		return false;
+	}
+	if (!AsyncPlan::TranslateAhead(from_registration, user_data_known,
+	                               HasProgramOfHash(ShaderType::Compute, params.hash))) {
+		m_prefetch.registration_deferred++;
 		return false;
 	}
 	ShaderRecompiler::CompileOptions options {
@@ -1818,6 +1950,7 @@ PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(const CommandBuffer&
 	const auto& vs_input_info = vertex_info.front();
 	const bool  ps_active     = state.ps_active;
 
+	DrainWarmUp();
 	std::array<const ShaderModule*, 4> stages {};
 	const auto key        = MakeGraphicsPipelineKey(command, state, targets, stages);
 	auto [iter, inserted] = m_graphics_pipelines.try_emplace(key);
@@ -1860,6 +1993,7 @@ PipelineCache::Pipeline& PipelineCache::GetComputePipeline(const ShaderComputeIn
 	KYTY_PROFILER_BLOCK("PipelineCache::CreatePipeline(Compute)", profiler::colors::RedA100);
 
 	const auto& module = *input_info.stage.module;
+	DrainWarmUp();
 
 	auto [iter, inserted] = m_compute_pipelines.try_emplace(module.id);
 	auto& pipeline        = iter->second;

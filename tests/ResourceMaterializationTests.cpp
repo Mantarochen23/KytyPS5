@@ -1,7 +1,9 @@
+#include "common/ports.h"
 #include "graphics/shader/recompiler/ir/Serialize.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
 #include "SrtWalkerTestMemory.h"
+#include "common/ports.h"
 
 #include <bit>
 #include <cstdio>
@@ -762,7 +764,8 @@ void TestFiniteImageRefreshReusesScalarReads() {
                       snapshot.specialization_reads.capacity(), specialization.images.capacity()};
   };
   const auto check_mapping = [&](std::array<uint32_t, 4> ordinals) {
-    const auto offset = specialization.images[0].indirect_mapping_offset;
+    const auto offset = IndirectMappingStart(specialization.images[0].indirect_mapping_offset,
+                                             snapshot.flattened_srt);
     Check(snapshot.images.size() == 2 && snapshot.flattened_srt[offset] == 4,
           "finite image candidates were not deduplicated");
     for (uint32_t key = 0; key < ordinals.size(); ++key) {
@@ -1433,7 +1436,8 @@ void TestIndirectImageSamplerClasses(bool mixed) {
             specialization.images[1].numeric_class ==
                 (mixed ? TextureNumericClass::Uint : TextureNumericClass::Float),
         "indirect image materialization rejected or changed a typed candidate");
-  const auto offset = specialization.images[0].indirect_mapping_offset;
+  const auto offset = IndirectMappingStart(specialization.images[0].indirect_mapping_offset,
+                                           snapshot.flattened_srt);
   Check(snapshot.flattened_srt[offset] == 3u &&
             snapshot.flattened_srt[offset + 2u] == 0u &&
             snapshot.flattened_srt[offset + 4u] == 1u &&
@@ -1560,6 +1564,131 @@ void TestIndirectFormattedUInt8RawBoundsBuffer() {
         "zero-stride OOB_SELECT=3 indexed indirect buffer was accepted");
 }
 
+void TestIndirectFormattedStridedAndGeneralStores() {
+  using namespace Libs::Graphics::ShaderRecompiler::IR;
+  using F = Libs::Graphics::Prospero::BufferFormat;
+  using Libs::Graphics::DstSel;
+
+  constexpr uint64_t TableBase = 0x10046f9fb0ull;
+  constexpr uint32_t TableRecords = 16u;
+
+  Program program;
+  program.stage = Libs::Graphics::ShaderType::Compute;
+  program.srt_plan_complete = program.resource_tracking_complete = true;
+  AddValueBlock(program);
+
+  // 16-byte-stride scalar descriptor table matching the evidence table V# format (0x00005204).
+  DescriptorSource table;
+  table.dword_count = 4u;
+  table.dwords = {
+      Value(static_cast<uint32_t>(TableBase)),
+      Value(static_cast<uint32_t>(TableBase >> 32u) | (16u << 16u)),
+      Value(TableRecords),
+      Value(0x00005204u),
+  };
+  program.descriptor_sources.push_back(table);
+
+  DescriptorSource indirect;
+  indirect.dword_count = 4u;
+  indirect.dwords.fill(Value(0u));
+  indirect.indirect_descriptor = DescriptorSource::IndirectDescriptor{
+      .table_maximum = TableRecords - 1u,
+      .table_source = 0u,
+      .table_stride = 16u,
+      .table_scalar = true,
+      .indexed = true,
+  };
+  program.descriptor_sources.push_back(indirect);
+  program.info.buffers.push_back({
+      .source = 1u,
+      .max_byte_extent = 16u,
+      .read = false,
+      .written = true,
+      .formatted = true,
+  });
+
+  const auto plan = Extract(program);
+
+  const auto make_desc = [](uint64_t base, uint32_t stride, uint32_t records, F fmt,
+                            uint32_t swizzle) {
+    return std::array<uint32_t, 4>{
+        static_cast<uint32_t>(base),
+        static_cast<uint32_t>((base >> 32u) & 0xffffu) | (stride << 16u),
+        records,
+        swizzle | (static_cast<uint32_t>(fmt) << 12u),
+    };
+  };
+
+  struct TableData {
+    std::array<std::array<uint32_t, 4>, TableRecords> rows{};
+  } data;
+  data.rows[0] = make_desc(0x1004700000ull, 16u, 196608u, F::k8UInt, DstSel(4, 0, 0, 1));
+  data.rows[1] = make_desc(0x1004800000ull, 16u, 4096u, F::k32Float, DstSel(4, 0, 0, 1));
+  data.rows[2] = make_desc(0x1004900000ull, 16u, 4096u, F::k8_8_8_8UNorm, DstSel(4, 5, 6, 7));
+  data.rows[3] = make_desc(0x1004a00000ull, 16u, 4096u, F::k10_10_10_2UNorm, DstSel(4, 5, 6, 7));
+  data.rows[4] = make_desc(0x1004b00000ull, 16u, 4096u, F::k32_32_32_32Float, DstSel(4, 5, 6, 7));
+
+  const auto read_table = +[](void *userdata, uint64_t address, std::span<uint32_t> words) {
+    const auto &t = *static_cast<const TableData *>(userdata);
+    if (address < TableBase) return false;
+    const uint64_t rel = address - TableBase;
+    if (rel + words.size_bytes() > uint64_t{TableRecords} * 16u) return false;
+    const auto *src = reinterpret_cast<const uint32_t *>(t.rows.data());
+    std::copy_n(src + rel / 4u, words.size(), words.begin());
+    return true;
+  };
+
+  const SrtRuntime runtime{.userdata = &data, .read_specialization_memory = read_table};
+  ResourceSnapshot snapshot;
+  ResourceSpecialization specialization;
+  std::string failure_reason;
+
+  // Port OFF: must fail with legacy message plus self-explaining decoded diagnostic.
+  Config::SetDisabledPorts({"indirect-formatted-stores"});
+  Check(!MaterializeResources(plan, runtime, snapshot, specialization, &failure_reason),
+        "strided formatted indirect store was accepted with port disabled");
+  Check(failure_reason.find("indirect formatted stores require tight identity") != std::string::npos &&
+            failure_reason.find("format=k8UInt(5)") != std::string::npos &&
+            failure_reason.find("stride=16") != std::string::npos &&
+            failure_reason.find("records=196608") != std::string::npos &&
+            failure_reason.find("nearest=") != std::string::npos &&
+            failure_reason.find("first_diff=") != std::string::npos,
+        "port-off formatted store refusal missing decoded format/stride/records/nearest/first_diff");
+
+  // Port ON: all five stride-16 formatted store candidates must materialize cleanly.
+  Config::SetDisabledPorts({});
+  Check(MaterializeResources(plan, runtime, snapshot, specialization, &failure_reason) &&
+            failure_reason.empty(),
+        "general strided formatted indirect store failed materialization with port enabled");
+  Check(specialization.buffers.size() == 6u &&
+            specialization.buffers[1].descriptor_format == F::k8UInt &&
+            specialization.buffers[1].packed_stride == 16u &&
+            specialization.buffers[2].descriptor_format == F::k32Float &&
+            specialization.buffers[3].descriptor_format == F::k8_8_8_8UNorm &&
+            specialization.buffers[4].descriptor_format == F::k10_10_10_2UNorm &&
+            specialization.buffers[5].descriptor_format == F::k32_32_32_32Float,
+        "materialized indirect formatted store candidates lost format or stride");
+
+  // Non-identity active swizzle (BGRA) must still fail with a one-line decoded diagnostic.
+  data.rows[2] = make_desc(0x1004900000ull, 16u, 4096u, F::k8_8_8_8UNorm, DstSel(6, 5, 4, 7));
+  Check(!MaterializeResources(plan, runtime, snapshot, specialization, &failure_reason) &&
+            failure_reason.find("format=k8_8_8_8UNorm(56)") != std::string::npos &&
+            failure_reason.find("stride=16") != std::string::npos &&
+            failure_reason.find("records=4096") != std::string::npos &&
+            failure_reason.find("nearest=") != std::string::npos &&
+            failure_reason.find("first_diff=dst_sel(") != std::string::npos,
+        "non-identity active swizzle on formatted indirect store was accepted or lacked diagnostic");
+
+  // Misaligned stride for a 32-bit format must still fail with decoded diagnostic.
+  data.rows[2] = make_desc(0x1004900000ull, 6u, 4096u, F::k32Float, DstSel(4, 0, 0, 1));
+  Check(!MaterializeResources(plan, runtime, snapshot, specialization, &failure_reason) &&
+            failure_reason.find("indirect formatted buffers require aligned full-format records") !=
+                std::string::npos &&
+            failure_reason.find("format=k32Float(22)") != std::string::npos &&
+            failure_reason.find("first_diff=stride_align(") != std::string::npos,
+        "misaligned stride on formatted indirect store was accepted or lacked diagnostic");
+}
+
 void TestAtomicImageUint8Format() {
   using namespace Libs::Graphics::ShaderRecompiler::IR;
   using F = Libs::Graphics::Prospero::BufferFormat;
@@ -1660,15 +1789,180 @@ void TestShaderCacheRecords() {
 
 } // namespace
 
+// Port canonical-resources: two "boots" that present the same resources in another order, with
+// another table length before a later table and at other guest addresses specialize one module;
+// a real difference still gives two. The old layout of the same inputs differs (legacy_hash).
+namespace canonical_boots {
+using namespace Libs::Graphics::ShaderRecompiler::IR;
+using Libs::Graphics::Prospero::BufferFormat;
+using Libs::Graphics::Prospero::ImageType;
+
+DescriptorValue Buffer(uint64_t base, uint32_t stride, uint32_t records, BufferFormat format) {
+  DescriptorValue value{.dword_count = 4u};
+  value.dwords[0] = static_cast<uint32_t>(base);
+  value.dwords[1] = static_cast<uint32_t>((base >> 32u) & 0xffffu) | ((stride & 0x3fffu) << 16u);
+  value.dwords[2] = records;
+  value.dwords[3] = Libs::Graphics::DstSel(4, 5, 6, 7) | (static_cast<uint32_t>(format) << 12u);
+  return value;
+}
+
+DescriptorValue Texture(uint64_t base, BufferFormat format, ImageType type) {
+  const uint64_t base40 = (base >> 8u) & 0xffffffffffull;
+  DescriptorValue value{.dword_count = 8u};
+  value.dwords[0] = static_cast<uint32_t>(base40);
+  value.dwords[1] = static_cast<uint32_t>((base40 >> 32u) & 0xffu) | (static_cast<uint32_t>(format) << 20u);
+  value.dwords[3] = Libs::Graphics::DstSel(4, 5, 6, 7) | (static_cast<uint32_t>(type) << 28u);
+  return value;
+}
+
+struct Memory {
+  std::vector<std::pair<uint64_t, uint32_t>> words;
+  void Write(uint64_t address, const DescriptorValue &value) {
+    for (uint32_t i = 0; i < 4u; ++i) words.emplace_back(address + i * 4u, value.dwords[i]);
+  }
+  static bool Read(void *userdata, uint64_t address, std::span<uint32_t> values) {
+    const auto &memory = *static_cast<const Memory *>(userdata);
+    for (size_t i = 0; i < values.size(); ++i) {
+      const auto found = std::ranges::find(memory.words, address + i * 4u,
+                                           &std::pair<uint64_t, uint32_t>::first);
+      if (found == memory.words.end()) return false;
+      values[i] = found->second;
+    }
+    return true;
+  }
+};
+
+struct Heap final : ImageHeapSource {
+  uint64_t slots = 0;
+  uint32_t slot_count = 0;
+  std::vector<DescriptorValue> kinds;
+  bool Acquire(const ImageHeapRequest &, ImageHeapView &view) override {
+    view = {.slots = slots, .slot_count = slot_count, .kinds = kinds};
+    return true;
+  }
+};
+
+// Buffer 0 from a table of V#s (user data 0..3), image 0 from a resident heap (user data 4..7).
+ResourcePlan TablePlan() {
+  Program program;
+  program.stage = Libs::Graphics::ShaderType::Compute;
+  program.srt_plan_complete = true;
+  program.resource_tracking_complete = true;
+  program.user_data_count = 8u;
+  auto &block = AddValueBlock(program);
+  const auto user = [&](uint32_t index) {
+    return Value(&block.AppendNewInst(ValueOpcode::GetUserData, {Value(ScalarReg(index))}));
+  };
+  for (const uint32_t first : {0u, 4u}) {
+    DescriptorSource table{.dword_count = 4u};
+    for (uint32_t i = 0; i < 4u; ++i) table.dwords[i] = user(first + i);
+    program.descriptor_sources.push_back(table);
+    const bool image = first != 0u;
+    DescriptorSource indirect{.dword_count = image ? 8u : 4u};
+    indirect.dwords.fill(Value(0u));
+    indirect.indirect_descriptor = DescriptorSource::IndirectDescriptor{
+        .table_source = first == 0u ? 0u : 2u,
+        .table_stride = image ? 32u : 16u,
+        .table_record_bytes = image ? 32u : 16u};
+    program.descriptor_sources.push_back(indirect);
+  }
+  BufferResource buffer;
+  buffer.source = 1u;
+  program.info.buffers.push_back(buffer);
+  ImageResource image;
+  image.source = 3u;
+  image.resource_class = ImageResourceClass::Sampled;
+  image.dimension = Libs::Graphics::ShaderRecompiler::Decoder::ImageDimension::Dim2D;
+  image.read = true;
+  program.info.images.push_back(image);
+  block.terminator.kind = Libs::Graphics::ShaderRecompiler::CFG::TerminatorKind::Return;
+  return ExtractResourcePlan(program);
+}
+
+struct Boot {
+  uint64_t base = 0;                // Guest addresses of this boot.
+  std::vector<uint32_t> rows;       // Stride of the buffer each table row selects.
+  std::vector<BufferFormat> kinds;  // Heap kinds in the order the heap met them.
+};
+
+std::pair<ResourceSpecialization, uint64_t> Materialize(const ResourcePlan &plan, const Boot &boot) {
+  Memory memory;
+  const auto table = boot.base + 0x10000u;
+  for (uint32_t row = 0; row < boot.rows.size(); ++row) {
+    // Rows of one stride share one descriptor, so the table lists the same candidates however long.
+    const auto stride = boot.rows[row];
+    memory.Write(table + row * 16u,
+                 Buffer(boot.base + 0x100000u * stride, stride, 64u, BufferFormat::k32UInt));
+  }
+  Heap heap;
+  heap.slots = boot.base + 0xdead0000u;
+  heap.slot_count = 64u;
+  for (uint32_t kind = 0; kind < boot.kinds.size(); ++kind)
+    heap.kinds.push_back(Texture(boot.base + 0x1000000u * (kind + 1u), boot.kinds[kind], ImageType::kColor2D));
+  std::array<uint32_t, 8> user_data{};
+  const auto buffer_table = Buffer(table, 16u, static_cast<uint32_t>(boot.rows.size()), BufferFormat::k32UInt);
+  const auto image_table = Buffer(boot.base + 0x90000u, 32u, 4u, BufferFormat::k32UInt);
+  std::copy_n(buffer_table.dwords.begin(), 4u, user_data.begin());
+  std::copy_n(image_table.dwords.begin(), 4u, user_data.begin() + 4u);
+  FakeGuestMemory guard(&Memory::Read, &memory);
+  const SrtRuntime runtime{.user_data = user_data, .userdata = &memory,
+                           .read_specialization_memory = &Memory::Read, .image_heap = &heap,
+                           .legacy_hash = true};
+  ResourceSnapshot snapshot;
+  ResourceSpecialization specialization;
+  Check(MaterializeResources(plan, runtime, snapshot, specialization), "canonical boot materializes");
+  Check(snapshot.legacy_hash != 0u, "canonical boot derives the old layout's hash");
+  // The header slots hold where each mapping starts.
+  for (const auto &root : {specialization.buffers[0].indirect_mapping_offset,
+                           specialization.images[0].indirect_mapping_offset})
+    Check((root & IndirectMappingHeader) != 0u &&
+              IndirectMappingStart(root, snapshot.flattened_srt) < snapshot.flattened_srt.size(),
+          "canonical roots map through their header slot");
+  return {specialization, snapshot.legacy_hash};
+}
+
+void TestCanonicalSpecializationAcrossBoots() {
+  Config::SetDisabledPorts({});
+  const auto plan = TablePlan();
+  const Boot first{.base = 0x0000100000000000ull, .rows = {16u, 32u},
+                   .kinds = {BufferFormat::k8_8_8_8UNorm, BufferFormat::k32UInt}};
+  const Boot second{.base = 0x0000550000000000ull, .rows = {32u, 16u, 16u, 32u, 16u},
+                    .kinds = {BufferFormat::k32UInt, BufferFormat::k8_8_8_8UNorm}};
+  const auto [one, one_legacy] = Materialize(plan, first);
+  const auto [two, two_legacy] = Materialize(plan, second);
+  Check(one == two, "boots with another order, table length and addresses specialize one module");
+  Check(one_legacy != two_legacy, "the old layout of the same boots specializes two modules");
+  Check(one.buffers.size() == 3u && one.images.size() == 3u, "both candidates and kinds stay");
+  auto more = first;
+  more.rows = {16u, 32u, 48u};
+  Check(Materialize(plan, more).first != one, "a third candidate is another module");
+  auto other_kind = first;
+  other_kind.kinds = {BufferFormat::k32Float, BufferFormat::k32UInt};
+  Check(Materialize(plan, other_kind).first == one,
+        "another texture of the same kind is the same module");
+  other_kind.kinds.push_back(BufferFormat::k32SInt);
+  Check(Materialize(plan, other_kind).first != one, "a heap with another kind is another module");
+}
+
+} // namespace canonical_boots
+
 namespace Common {
 
-void DbgExitHandler(const char *, int, std::string_view) { std::abort(); }
+void DbgExitHandler(const char *file, int line, std::string_view) {
+  std::fprintf(stderr, "ResourceMaterializationTests: exit at %s:%d\n", file, line);
+  std::abort();
+}
 
-void DbgExitIfHandler(const char *, const char *, int) { std::abort(); }
+void DbgExitIfHandler(const char *file, const char *, int line) {
+  std::fprintf(stderr, "ResourceMaterializationTests: exit at %s:%d\n", file, line);
+  std::abort();
+}
 
 } // namespace Common
 
-int main() {
+int main(int argc, char **argv) {
+  // --old-layout: without the canonical-resources port.
+  if (argc > 1 && std::string_view(argv[1]) == "--old-layout") Config::SetDisabledPorts({"canonical-resources"});
   TestWalkerLoadsBypassSpecializationReader();
   TestNativeNestedSrtRefresh();
   TestIntegerRuntimeValueFollowsSrtReads();
@@ -1695,8 +1989,11 @@ int main() {
   for (const bool atomic64 : {false, true}) TestUnreachedImageIgnoresSharedDescriptor(atomic64);
   for (const bool mixed : {false, true}) TestIndirectImageSamplerClasses(mixed);
   TestIndirectFormattedUInt8RawBoundsBuffer();
+  TestIndirectFormattedStridedAndGeneralStores();
   TestAtomicImageUint8Format();
   TestShaderCacheRecords();
+  if (!(argc > 1 && std::string_view(argv[1]) == "--old-layout"))
+    canonical_boots::TestCanonicalSpecializationAcrossBoots();
   std::puts("ResourceMaterializationTests: all cases passed");
   return 0;
 }

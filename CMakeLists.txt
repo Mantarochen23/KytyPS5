@@ -393,7 +393,7 @@ list(REMOVE_ITEM kyty_emulator_src ${spatial_renderer_src})
 add_library(kyty_spatial_audio STATIC ${spatial_renderer_src})
 target_link_libraries(kyty_spatial_audio PRIVATE common OpenAL::OpenAL)
 
-set(kyty_emulator_link_libraries common Vulkan::Headers SPIRV-Tools-static SDL3::SDL3-static kyty_spatial_audio imgui xxhash FFmpeg::ffmpeg fmt::fmt nlohmann_json::nlohmann_json LibAtrac9 kyty_git_version Zydis::Zydis xbyak::xbyak opus OpenXR::openxr_loader libzstd_static)
+set(kyty_emulator_link_libraries common Vulkan::Headers SPIRV-Tools-static SPIRV-Tools-opt SDL3::SDL3-static kyty_spatial_audio imgui xxhash FFmpeg::ffmpeg fmt::fmt nlohmann_json::nlohmann_json LibAtrac9 kyty_git_version Zydis::Zydis xbyak::xbyak opus OpenXR::openxr_loader libzstd_static)
 
 # Linux system libraries.
 if(LINUX)
@@ -896,6 +896,8 @@ if(BUILD_TESTING)
 	add_test(NAME vr_tracker2 COMMAND $<TARGET_FILE:vr_tracker2_tests>)
 	add_test(NAME user_service COMMAND $<TARGET_FILE:user_service_tests>)
 	add_test(NAME shader_recompiler_compute COMMAND $<TARGET_FILE:shader_recompiler_compute_tests>)
+	add_test(NAME shader_recompiler_canonical_equivalence
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --canonical-equivalence-only)
 	add_test(NAME shader_recompiler_tessellation
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --tessellation-only)
 	add_test(NAME shader_recompiler_float_min_max

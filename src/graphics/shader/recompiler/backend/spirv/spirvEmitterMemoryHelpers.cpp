@@ -47,9 +47,25 @@ static uint32_t LoadFlattenedSrt(EmitterState& state, uint32_t index) {
 	return value;
 }
 
+// Word index of a mapping: a constant, or under the canonical layout the value of its header slot.
+static uint32_t MappingBase(EmitterState& state, uint32_t mapping_offset) {
+	if ((mapping_offset & IR::IndirectMappingHeader) == 0u) return ConstantU32(state, mapping_offset);
+	return LoadFlattenedSrt(state, ConstantU32(state, mapping_offset & ~IR::IndirectMappingHeader));
+}
+
+// Word index word of a mapping; constant without the header, so that layout emits as before.
+static uint32_t MappingWord(EmitterState& state, uint32_t mapping_offset, uint32_t base,
+                            uint32_t word) {
+	if ((mapping_offset & IR::IndirectMappingHeader) == 0u)
+		return ConstantU32(state, mapping_offset + word);
+	return word == 0u ? base : EmitAddU32(state, base, ConstantU32(state, word));
+}
+
 uint32_t EmitImageHeapEntry(EmitterState& state, uint32_t key, uint32_t mapping_offset) {
+	const auto base    = (mapping_offset & IR::IndirectMappingHeader) != 0u
+	                         ? MappingBase(state, mapping_offset) : 0u;
 	const auto Mapping = [&](uint32_t word) {
-		return LoadFlattenedSrt(state, ConstantU32(state, mapping_offset + word));
+		return LoadFlattenedSrt(state, MappingWord(state, mapping_offset, base, word));
 	};
 	// Keys past the table select its trailing null slot.
 	const auto index = EmitUMin32(state, Binary(state, spv::OpShiftRightLogical, TypeU32(state), key,
@@ -67,9 +83,20 @@ uint32_t EmitImageHeapEntry(EmitterState& state, uint32_t key, uint32_t mapping_
 	return entry;
 }
 
+uint32_t EmitImageHeapArm(EmitterState& state, uint32_t arm, uint32_t mapping_offset,
+                          uint32_t kinds) {
+	if ((mapping_offset & IR::IndirectMappingHeader) == 0u) return arm;
+	// The heap's arms follow the order it met the kinds; the map behind the slot address gives
+	// each arm's position among the kinds in canonical order.
+	const auto base    = MappingBase(state, mapping_offset);
+	const auto clamped = EmitUMin32(state, arm, ConstantU32(state, kinds - 1u));
+	return LoadFlattenedSrt(state, EmitAddU32(state, EmitAddU32(state, base, ConstantU32(state, 3u)),
+	                                          clamped));
+}
+
 uint32_t EmitIndirectResourceIndex(EmitterState& state, uint32_t key, uint32_t mapping_offset,
                                    uint32_t search_iterations, uint32_t default_resource) {
-	const auto mapping = ConstantU32(state, mapping_offset);
+	const auto mapping = MappingBase(state, mapping_offset);
 	const auto count = LoadFlattenedSrt(state, mapping);
 	if (search_iterations == 0u) {
 		const auto index = Binary(state, spv::OpShiftRightLogical, TypeU32(state), key,
@@ -77,7 +104,7 @@ uint32_t EmitIndirectResourceIndex(EmitterState& state, uint32_t key, uint32_t m
 		const auto valid = Binary(state, spv::OpULessThan, TypeBool(state), index, count);
 		const auto safe = Select(state, TypeU32(state), valid, index, ConstantU32(state, 0u));
 		const auto entry = Binary(state, spv::OpIAdd, TypeU32(state), safe,
-		                          ConstantU32(state, mapping_offset + 1u));
+		                          MappingWord(state, mapping_offset, mapping, 1u));
 		return Select(state, TypeU32(state), valid, LoadFlattenedSrt(state, entry),
 		              ConstantU32(state, default_resource));
 	}
@@ -89,20 +116,55 @@ uint32_t EmitIndirectResourceIndex(EmitterState& state, uint32_t key, uint32_t m
 	};
 	auto low = ConstantU32(state, 0u);
 	auto high = count;
-	for (uint32_t iteration = 0; iteration < search_iterations; ++iteration) {
-		const auto active = Binary(state, spv::OpULessThan, TypeBool(state), low, high);
+	if (search_iterations == IR::IndirectSearchRuntime) {
+		// A loop bounded by the key count the mapping holds: the module does not depend on it.
+		const auto entry_label = state.current_label;
+		const auto header      = state.builder.AllocateId();
+		const auto body        = state.builder.AllocateId();
+		const auto next        = state.builder.AllocateId();
+		const auto merge       = state.builder.AllocateId();
+		const auto loop_low    = state.builder.AllocateId();
+		const auto loop_high   = state.builder.AllocateId();
+		const auto next_low    = state.builder.AllocateId();
+		const auto next_high   = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpBranch, header);
+		EmitLabel(state, header);
+		state.builder.AddFunction(spv::OpPhi, TypeU32(state), loop_low, low, entry_label, next_low, next);
+		state.builder.AddFunction(spv::OpPhi, TypeU32(state), loop_high, high, entry_label, next_high,
+		                          next);
+		const auto active = Binary(state, spv::OpULessThan, TypeBool(state), loop_low, loop_high);
+		state.builder.AddFunction(spv::OpLoopMerge, merge, next, spv::LoopControlMaskNone);
+		state.builder.AddFunction(spv::OpBranchConditional, active, body, merge);
+		EmitLabel(state, body);
 		const auto mid = Binary(state, spv::OpShiftRightLogical, TypeU32(state),
-		                        Binary(state, spv::OpIAdd, TypeU32(state), low, high),
+		                        Binary(state, spv::OpIAdd, TypeU32(state), loop_low, loop_high),
 		                        ConstantU32(state, 1u));
-		const auto probe = Select(state, TypeU32(state), active, mid, ConstantU32(state, 0u));
 		const auto less = Binary(state, spv::OpULessThan, TypeBool(state),
-		                         LoadFlattenedSrt(state, entry_at(probe)), key);
-		low = Select(state, TypeU32(state),
-		             Binary(state, spv::OpLogicalAnd, TypeBool(state), active, less),
-		             Binary(state, spv::OpIAdd, TypeU32(state), mid, ConstantU32(state, 1u)), low);
-		high = Select(state, TypeU32(state),
-		              Binary(state, spv::OpLogicalAnd, TypeBool(state), active,
-		                     Unary(state, spv::OpLogicalNot, TypeBool(state), less)), mid, high);
+		                         LoadFlattenedSrt(state, entry_at(mid)), key);
+		const auto above = Binary(state, spv::OpIAdd, TypeU32(state), mid, ConstantU32(state, 1u));
+		state.builder.AddFunction(spv::OpBranch, next);
+		EmitLabel(state, next);
+		state.builder.AddFunction(spv::OpSelect, TypeU32(state), next_low, less, above, loop_low);
+		state.builder.AddFunction(spv::OpSelect, TypeU32(state), next_high, less, loop_high, mid);
+		state.builder.AddFunction(spv::OpBranch, header);
+		EmitLabel(state, merge);
+		low = loop_low;
+	} else {
+		for (uint32_t iteration = 0; iteration < search_iterations; ++iteration) {
+			const auto active = Binary(state, spv::OpULessThan, TypeBool(state), low, high);
+			const auto mid = Binary(state, spv::OpShiftRightLogical, TypeU32(state),
+			                        Binary(state, spv::OpIAdd, TypeU32(state), low, high),
+			                        ConstantU32(state, 1u));
+			const auto probe = Select(state, TypeU32(state), active, mid, ConstantU32(state, 0u));
+			const auto less = Binary(state, spv::OpULessThan, TypeBool(state),
+			                         LoadFlattenedSrt(state, entry_at(probe)), key);
+			low = Select(state, TypeU32(state),
+			             Binary(state, spv::OpLogicalAnd, TypeBool(state), active, less),
+			             Binary(state, spv::OpIAdd, TypeU32(state), mid, ConstantU32(state, 1u)), low);
+			high = Select(state, TypeU32(state),
+			              Binary(state, spv::OpLogicalAnd, TypeBool(state), active,
+			                     Unary(state, spv::OpLogicalNot, TypeBool(state), less)), mid, high);
+		}
 	}
 	const auto in_range = Binary(state, spv::OpULessThan, TypeBool(state), low, count);
 	const auto entry = entry_at(Select(state, TypeU32(state), in_range, low, ConstantU32(state, 0u)));

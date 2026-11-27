@@ -14,7 +14,7 @@
 #   KYTY_KEEP_GOING=0  run without --keep-going (first failure is fatal, as upstream)
 #   KYTY_FATAL_ABORT=1 abort() on a fatal error so systemd-coredump keeps a core (large)
 #   KYTY_AUDIO=none    no sound (default host: the PulseAudio/PipeWire socket is passed in)
-#   KYTY_AUTO_CROSS=<s>  no controller needed: Cross is pressed every 2 s for the first <s> seconds
+#   KYTY_AUTO_CROSS=<s>  no controller needed: Cross is pressed every 2 s for <s> seconds from the first pad read
 #   KYTY_PROFILE_AT=<s>|stall  perf-record the emulator for KYTY_PROFILE_SECONDS (20) from that second;
 #                      writes perf.data, perf.txt (hot functions), perf-threads.txt
 #   KYTY_SHADER_CACHE=0  do not keep translated shaders between runs (default: kept in the state

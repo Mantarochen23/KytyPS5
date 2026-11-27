@@ -21,6 +21,9 @@ enum class Port : uint32_t {
 	GpuSelectedWrites, // keyed-table atomics; buffer writes do not block scalar branch lowering
 	DispatchGuard,     // zero indirect dispatches whose GPU-written group counts are out of range
 	LargeMemoryBudget, // grant the 1216 MiB larger guest memory budget without Pro-mode metadata
+	CanonicalResources, // indirect resources specialize independently of table layout and encounter order
+	IndirectFormattedStores, // allow general aligned formatted indirect buffer stores
+	FiniteBufferDescriptors, // enumerate bounded GPU-selected buffer descriptors across select/phi/lane trees
 	Count
 };
 
@@ -39,6 +42,9 @@ inline constexpr PortInfo PORTS[] = {
     {Port::GpuSelectedWrites, "gpu-selected-writes", "wololo-wololo/VIcky-Blue@d134910670", true},
     {Port::DispatchGuard, "dispatch-guard", "wololo-wololo/VIcky-Blue@841cb9cac2", false},
     {Port::LargeMemoryBudget, "large-memory-budget", "wololo-wololo/VIcky-Blue@26d53f0fb", false},
+    {Port::CanonicalResources, "canonical-resources", "this tree (shader store reuse across boots)", true},
+    {Port::IndirectFormattedStores, "indirect-formatted-stores", "local matfail2", true},
+    {Port::FiniteBufferDescriptors, "finite-buffer-descriptors", "local matfail2", true},
 };
 static_assert(std::size(PORTS) == static_cast<size_t>(Port::Count));
 

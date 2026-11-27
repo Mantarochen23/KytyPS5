@@ -489,7 +489,7 @@ void GuestGpu::DrainComputePrefetches() {
 	Common::LockGuard lock(m_renderer.GetMutex());
 	auto&             cache = m_renderer.GetPipelineCache();
 	for (const auto& req: batch) {
-		cache.PrefetchComputeProgram(req.cs_regs, req.dispatch_thread_dimensions, false);
+		cache.PrefetchComputeProgram(req.cs_regs, req.dispatch_thread_dimensions, false, nullptr, true);
 	}
 }
 

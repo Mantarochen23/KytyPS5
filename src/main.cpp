@@ -76,7 +76,7 @@ static void PrintUsage() {
 	         "                                       Implies --vulkan-validation; very slow.\n");
 	::printf("  --shader-validation                  Enable shader validation.\n");
 	::printf("  --auto-cross <seconds>               Debug: for unattended runs, report Cross pressed for 0.15 s\n"
-	         "                                       every 2 s during the first <seconds> of the run.\n");
+	         "                                       every 2 s for <seconds> from the title's first pad read.\n");
 	::printf("  --trace-calls[=<lib[,lib]>]          Debug: log system library calls (1st-4th and powers\n"
 	         "                                       of two; with <lib[,lib]>, log every call with args/result).\n");
 	::printf("  --keep-going                         Debug: skip draws and dispatches whose shader fails to\n"
@@ -176,7 +176,15 @@ static void PrintUsage() {
 	         "                                       on. 0 = wait for ever. Default: 0.\n"
 	         "  --async-lookahead <0|1>              The scan of submitted commands also reads compute user\n"
 	         "                                       data, so shaders whose resources follow from it are\n"
-	         "                                       built before their dispatch is reached. Default: 1.\n");
+	         "                                       built before their dispatch is reached. Default: 1.\n"
+	         "  --warmup-budget-s <n>                Start the title after n seconds of loading the shader\n"
+	         "                                       store (first-used first); the rest loads in the\n"
+	         "                                       background. 0 = load all first. Default: 0.\n"
+	         "  --spirv-compact                     Run conservative SPIR-V cleanup after emission.\n"
+	         "                                       Default: off.\n"
+	         "  --mem-limit-gb <n>                   When the process's RSS + swap passes n GB, print the\n"
+	         "                                       [mem] table and drop caches; if still over 10 s later\n"
+	         "                                       stop the run with a message. 0 = off. Default: 0.\n");
 }
 
 static bool NextArg(int argc, char* argv[], int& index, std::string& out) {
@@ -312,6 +320,7 @@ static constexpr Flag FLAGS[] = {
     {"--shader-key-index", &ConfigOptions::shader_key_index_enabled},
     {"--guest-fault-park", &ConfigOptions::guest_fault_park},
     {"--guest-fault-report-only", &ConfigOptions::guest_fault_report_only},
+    {"--spirv-compact", &ConfigOptions::spirv_compact_enabled},
 };
 
 static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_help) {
@@ -631,6 +640,16 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 		} else if (arg == "--async-lookahead") {
 			if (!ParseUint32(value, options.config.async_lookahead)) {
 				::printf("invalid async lookahead value: %s\n", value.c_str());
+				return false;
+			}
+		} else if (arg == "--warmup-budget-s") {
+			if (!ParseUint32(value, options.config.warmup_budget_s)) {
+				::printf("invalid warmup budget value: %s\n", value.c_str());
+				return false;
+			}
+		} else if (arg == "--mem-limit-gb") {
+			if (!ParseUint32(value, options.config.mem_limit_gb)) {
+				::printf("invalid memory limit value: %s\n", value.c_str());
 				return false;
 			}
 		} else {

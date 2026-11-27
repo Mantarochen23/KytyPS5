@@ -3,6 +3,7 @@
 #include "graphics/shader/recompiler/Tessellation.h"
 
 #include "common/assert.h"
+#include "common/emulatorConfig.h"
 #include "common/logging/log.h"
 #include "graphics/shader/recompiler/backend/spirv/SpirvEmitter.h"
 #include "graphics/shader/recompiler/frontend/cfg/ShaderCFG.h"
@@ -25,9 +26,25 @@
 #include <fmt/format.h>
 #include <map>
 #include <span>
+#include <spirv-tools/optimizer.hpp>
 #include <utility>
 
 namespace Libs::Graphics::ShaderRecompiler {
+
+bool CompactSpirv(std::span<const uint32_t> input, std::vector<uint32_t>& output,
+	              std::string& error) {
+	spvtools::Optimizer optimizer(SPV_ENV_VULKAN_1_3);
+	optimizer.SetMessageConsumer([&](spv_message_level_t, const char*, const spv_position_t& position,
+	                                 const char* message) {
+		error = "word " + std::to_string(position.index) + ": " + message;
+	});
+	optimizer.RegisterPass(spvtools::CreateRedundancyEliminationPass());
+	optimizer.RegisterPass(spvtools::CreateSimplificationPass());
+	optimizer.RegisterPass(spvtools::CreateAggressiveDCEPass());
+	optimizer.RegisterPass(spvtools::CreateCompactIdsPass());
+	output.clear();
+	return optimizer.Run(input.data(), input.size(), &output);
+}
 
 namespace {
 
@@ -746,6 +763,25 @@ CompileResult CompileProgram(TranslateResult translated, const CompileOptions& o
 	     ir.shader_hash);
 	auto spirv = Spirv::EmitProgram(ir, options.input_info, push_data, *options.profile,
 	                                options.emit_debug_info);
+	if (Config::SpirvCompactEnabled()) {
+		const auto before = spirv.size();
+		std::vector<uint32_t> compact;
+		std::string           error;
+		const auto compact_begin = std::chrono::steady_clock::now();
+		if (CompactSpirv(spirv, compact, error)) {
+			spirv = std::move(compact);
+			LOGF("ShaderRecompiler %s SPIR-V compact: hash=0x%016" PRIx64
+			     " before_words=%" PRIu64 " after_words=%" PRIu64 " elapsed_ms=%" PRIu64 "\n",
+			     stage, ir.shader_hash, static_cast<uint64_t>(before),
+			     static_cast<uint64_t>(spirv.size()),
+			     static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+			                               std::chrono::steady_clock::now() - compact_begin)
+			                               .count()));
+		} else {
+			LOGF("ShaderRecompiler %s SPIR-V compact failed: hash=0x%016" PRIx64 " reason=%s\n",
+			     stage, ir.shader_hash, error.c_str());
+		}
+	}
 	LOGF("ShaderRecompiler %s phase end: hash=0x%016" PRIx64 " SPIR-V EmitProgram words=%" PRIu64
 	     " wave_size=%u elapsed_ms=%" PRIu64 "\n",
 	     stage, ir.shader_hash, static_cast<uint64_t>(spirv.size()), ir.wave_size,

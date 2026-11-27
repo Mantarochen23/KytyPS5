@@ -38,6 +38,9 @@ struct ResourceSnapshot {
 	std::vector<uint32_t>        user_data;
 	std::vector<std::pair<uint64_t, uint64_t>> specialization_reads;
 	UniformFill                 uniform_fill;
+	// With SrtRuntime::legacy_hash under the canonical-resources port: the hash of the
+	// specialization the layout without the port would have given these inputs; else 0.
+	uint64_t                    legacy_hash = 0;
 };
 
 } // namespace Libs::Graphics::ShaderRecompiler::IR

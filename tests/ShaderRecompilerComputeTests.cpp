@@ -4,6 +4,7 @@
 #include "common/recoverable.h"
 #include "common/debugCounters.h"
 #include "common/emulatorConfig.h"
+#include "common/ports.h"
 #include "common/file.h"
 #include "common/hostException.h"
 #include "common/logging/log.h"
@@ -749,6 +750,17 @@ struct PipelineCacheTestAccess {
   }
 
   static auto Compiled(const PipelineCache &cache) { return cache.m_compiled; }
+  // 0: the next store load leaves everything to its background loader; -1: the option.
+  static void SetWarmUpBudgetMs(int64_t ms) { PipelineCache::s_warmup_budget_ms_for_tests = ms; }
+  // Applies what the background load finished until it is done (at most 10 s).
+  static bool FinishWarmUp(PipelineCache &cache) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (cache.m_warmup != nullptr && std::chrono::steady_clock::now() < deadline) {
+      cache.DrainWarmUp();
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return cache.m_warmup == nullptr;
+  }
 
   template <typename InputInfo>
   static const ShaderModule *GetProgram(PipelineCache &cache, const ShaderParams &params,
@@ -13512,6 +13524,94 @@ public:
     context.ShutdownGpu();
     Require(name, "release", LibKernel::Memory::KernelCheckedReleaseDirectMemory(physical, size) == 0,
             "null texture output release failed");
+    std::printf("[gpu]     %-32s ok\n", name);
+  }
+
+  // A program with GPU-selected calls is stored with its callee code: a restart links the
+  // callees and compiles nothing for the same code, wherever it lies; other code compiles.
+  void CheckCallProgramStore() {
+    constexpr const char* name = "CallProgramStore";
+    constexpr uintptr_t base = 0x0000000204a00000ull;
+    constexpr uint64_t size = 0x10000;
+    constexpr auto table = base + 0x100;
+    constexpr auto first = base + 0x1000;
+    constexpr auto second = base + 0x2000;
+    constexpr auto output = base + 0x4000;
+    // The caller of CheckScalarLeafCall: s[14:15] from the table at +0x20, call, store s20.
+    static std::vector<u32> code{
+        EncodeSMovB32(20, InlineU32(0)),
+        0xbeea03ffu, static_cast<u32>(base), 0xbeeb03ffu, static_cast<u32>(base >> 32u),
+        0xf4080135u, 0xfa000000u, 0xbf8cc07fu, 0xf4240382u, 0xfa000020u,
+        0xbf8cc07fu, 0xbf130e80u, 0xbf840004u, 0xf4240402u, 0xfa000028u,
+        0xbf8cc07fu, 0xbe8e210eu, EncodeVop1(0x01, 1, 20),
+        EncodeMubuf0(0x1c, 0, false), EncodeMubuf1(1, 0, 0)};
+    if (code.back() != EncodeSopp(0x01)) AppendEnd(&code);
+    ShaderMapUserData(reinterpret_cast<uint64_t>(code.data()),
+        {.type = Prospero::ShaderBinaryType::kCs,
+         .code_size_bytes = static_cast<u32>(code.size() * sizeof(u32))});
+    EnsureRuntimeContext();
+    int64_t physical = -1;
+    Require(name, "allocate", LibKernel::Memory::KernelAllocateDirectMemory(
+        0, LibKernel::Memory::KernelGetDirectMemorySize(), size, size, 0, &physical) == 0,
+        "call store fixture allocation failed");
+    void* mapped = reinterpret_cast<void*>(base);
+    Require(name, "map", LibKernel::Memory::KernelMapDirectMemory(
+        &mapped, size, 0x3, 0x10, physical, size) == 0 && mapped == reinterpret_cast<void*>(base),
+        "call store fixture mapping failed");
+    const auto store = std::filesystem::temp_directory_path() /
+                       fmt::format("kyty_call_store_{}",
+                                   std::chrono::steady_clock::now().time_since_epoch().count()) /
+                       "TEST00000.shaders";
+    // One boot: the leaf at `address` returns `value`; result and compute modules compiled.
+    const auto boot = [&](uint64_t address, u32 value) {
+      std::memset(mapped, 0, size);
+      const ShaderBufferResource table_desc{{static_cast<u32>(table),
+          static_cast<u32>(table >> 32u) | (16u << 16u), 8, 0x5204u}};
+      LibKernel::Memory::WriteBacking(base, table_desc.fields, sizeof(table_desc.fields));
+      const std::array leaf{EncodeSMovB32(20, 255), value, EncodeSop1(0x21, 125, 14)};
+      LibKernel::Memory::WriteBacking(address, leaf.data(), sizeof(leaf));
+      const uint64_t target = address | 3u;
+      LibKernel::Memory::WriteBacking(table + 0x20, &target, sizeof(target));
+      RenderContext context(m_runtime_context, store);
+      context.InitializeGpu(nullptr);
+      LibKernel::Memory::InstallGpuResources(&context);
+      u32 actual = 0;
+      context.GetGpu().SendCommandSync([&] {
+        CommandProcessor processor(context, 0);
+        processor.BufferInit();
+        context.MapMemory(base, size);
+        auto& shaders = processor.GetShCtx();
+        shaders.SetCsShader({.data_addr = reinterpret_cast<uint64_t>(code.data()),
+                             .num_thread_x = 1, .num_thread_y = 1, .num_thread_z = 1,
+                             .wave_size = 64, .user_sgpr = 4});
+        ShaderBufferResource out{};
+        out.UpdateAddress48(output);
+        out.fields[2] = 4;
+        out.fields[3] = DstSel(4, 5, 6, 7) |
+            (static_cast<u32>(Prospero::BufferFormat::k32UInt) << 12u);
+        for (u32 i = 0; i < 4; ++i) shaders.SetCsUserSgpr(i, out.fields[i]);
+        processor.DispatchDirect(1, 1, 1, 0x41u);
+        context.GetBufferCache().ReadMemory(output, sizeof(u32));
+        (void)LibKernel::Memory::TryReadBacking(output, &actual, sizeof(actual));
+        context.UnmapMemory(base, size);
+        context.GetCommandScheduler().Finish();
+      });
+      context.ShutdownGpu();
+      LibKernel::Memory::InstallGpuResources(nullptr);
+      const auto compiled = PipelineCacheTestAccess::Compiled(context.GetPipelineCache());
+      return std::pair{actual, compiled[static_cast<size_t>(ShaderType::Compute)]};
+    };
+    Require(name, "cold boot", boot(first, 41) == std::pair{41u, 1u},
+            "the linked program did not run or did not compile once");
+    Require(name, "warm boot", boot(first, 41) == std::pair{41u, 0u},
+            "a restart compiled the linked program again for the same callee code");
+    Require(name, "relocated callee", boot(second, 41) == std::pair{41u, 0u},
+            "the stored module depended on where the callee code lies");
+    Require(name, "other callee code", boot(first, 73) == std::pair{73u, 1u},
+            "another callee code was served by a stored module");
+    Require(name, "both callee sets stored", boot(second, 73) == std::pair{73u, 0u} &&
+                                               boot(first, 41) == std::pair{41u, 0u},
+            "a restart lost one of the callee sets of the program");
     std::printf("[gpu]     %-32s ok\n", name);
   }
 
@@ -48311,6 +48411,26 @@ void CheckIndirectImageKeySwitch(VulkanHarness &vulkan) {
               text.find("SampledImageArrayNonUniformIndexing") != std::string::npos,
           "dense image selection lost its bounds check or native nonuniform array");
 
+  // Canonical layout (port canonical-resources): the mapping starts at a header word and the
+  // sparse search is a loop bounded by the key count at run time.
+  for (const bool sparse : {true, false}) {
+    program.info.images[0].indirect_mapping_offset = IndirectMappingHeader | 2u;
+    program.info.images[0].indirect_search_iterations = sparse ? IndirectSearchRuntime : 0u;
+    program.shader_info_complete = false;
+    CollectShaderInfo(program, {.compute = &compute});
+    spirv = ShaderRecompiler::Spirv::EmitProgram(program, {.compute = &compute});
+    ValidateSpirv("CanonicalIndirectImageTable", spirv);
+    Require(name, "canonical image map disassembly", tools.Disassemble(spirv, &text),
+            "failed to disassemble the canonical image table shader");
+    Require(name, sparse ? "runtime-bounded sparse search" : "header-relative dense map",
+            CountText(text, "OpLoopMerge") == (sparse ? 1 : 0) &&
+                CountText(text, "OpImageSampleExplicitLod") == 1 &&
+                CountText(text, "OpULessThan") == (sparse ? 3 : 1),
+            "the canonical image table lost its loop, its bounds check or its single sample");
+  }
+  program.info.images[0].indirect_mapping_offset = 0u;
+  program.info.images[0].indirect_search_iterations = 0u;
+
   // Materialized children follow all native roots, including unrelated images.
   root.indirect_resources = {0u};
   program.info.images = {root, candidate};
@@ -48392,6 +48512,21 @@ void CheckIndirectImageKeySwitch(VulkanHarness &vulkan) {
                 CountText(text, "DescriptorSet 1") == (mixed ? 2 : 1) &&
                 text.find("PhysicalStorageBuffer64") != std::string::npos,
             "image heap kinds did not sample the slot-selected heap element");
+    // Canonical layout: the arm of a slot word reads its kind position from the heap's arm map.
+    program.info.images[0].indirect_mapping_offset = IndirectMappingHeader | 1u;
+    program.shader_info_complete = false;
+    CollectShaderInfo(program, {.compute = &compute});
+    spirv = ShaderRecompiler::Spirv::EmitProgram(program, {.compute = &compute});
+    ValidateSpirv("CanonicalResidentImageHeap", spirv);
+    Require(name, "canonical image heap disassembly", tools.Disassemble(spirv, &text),
+            "failed to disassemble the canonical image heap shader");
+    Require(name, "canonical image heap arm map",
+            CountText(text, "OpConvertUToPtr") == 1 &&
+                CountText(text, "UMin") == (mixed ? 2 : 1) &&
+                CountText(text, "OpSwitch") == (mixed ? 1 : 0) &&
+                CountText(text, "OpImageSampleExplicitLod") == (mixed ? 2 : 1),
+            "the canonical heap lost its arm map or its slot-selected element");
+    program.info.images[0].indirect_mapping_offset = heap_root.indirect_mapping_offset;
   }
 
   program.memory_info[0].image_dimension =
@@ -51819,11 +51954,18 @@ void CheckShaderStore(VulkanHarness &vulkan) {
     u32 output = 0;
     bool operator==(const Session &) const = default;
   };
-  // Dispatches the compute program and creates the graphics pipeline.
-  const auto run = [&] {
+  // Dispatches the compute program and creates the graphics pipeline. With background the
+  // store loads on the background loader (a warm-up budget that ran out at once) and the
+  // session counts what it had made when it finished.
+  const auto run = [&](bool background = false) {
     std::memset(mapped, 0, allocation_size);
+    if (background) PipelineCacheTestAccess::SetWarmUpBudgetMs(0);
     RenderContext context(vulkan.RuntimeContext(), store);
+    PipelineCacheTestAccess::SetWarmUpBudgetMs(-1);
     auto &pipelines = context.GetPipelineCache();
+    if (background)
+      Require(name, "background load", PipelineCacheTestAccess::FinishWarmUp(pipelines),
+              "the background store load did not finish");
     Session session{.prewarmed = PipelineCacheTestAccess::Pipelines(pipelines)};
     context.InitializeGpu(nullptr);
     LibKernel::Memory::InstallGpuResources(&context);
@@ -51884,6 +52026,9 @@ void CheckShaderStore(VulkanHarness &vulkan) {
   warm.compiled = {};
   Require(name, "warm restart", run() == warm && std::filesystem::file_size(store) == size,
           "a restart compiled a module, created a pipeline late or rewrote the store");
+  Require(name, "background warm restart",
+          run(true) == warm && std::filesystem::file_size(store) == size,
+          "the background store load lost a module or a pipeline, or rewrote the store");
   std::filesystem::resize_file(store, size + 3);
   Require(name, "torn tail", run() == warm && std::filesystem::file_size(store) == size,
           "a torn last record was kept");
@@ -55083,7 +55228,8 @@ void CheckImageSamplerSpecialization() {
                 MaterializeResources(plan, runtime, snapshot, specialization) &&
                 snapshot.images.size() == count + 1u,
             "GPU-selected material descriptors did not expand beyond native root capacity");
-    const auto offset = specialization.images[0].indirect_mapping_offset;
+    const auto offset = IndirectMappingStart(specialization.images[0].indirect_mapping_offset,
+                                             snapshot.flattened_srt);
     const auto ordinal = [&](u32 byte_offset) {
       const auto word = byte_offset >> 2u;
       return word < snapshot.flattened_srt[offset]
@@ -58818,6 +58964,59 @@ void CheckPm4RewindResume(RenderContext &renderer) {
 }
 
 } // namespace
+
+// Programs with indirect descriptor tables; run in both resource layouts by
+// --canonical-equivalence-only.
+// known_failing: also the cases that already fail at the base of the canonical-resources port, so a
+// run of both layouts reaches every other case (the harness stops at the first failure).
+static void RunIndirectBufferSuite(VulkanHarness &vulkan, bool known_failing = true) {
+  RunCase(&vulkan, ScalarBufferFromLoopReadlane(32));
+  RunCase(&vulkan, ScalarBufferFromLoopReadlane(64));
+  CheckBoundedFormattedBufferCopy(vulkan);
+  RunCase(&vulkan, BufferStoreWorkgroupDescriptors(2u, 4u));
+  for (u32 groups : {1u, 3u}) RunCase(&vulkan, BufferStoreWorkgroupDescriptors(groups, 2u));
+  for (u32 groups : {1u, 2u}) RunCase(&vulkan, BufferStoreWorkgroupDescriptors(groups));
+  CheckFiniteBufferSelection(vulkan);
+  if (known_failing) CheckIndirectBufferStore(vulkan);
+  CheckBoundedRecordBufferAccess(vulkan);
+  CheckGpuSelectedRecordBufferAccess(vulkan);
+  CheckGuardedWaterfallBufferRecords(vulkan);
+  CheckGpuSelectedFormattedRecordStore(vulkan);
+  CheckRuntimeBufferRecords(vulkan);
+  CheckSharedIndirectBufferLoads(vulkan);
+  RunCase(&vulkan, BufferLoadFormatXGpuSelectedDescriptors());
+  RunCase(&vulkan, BufferLoadFormatXGpuSelectedDescriptors64());
+  RunCase(&vulkan, BufferLoadFormatXRejectsPartialRecord());
+  RunCase(&vulkan, BufferLoadFormatXyRejectsPartialRecord());
+  RunCase(&vulkan, BufferLoadDwordx4SnapshotsOverlappingAddress());
+  RunCase(&vulkan, BufferLoadDwordx4ZeroesOnlyOutOfBoundsTail());
+  RunCase(&vulkan, BufferLoadDwordIdxenUsesDescriptorStride());
+  RunCase(&vulkan, BufferStoreFormatXAddTidUsesLaneIndex());
+  RunCase(&vulkan, FlatVirtualAddressRebasesGuestAllocation());
+}
+
+static void RunIndirectImageSuite(VulkanHarness &vulkan, bool known_failing = true) {
+  (void)known_failing;
+  vulkan.CheckNullTextureDescriptors();
+  CheckCountedRowImageSelector(vulkan);
+  CheckPointerImageTable(vulkan);
+  CheckWorkgroupDividedImageTable(vulkan);
+  CheckWaterfallFloorImageTable(vulkan);
+  CheckMixedDimensionImageTable(vulkan);
+  CheckClampedSiblingImageTable(vulkan);
+  CheckLaneCountedImageTable(vulkan);
+  CheckGuardedSelectorImageTable(vulkan);
+  CheckInclusiveGuardImageTable(vulkan);
+  CheckNestedPointerImageTable(vulkan);
+  CheckGuardedRecordImageTable(vulkan);
+  CheckIndirectImageKeySwitch(vulkan);
+  vulkan.CheckResidentImageHeap();
+  CheckFiniteFirstLaneImageChoice(vulkan);
+  CheckFiniteInlineSamplerPhi(vulkan);
+  CheckSamplerCandidateTables(vulkan);
+  RunCase(&vulkan, ImageCubeGradientsPreserveDerivatives());
+}
+
 } // namespace Libs::Graphics
 
 int main(int argc, char **argv) {
@@ -58912,6 +59111,7 @@ int main(int argc, char **argv) {
     VulkanHarness vulkan;
     CheckShaderStore(vulkan);
     CheckShaderKeyIndex(vulkan);
+    vulkan.CheckCallProgramStore();
     return 0;
   }
   if (argc == 2 && std::strcmp(argv[1], "--lds-limit-only") == 0) {
@@ -59330,29 +59530,22 @@ int main(int argc, char **argv) {
   }
   if (argc == 2 && std::strcmp(argv[1], "--indirect-buffer-only") == 0) {
     VulkanHarness vulkan;
-    RunCase(&vulkan, ScalarBufferFromLoopReadlane(32));
-    RunCase(&vulkan, ScalarBufferFromLoopReadlane(64));
-    CheckBoundedFormattedBufferCopy(vulkan);
-    RunCase(&vulkan, BufferStoreWorkgroupDescriptors(2u, 4u));
-    for (u32 groups : {1u, 3u}) RunCase(&vulkan, BufferStoreWorkgroupDescriptors(groups, 2u));
-    for (u32 groups : {1u, 2u}) RunCase(&vulkan, BufferStoreWorkgroupDescriptors(groups));
-    CheckFiniteBufferSelection(vulkan);
-    CheckIndirectBufferStore(vulkan);
-    CheckBoundedRecordBufferAccess(vulkan);
-    CheckGpuSelectedRecordBufferAccess(vulkan);
-    CheckGuardedWaterfallBufferRecords(vulkan);
-    CheckGpuSelectedFormattedRecordStore(vulkan);
-    CheckRuntimeBufferRecords(vulkan);
-    CheckSharedIndirectBufferLoads(vulkan);
-    RunCase(&vulkan, BufferLoadFormatXGpuSelectedDescriptors());
-    RunCase(&vulkan, BufferLoadFormatXGpuSelectedDescriptors64());
-    RunCase(&vulkan, BufferLoadFormatXRejectsPartialRecord());
-    RunCase(&vulkan, BufferLoadFormatXyRejectsPartialRecord());
-    RunCase(&vulkan, BufferLoadDwordx4SnapshotsOverlappingAddress());
-    RunCase(&vulkan, BufferLoadDwordx4ZeroesOnlyOutOfBoundsTail());
-    RunCase(&vulkan, BufferLoadDwordIdxenUsesDescriptorStride());
-    RunCase(&vulkan, BufferStoreFormatXAddTidUsesLaneIndex());
-    RunCase(&vulkan, FlatVirtualAddressRebasesGuestAllocation());
+    RunIndirectBufferSuite(vulkan);
+    return 0;
+  }
+  if (argc == 2 && std::strcmp(argv[1], "--canonical-equivalence-only") == 0) {
+    // The same programs through the old and the canonical resource layout must give the same
+    // results (port canonical-resources changes the generated SPIR-V, not what it computes).
+    CheckImageSamplerSpecialization();
+    VulkanHarness vulkan;
+    for (const bool canonical : {false, true}) {
+      Config::SetDisabledPorts(canonical ? std::vector<std::string>{}
+                                         : std::vector<std::string>{"canonical-resources"});
+      std::printf("[canonical] layout %s\n", canonical ? "canonical" : "old");
+      RunIndirectBufferSuite(vulkan, false);
+      RunIndirectImageSuite(vulkan, false);
+    }
+    Config::SetDisabledPorts({});
     return 0;
   }
   if (argc == 2 && std::strcmp(argv[1], "--image-sample-offset-only") == 0) {
@@ -60032,24 +60225,7 @@ int main(int argc, char **argv) {
   if (argc == 2 && std::strcmp(argv[1], "--indirect-image-only") == 0) {
     CheckImageSamplerSpecialization();
     VulkanHarness vulkan;
-    vulkan.CheckNullTextureDescriptors();
-    CheckCountedRowImageSelector(vulkan);
-    CheckPointerImageTable(vulkan);
-    CheckWorkgroupDividedImageTable(vulkan);
-    CheckWaterfallFloorImageTable(vulkan);
-    CheckMixedDimensionImageTable(vulkan);
-    CheckClampedSiblingImageTable(vulkan);
-    CheckLaneCountedImageTable(vulkan);
-    CheckGuardedSelectorImageTable(vulkan);
-    CheckInclusiveGuardImageTable(vulkan);
-    CheckNestedPointerImageTable(vulkan);
-    CheckGuardedRecordImageTable(vulkan);
-    CheckIndirectImageKeySwitch(vulkan);
-    vulkan.CheckResidentImageHeap();
-    CheckFiniteFirstLaneImageChoice(vulkan);
-    CheckFiniteInlineSamplerPhi(vulkan);
-    CheckSamplerCandidateTables(vulkan);
-    RunCase(&vulkan, ImageCubeGradientsPreserveDerivatives());
+    RunIndirectImageSuite(vulkan);
     return 0;
   }
   if (argc == 2 && std::strcmp(argv[1], "--readlane-key-guard-only") == 0) {
