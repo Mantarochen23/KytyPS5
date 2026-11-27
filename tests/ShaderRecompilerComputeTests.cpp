@@ -48312,6 +48312,26 @@ void CheckIndirectImageKeySwitch(VulkanHarness &vulkan) {
               text.find("SampledImageArrayNonUniformIndexing") != std::string::npos,
           "dense image selection lost its bounds check or native nonuniform array");
 
+  // Canonical layout (port canonical-resources): the mapping starts at a header word and the
+  // sparse search is a loop bounded by the key count at run time.
+  for (const bool sparse : {true, false}) {
+    program.info.images[0].indirect_mapping_offset = IndirectMappingHeader | 2u;
+    program.info.images[0].indirect_search_iterations = sparse ? IndirectSearchRuntime : 0u;
+    program.shader_info_complete = false;
+    CollectShaderInfo(program, {.compute = &compute});
+    spirv = ShaderRecompiler::Spirv::EmitProgram(program, {.compute = &compute});
+    ValidateSpirv("CanonicalIndirectImageTable", spirv);
+    Require(name, "canonical image map disassembly", tools.Disassemble(spirv, &text),
+            "failed to disassemble the canonical image table shader");
+    Require(name, sparse ? "runtime-bounded sparse search" : "header-relative dense map",
+            CountText(text, "OpLoopMerge") == (sparse ? 1 : 0) &&
+                CountText(text, "OpImageSampleExplicitLod") == 1 &&
+                CountText(text, "OpULessThan") == (sparse ? 3 : 1),
+            "the canonical image table lost its loop, its bounds check or its single sample");
+  }
+  program.info.images[0].indirect_mapping_offset = 0u;
+  program.info.images[0].indirect_search_iterations = 0u;
+
   // Materialized children follow all native roots, including unrelated images.
   root.indirect_resources = {0u};
   program.info.images = {root, candidate};
@@ -48393,6 +48413,21 @@ void CheckIndirectImageKeySwitch(VulkanHarness &vulkan) {
                 CountText(text, "DescriptorSet 1") == (mixed ? 2 : 1) &&
                 text.find("PhysicalStorageBuffer64") != std::string::npos,
             "image heap kinds did not sample the slot-selected heap element");
+    // Canonical layout: the arm of a slot word reads its kind position from the heap's arm map.
+    program.info.images[0].indirect_mapping_offset = IndirectMappingHeader | 1u;
+    program.shader_info_complete = false;
+    CollectShaderInfo(program, {.compute = &compute});
+    spirv = ShaderRecompiler::Spirv::EmitProgram(program, {.compute = &compute});
+    ValidateSpirv("CanonicalResidentImageHeap", spirv);
+    Require(name, "canonical image heap disassembly", tools.Disassemble(spirv, &text),
+            "failed to disassemble the canonical image heap shader");
+    Require(name, "canonical image heap arm map",
+            CountText(text, "OpConvertUToPtr") == 1 &&
+                CountText(text, "UMin") == (mixed ? 2 : 1) &&
+                CountText(text, "OpSwitch") == (mixed ? 1 : 0) &&
+                CountText(text, "OpImageSampleExplicitLod") == (mixed ? 2 : 1),
+            "the canonical heap lost its arm map or its slot-selected element");
+    program.info.images[0].indirect_mapping_offset = heap_root.indirect_mapping_offset;
   }
 
   program.memory_info[0].image_dimension =
