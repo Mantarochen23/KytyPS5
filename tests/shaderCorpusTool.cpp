@@ -50,6 +50,7 @@ using Libs::Graphics::ShaderComputeInputInfo;
 using Libs::Graphics::ShaderPixelInputInfo;
 using Libs::Graphics::ShaderType;
 using Libs::Graphics::ShaderVertexInputInfo;
+namespace Prospero   = Libs::Graphics::Prospero;
 namespace Recompiler = Libs::Graphics::ShaderRecompiler;
 
 struct Options {
