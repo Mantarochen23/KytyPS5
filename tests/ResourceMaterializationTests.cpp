@@ -1516,7 +1516,7 @@ DescriptorValue Buffer(uint64_t base, uint32_t stride, uint32_t records, BufferF
   value.dwords[0] = static_cast<uint32_t>(base);
   value.dwords[1] = static_cast<uint32_t>((base >> 32u) & 0xffffu) | ((stride & 0x3fffu) << 16u);
   value.dwords[2] = records;
-  value.dwords[3] = DstSel(4, 5, 6, 7) | (static_cast<uint32_t>(format) << 12u);
+  value.dwords[3] = Libs::Graphics::DstSel(4, 5, 6, 7) | (static_cast<uint32_t>(format) << 12u);
   return value;
 }
 
@@ -1525,7 +1525,7 @@ DescriptorValue Texture(uint64_t base, BufferFormat format, ImageType type) {
   DescriptorValue value{.dword_count = 8u};
   value.dwords[0] = static_cast<uint32_t>(base40);
   value.dwords[1] = static_cast<uint32_t>((base40 >> 32u) & 0xffu) | (static_cast<uint32_t>(format) << 20u);
-  value.dwords[3] = DstSel(4, 5, 6, 7) | (static_cast<uint32_t>(type) << 28u);
+  value.dwords[3] = Libs::Graphics::DstSel(4, 5, 6, 7) | (static_cast<uint32_t>(type) << 28u);
   return value;
 }
 
