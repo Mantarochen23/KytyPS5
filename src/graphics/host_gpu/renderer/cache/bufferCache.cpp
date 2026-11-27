@@ -739,8 +739,8 @@ bool BufferCache::CanDownloadDetached(uint64_t                        buffer_add
 void BufferCache::MarkUnsubmittedWrite(uint64_t vaddr, uint64_t size) {
 	const auto tick = m_scheduler.CurrentTick();
 	if (m_unsubmitted_tick != tick) {
-		m_unsubmitted_writes.Clear();
-		m_unsubmitted_tick = tick;
+		m_unsubmitted_writes = {};
+		m_unsubmitted_tick   = tick;
 	}
 	m_unsubmitted_writes.Add(vaddr, size);
 }
@@ -748,7 +748,7 @@ void BufferCache::MarkUnsubmittedWrite(uint64_t vaddr, uint64_t size) {
 void BufferCache::RecordPendingWrites(bool address_writes) {
 	m_pending_writes.ForEach(
 	    [this](uint64_t begin, uint64_t end) { MarkUnsubmittedWrite(begin, end - begin); });
-	m_pending_writes.Clear();
+	m_pending_writes = {};
 	if (address_writes) {
 		m_address_write_tick = m_scheduler.CurrentTick();
 	}
