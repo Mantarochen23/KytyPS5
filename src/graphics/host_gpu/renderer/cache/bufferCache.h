@@ -138,6 +138,12 @@ public:
 	void               MarkColorMetadataChecked(uint64_t vaddr, uint64_t size, uint32_t keys);
 	[[nodiscard]] bool IsColorMetadataChecked(uint64_t vaddr, uint64_t size, uint32_t keys) const;
 	void               ProcessFaultBuffer();
+	// Write stamps: a number that changes whenever bytes of [vaddr, vaddr + size) may have been
+	// written by the GPU (a written binding, an upload, a copy from an image) or by a shader that
+	// stores through device addresses (NoteUntrackedWrite). Equal stamps taken at two times mean the
+	// range was not written in between. Ranges over 64 pages count as untracked writes.
+	[[nodiscard]] uint64_t WriteStamp(uint64_t vaddr, uint64_t size) const;
+	void                   NoteUntrackedWrite() noexcept { m_untracked_write_stamp = ++m_write_clock; }
 	// Uploads the CPU-dirty bytes of the queued ranges `mapped` covers behind one barrier pair.
 	void SynchronizeBda(const RangeSet& mapped);
 	// Queue after the range's state change becomes visible, or a drain could consume it first.
@@ -174,6 +180,7 @@ private:
 		uint64_t position = 0;
 	};
 	static constexpr uint32_t STREAM_COPY_BITS = 10;
+	static constexpr size_t   kWriteStampMaxPages = 64;
 
 	using PageTable = MultiLevelPageTable<BufferId, CACHING_PAGEBITS, 44, 20>;
 	static_assert(CACHING_PAGESIZE == (uint64_t {1} << PageTable::kPageBits));
@@ -197,6 +204,7 @@ private:
 	template <bool async>
 	[[nodiscard]] bool DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t size);
 	void               ForgetColorMetadataChecks(uint64_t vaddr, uint64_t size);
+	void               NoteWrite(uint64_t vaddr, uint64_t size);
 
 	GraphicContext&                                   m_graphics;
 	CommandScheduler&                                 m_scheduler;
@@ -208,6 +216,10 @@ private:
 	BufferMap                                         m_buffers;
 	PageTable                                         m_page_table;
 	RangeSet                                          m_gpu_modified_ranges;
+	// Render-thread state; see WriteStamp.
+	MultiLevelPageTable<uint64_t, CACHING_PAGEBITS, 44, 20> m_write_stamps;
+	uint64_t                                          m_write_clock           = 1;
+	uint64_t                                          m_untracked_write_stamp = 1;
 	// One per TileManager::ColorClearSlots key slot.
 	std::array<RangeSet, 8>                           m_checked_color_metadata;
 	MemoryTracker                                     m_memory_tracker;

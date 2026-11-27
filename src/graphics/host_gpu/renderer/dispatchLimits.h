@@ -73,6 +73,40 @@ enum class DispatchVerdict : uint8_t {
 	return DispatchVerdict::Run;
 }
 
+// True when counts the CPU has read cannot hurt the device, so that an indirect dispatch reading
+// them needs no GPU-side check (dispatchGuard.h): each count is within the device's per-dimension
+// limit and the total is within the group limit.
+[[nodiscard]] constexpr bool CountsSafeWithoutGuard(uint32_t x, uint32_t y, uint32_t z,
+                                                    uint32_t max_x, uint32_t max_y,
+                                                    uint32_t max_z, uint32_t max_groups) {
+	return x <= max_x && y <= max_y && z <= max_z &&
+	       DispatchGroups(x, y, z) <= max_groups;
+}
+
+// What the GPU-side check of one set of counts left behind: the counts' guest address, the write
+// stamp (BufferCache::WriteStamp) they had, the command buffer the check was recorded in, and the
+// position of its result in the guard's ring (`sequence` is the check's running number).
+struct ValidatedArgs {
+	uint64_t guest_address = 0;
+	uint64_t stamp         = 0;
+	uint64_t slot          = 0;
+	uint64_t sequence      = 0;
+	uint64_t command       = 0;
+};
+
+// True when `entry` is still the check of the counts at `guest_address`: nothing wrote them since
+// (equal non-zero stamp), it was recorded in the same command buffer, so that the queue orders its
+// result before this use, and its ring slot was not reused yet (`next` is the running number of
+// the next check, `slot_count` the ring size; a quarter of the ring is kept as margin).
+[[nodiscard]] constexpr bool ValidationStillHolds(const ValidatedArgs& entry,
+                                                  uint64_t guest_address, uint64_t stamp,
+                                                  uint64_t command, uint64_t next,
+                                                  uint64_t slot_count) {
+	return stamp != 0 && entry.stamp == stamp && entry.guest_address == guest_address &&
+	       entry.command == command && next >= entry.sequence &&
+	       next - entry.sequence < slot_count - slot_count / 4;
+}
+
 // Which dword of `words` the x count was computed from: the first i with ceil(words[i] / group)
 // == x (x > 1, so that the common 1 does not match everything). -1 when none does.
 [[nodiscard]] inline int FindCountDword(const uint32_t* words, uint32_t num, uint32_t x,

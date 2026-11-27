@@ -1986,6 +1986,7 @@ void TextureCache::DownloadImage(Image& image, Buffer& destination, uint64_t des
 }
 
 bool BufferCache::SynchronizeBufferFromImage(Buffer& buffer, uint64_t vaddr, uint64_t size) {
+	NoteWrite(vaddr, size);
 	const auto selected = m_texture_cache.FindImageFromRange(vaddr, size);
 	if (!selected) {
 		return false;
@@ -2104,15 +2105,33 @@ uint64_t TextureCache::WriteBackTick(uint64_t address, uint64_t size) {
 }
 
 void TextureCache::InvalidateMemoryFromGPU(uint64_t address, uint64_t size) {
+	Common::FrameCost::Add(Common::FrameCost::Counter::GpuInvalidateCalls);
+	// A GPU write to pages no image covers (nearly all of them) changes no image and no resolution:
+	// take neither the lock nor a new generation, which would make every resident image-heap entry
+	// look changed (the same fast skip as the CPU-write path, upstream PR 1284).
+	ImagePageTable::PageRange pages {};
+	if (ImagePageTable::TryGetPageRange(address, size, pages) &&
+	    !m_registered_pages.Any(pages.first, pages.last_exclusive)) {
+		Common::FrameCost::Add(Common::FrameCost::Counter::GpuInvalidateSkipped);
+		return;
+	}
 	std::scoped_lock lock {m_lock};
-	TouchResolutionGenerationLocked(address, size);
+	bool             overlapped = false;
 	ForEachImageInRegion(address, size, [&](ImageId, Image& image) {
+		overlapped = true;
 		if (image.info.data.address != address) {
 			return;
 		}
 		image.ClearGpuModified();
 		image.MarkBufferModified();
 	});
+	// Registered pages without an overlapping image (a neighbour in the same page) change nothing.
+	if (overlapped) {
+		Common::FrameCost::Add(Common::FrameCost::Counter::GpuInvalidateGenBumps);
+		TouchResolutionGenerationLocked(address, size);
+	} else {
+		Common::FrameCost::Add(Common::FrameCost::Counter::GpuInvalidateSkipped);
+	}
 }
 
 bool TextureCache::CopyToImage(uint64_t address, uint64_t source, uint64_t size) {

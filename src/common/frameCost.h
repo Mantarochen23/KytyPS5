@@ -127,6 +127,19 @@ enum class Counter : uint8_t {
 	DispatchStepGuardNs,
 	DispatchStepCommitNs,
 	DispatchStepRecordNs,
+	// Per-call cuts: debug breadcrumbs recorded, GPU-side texture invalidations, indirect dispatch
+	// argument guards, the shader prefetch scan and the asynchronous-work pump.
+	BreadcrumbOps,
+	GpuInvalidateCalls,
+	GpuInvalidateSkipped,
+	GpuInvalidateGenBumps,
+	GuardGpuRuns,
+	GuardCpuChecks,
+	GuardSkipped,
+	PrefetchScans,
+	PrefetchSkipped,
+	PumpAsyncCalls,
+	PumpAsyncSkipped,
 	Count
 };
 
@@ -205,6 +218,12 @@ private:
 	std::chrono::steady_clock::time_point m_start;
 	ScopedTimer*                          m_parent   = nullptr;
 	uint64_t                              m_child_ns = 0;
+	// Per-call timers read the clock for one call in --frame-timer-sample and count that call's
+	// time that many times over; a timer inside an unmeasured one is not measured either, one inside
+	// a measured one is, with the same weight. Waits are always measured, with weight 1.
+	uint32_t                              m_weight   = 1;
+	bool                                  m_measured = true;
+	bool                                  m_done     = false;
 };
 
 // Lightweight 1-in-N step sampler. When inactive, AddTo() is a single branch with zero clock
@@ -250,6 +269,7 @@ private:
 struct ReportLines {
 	std::string summary;
 	std::string arch;
+	std::string cuts;
 };
 
 [[nodiscard]] std::array<uint64_t, CounterCount> SnapshotCounters();

@@ -81,6 +81,8 @@ public:
 	KYTY_CLASS_NO_COPY(GpuBreadcrumbTracker);
 
 	void Init(GraphicContext& graphics);
+	// True when draws and dispatches record breadcrumbs and driver markers (see Init for why).
+	[[nodiscard]] bool Active() const noexcept { return m_active.load(std::memory_order_relaxed); }
 	void Shutdown(GraphicContext& graphics);
 
 	struct ShaderHashSnapshot {
@@ -92,7 +94,7 @@ public:
 	};
 
 	void     BeginSubmit(GraphicContext& graphics, vk::CommandBuffer cmd, uint64_t frame_num);
-	uint32_t BeginOp(GraphicContext& graphics, vk::CommandBuffer cmd, OpBreadcrumb op);
+	uint32_t BeginOp(GraphicContext& graphics, vk::CommandBuffer cmd, const OpBreadcrumb& op);
 	void     EndOp(GraphicContext& graphics, vk::CommandBuffer cmd, uint32_t marker_id);
 	void     EndSubmitRecording(GraphicContext& graphics, vk::CommandBuffer cmd);
 	void     MarkSubmitted(uint64_t tick, uint64_t known_gpu_tick);
@@ -124,6 +126,7 @@ private:
 		std::vector<OpBreadcrumb> ops;
 	};
 
+	std::atomic<bool>                  m_active {false};
 	std::mutex                         m_mutex;
 	std::array<SubmitRecord, kMaxSubmits> m_submits {};
 	size_t                             m_active_slot       = kMaxSubmits;

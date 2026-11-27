@@ -597,4 +597,16 @@ uint32_t DriverCacheCapMb() {
 	return g_config != nullptr ? g_config->driver_cache_cap_mb : 0u;
 }
 
+bool GpuDebugEnabled() {
+	return g_config != nullptr && g_config->gpu_debug_enabled;
+}
+
+uint32_t PrefetchBackoffExponent() {
+	return g_config != nullptr ? std::min(g_config->prefetch_backoff, 16u) : 0u;
+}
+
+uint32_t FrameTimerSample() {
+	return g_config != nullptr ? std::max(g_config->frame_timer_sample, 1u) : 1u;
+}
+
 } // namespace Config

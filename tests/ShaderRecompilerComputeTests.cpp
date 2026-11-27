@@ -374,6 +374,7 @@ struct TextureCacheTestAccess {
   static_assert(TextureCache::ImagePageTable::kFirstLevelBits == 14);
 
   static uint64_t GcTick(const TextureCache &cache) { return cache.m_gc_tick; }
+  static uint64_t Generation(const TextureCache &cache) { return cache.ResolutionGeneration(); }
   static void TouchResolution(TextureCache &cache, uint64_t address, uint64_t size) {
     cache.TouchResolutionGeneration(address, size);
   }
@@ -3378,6 +3379,14 @@ public:
 
       const auto other = unrelated();
       Require(name, "register", !resolve_cache.Reuse(id, stamp), "a registered image kept the stamp current");
+      // A GPU write is a resolution change only where an image is registered.
+      const auto generation = TextureCacheTestAccess::Generation(cache);
+      cache.InvalidateMemoryFromGPU(base + 0x7f0000u, 0x1000u);
+      Require(name, "gpu write elsewhere", TextureCacheTestAccess::Generation(cache) == generation,
+          "a GPU write to pages without an image changed the resolution generation");
+      cache.InvalidateMemoryFromGPU(base + 0x18000u, 0x1000u);
+      Require(name, "gpu write on image", TextureCacheTestAccess::Generation(cache) > generation,
+          "a GPU write over a registered image left the resolution generation alone");
       const auto refound = find(rgba).second;
       TextureCacheTestAccess::DeleteImage(cache, other);
       Require(name, "unregister", !resolve_cache.Reuse(id, refound),

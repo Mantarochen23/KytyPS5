@@ -115,6 +115,12 @@ struct PipelineCache::Async {
 	std::mutex                                done_mutex;
 	std::condition_variable                   done_cv;
 	std::vector<FinishedJob> done;
+	// True while `done` may hold a job (set under done_mutex when one is added, cleared when the
+	// render thread takes them): lets PumpAsync see that there is nothing to take without the lock.
+	std::atomic<bool>        done_pending {false};
+	// Render thread only: PumpAsync calls that found nothing to apply; the periodic reports are
+	// looked at only every 64th such call.
+	uint32_t                 idle_pumps = 0;
 	// Render thread only: finished jobs taken from `done` that PumpAsync's time budget has not
 	// applied yet.
 	std::deque<FinishedJob> backlog;

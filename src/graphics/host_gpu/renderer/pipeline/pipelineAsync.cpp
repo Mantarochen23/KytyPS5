@@ -4,6 +4,7 @@
 #include "common/debugCounters.h"
 #include "common/emulatorConfig.h"
 #include "common/faultReport.h"
+#include "common/frameCost.h"
 #include "common/logging/log.h"
 #include "common/memAccount.h"
 #include "common/recoverable.h"
@@ -73,6 +74,7 @@ void PipelineCache::Async::Finish(Common::UniqueFunction<void>&& apply, uint64_t
 	{
 		std::scoped_lock lock(done_mutex);
 		done.push_back(FinishedJob {flight, std::move(apply)});
+		done_pending.store(true, std::memory_order_release);
 		NoteShaderWorkerJobsAdded(1);
 	}
 	done_cv.notify_all();
@@ -734,6 +736,7 @@ void PipelineCache::Async::TakeFinished() {
 		backlog.push_back(std::move(finished));
 	}
 	done.clear();
+	done_pending.store(false, std::memory_order_release);
 }
 
 // Pipelines (flight 0) and the jobs a draw or dispatch is blocked on go first, in the order they
@@ -754,6 +757,15 @@ void PipelineCache::Async::PrioritizeBacklog() {
 // several calls instead of holding up the draw that called.
 void PipelineCache::PumpAsync() {
 	if (m_async == nullptr) {
+		return;
+	}
+	Common::FrameCost::Add(Common::FrameCost::Counter::PumpAsyncCalls);
+	// Nothing finished and nothing left to apply (nearly every call in a steady scene): neither the
+	// lock, nor the clock, nor the activity note is needed; the periodic reports below can wait for
+	// the 64th such call.
+	if (m_async->backlog.empty() && !m_async->done_pending.load(std::memory_order_acquire) &&
+	    (++m_async->idle_pumps & 63u) != 0u) {
+		Common::FrameCost::Add(Common::FrameCost::Counter::PumpAsyncSkipped);
 		return;
 	}
 	RenderActivity::Scope activity("pump-async");

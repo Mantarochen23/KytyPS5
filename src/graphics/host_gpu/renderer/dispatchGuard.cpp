@@ -1,5 +1,6 @@
 #include "graphics/host_gpu/renderer/dispatchGuard.h"
 
+#include "common/frameCost.h"
 #include "common/logging/log.h"
 #include "common/ports.h"
 #include "gpu_blit_shaders/gpu_dispatch_guard_spv.h"
@@ -113,7 +114,17 @@ void DispatchArgsGuard::Report() {
 }
 
 std::pair<vk::Buffer, uint64_t> DispatchArgsGuard::Record(CommandBuffer& buffer, const Buffer& args,
-                                                          uint64_t offset, uint64_t guest_address) {
+                                                          uint64_t offset, uint64_t guest_address,
+                                                          uint64_t write_stamp) {
+	const auto cmd_id = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(
+	    static_cast<VkCommandBuffer>(buffer.Handle())));
+	auto&      checked = m_checked[(guest_address >> 2u) % CheckedCount];
+	if (ValidationStillHolds(checked, guest_address, write_stamp, cmd_id, m_next, SlotCount)) {
+		Common::FrameCost::Add(Common::FrameCost::Counter::GuardSkipped);
+		return {m_ring->Handle(), checked.slot};
+	}
+	Common::FrameCost::Add(Common::FrameCost::Counter::GuardGpuRuns);
+	Common::FrameCost::Add(Common::FrameCost::Counter::DispatchesGuard); // the GPU pass really runs
 	// The trip counter is only reported, and reading it is not free: look every 64 dispatches.
 	if ((m_next & 63u) == 0) {
 		Report();
@@ -155,6 +166,9 @@ std::pair<vk::Buffer, uint64_t> DispatchArgsGuard::Record(CommandBuffer& buffer,
 	command.dispatch(1, 1, 1);
 
 	ShaderAccessBarrier(command, vk::PipelineStageFlagBits::eComputeShader);
+	if (write_stamp != 0) {
+		checked = {guest_address, write_stamp, slot, m_next - 1u, cmd_id};
+	}
 	return {m_ring->Handle(), slot};
 }
 
