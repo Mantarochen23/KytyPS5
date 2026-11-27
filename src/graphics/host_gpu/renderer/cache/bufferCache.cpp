@@ -939,8 +939,9 @@ void BufferCache::InvalidateRuntimeTables(uint64_t vaddr, uint64_t size) {
 void BufferCache::MarkRuntimeTableWritten(const std::shared_ptr<RuntimeTableState>& state) {
 	if (state == nullptr || !state->BeginMark(m_scheduler.CurrentTick(), m_ownership_release_epoch)) return;
 	Common::FrameCost::Add(Common::FrameCost::Counter::TableMarks);
-	Common::FrameCost::Add(Common::FrameCost::Counter::TableMarkRanges);
+	uint64_t range_count = 0;
 	state->WriteRanges().ForEach([&](uint64_t begin, uint64_t end) {
+		++range_count;
 		const auto size = end - begin;
 		// FindBuffers/PrepareBda has already uploaded CPU-owned bytes. This transition only
 		// establishes GPU ownership for a dispatch which may select any member of the union.
@@ -954,6 +955,7 @@ void BufferCache::MarkRuntimeTableWritten(const std::shared_ptr<RuntimeTableStat
 	// candidate ranges, rather than their much wider backing buffers, keep unrelated descriptor
 	// tables and image-heap entries out of GPU ownership.
 	m_texture_cache.InvalidateMemoryFromGPU(state->WriteRanges());
+	Common::FrameCost::Add(Common::FrameCost::Counter::TableMarkRanges, range_count);
 }
 
 bool BufferCache::IsRegionGpuModified(uint64_t vaddr, uint64_t size) {
