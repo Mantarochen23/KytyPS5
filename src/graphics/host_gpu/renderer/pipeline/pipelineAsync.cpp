@@ -3,6 +3,7 @@
 #include "common/assert.h"
 #include "common/debugCounters.h"
 #include "common/emulatorConfig.h"
+#include "common/faultReport.h"
 #include "common/logging/log.h"
 #include "common/memAccount.h"
 #include "common/recoverable.h"
@@ -272,6 +273,31 @@ void PipelineCache::RequestAsync(const ProgramKey& key, Program* program,
 					fail_reason = e.what();
 					fail_file   = e.file;
 					fail_line   = e.line;
+				} catch (const ShaderRecompiler::SpirvWordBudgetError& e) {
+					BuildTiming::Build oversized {
+					    .stage             = ShaderRecompiler::StageName(inputs->key.stage),
+					    .hash              = inputs->key.hash,
+					    .words             = e.words,
+					    .where             = "worker",
+					    .reason            = "budget-refused",
+					    .contributor_count = e.emit_stats.contributor_count,
+					};
+					for (uint32_t i = 0;
+					     i < e.emit_stats.contributor_count && i < oversized.top_contributors.size(); ++i) {
+						const auto& src = e.emit_stats.top_contributors[i];
+						oversized.top_contributors[i] = {
+						    .kind       = src.kind,
+						    .resource   = src.resource,
+						    .candidates = src.candidates,
+						    .accesses   = src.accesses,
+						    .words      = src.words,
+						};
+					}
+					if (const auto warn = BuildTiming::WarningLine(oversized); !warn.empty()) {
+						Log::WriteToConsoleAndLog(warn + "\n");
+					}
+					failed      = true;
+					fail_reason = e.what();
 				} catch (const std::exception& e) {
 					failed      = true;
 					fail_reason = e.what();
@@ -308,12 +334,14 @@ void PipelineCache::RequestAsync(const ProgramKey& key, Program* program,
 						return;
 					}
 					pending->taken = true;
-					NoteBuild({.stage = ShaderRecompiler::StageName(inputs->key.stage),
-					.hash = inputs->key.hash,
-					.words = pending->stage.spirv.size(),
-					.steps = pending->stage.steps,
-					.where = "worker",
-					.reason = reason});
+					NoteBuild({.stage             = ShaderRecompiler::StageName(inputs->key.stage),
+					           .hash              = inputs->key.hash,
+					           .words             = pending->stage.spirv.size(),
+					           .steps             = pending->stage.steps,
+					           .where             = "worker",
+					           .reason            = reason,
+					           .top_contributors  = pending->stage.top_contributors,
+					           .contributor_count = pending->stage.contributor_count});
 					AddModule(cached, inputs->key, std::move(pending->stage));
 					m_async->counters.modules_ready++;
 					AsyncLog(
@@ -358,6 +386,10 @@ void PipelineCache::RequestAsync(const ProgramKey& key, Program* program,
 	                                post_time = std::chrono::steady_clock::now(),
 	                                device = m_graphics.device] {
 		const auto queue_wait_us = BuildTiming::ElapsedUs(post_time);
+		char       activity[160];
+		std::snprintf(activity, sizeof(activity), "shader-translate stage=%s hash=0x%016" PRIx64,
+		              ShaderRecompiler::StageName(inputs->key.stage), inputs->key.hash);
+		Common::FaultReport::ScopedActivity fault_activity(activity);
 		uint64_t   translate_us = 0;
 		uint64_t   plan_us      = 0;
 		std::optional<Common::RecoverableScope> scope;
@@ -491,12 +523,14 @@ void PipelineCache::RequestAsync(const ProgramKey& key, Program* program,
 				auto& cached = m_program_cache.at(inputs->key);
 				if (cached.FindCandidate(pending->stage.module.specialization, {}) == nullptr) {
 					pending->taken = true;
-					NoteBuild({.stage  = ShaderRecompiler::StageName(inputs->key.stage),
-					           .hash   = inputs->key.hash,
-					           .words  = pending->stage.spirv.size(),
-					           .steps  = pending->stage.steps,
-					           .where  = "worker",
-					           .reason = reason});
+					NoteBuild({.stage             = ShaderRecompiler::StageName(inputs->key.stage),
+					           .hash              = inputs->key.hash,
+					           .words             = pending->stage.spirv.size(),
+					           .steps             = pending->stage.steps,
+					           .where             = "worker",
+					           .reason            = reason,
+					           .top_contributors  = pending->stage.top_contributors,
+					           .contributor_count = pending->stage.contributor_count});
 					const auto& added = AddModule(cached, inputs->key, std::move(pending->stage));
 					if (from_scan) {
 						m_lookahead_modules.insert(added.id);
@@ -606,6 +640,31 @@ bool PipelineCache::PostCallProgramModule(const ProgramKey& key, Program& progra
 			    compiled.steps.queue_wait_us = queue_wait_us;
 			    compiled.steps.total_us      = BuildTiming::ElapsedUs(post_time);
 			    pending = std::make_unique<Async::PendingStage>(device, std::move(compiled));
+		    } catch (const ShaderRecompiler::SpirvWordBudgetError& e) {
+			    BuildTiming::Build oversized {
+			        .stage             = ShaderRecompiler::StageName(inputs->key.stage),
+			        .hash              = inputs->key.hash,
+			        .words             = e.words,
+			        .where             = "worker",
+			        .reason            = "budget-refused",
+			        .contributor_count = e.emit_stats.contributor_count,
+			    };
+			    for (uint32_t i = 0;
+			         i < e.emit_stats.contributor_count && i < oversized.top_contributors.size(); ++i) {
+				    const auto& src = e.emit_stats.top_contributors[i];
+				    oversized.top_contributors[i] = {
+				        .kind       = src.kind,
+				        .resource   = src.resource,
+				        .candidates = src.candidates,
+				        .accesses   = src.accesses,
+				        .words      = src.words,
+				    };
+			    }
+			    if (const auto warn = BuildTiming::WarningLine(oversized); !warn.empty()) {
+				    Log::WriteToConsoleAndLog(warn + "\n");
+			    }
+			    failed      = true;
+			    fail_reason = e.what();
 		    } catch (const std::exception& e) {
 			    failed      = true;
 			    fail_reason = e.what();
@@ -626,12 +685,14 @@ bool PipelineCache::PostCallProgramModule(const ProgramKey& key, Program& progra
 				    return;
 			    }
 			    pending->taken = true;
-			    NoteBuild({.stage  = ShaderRecompiler::StageName(inputs->key.stage),
-			               .hash   = inputs->key.hash,
-			               .words  = pending->stage.spirv.size(),
-			               .steps  = pending->stage.steps,
-			               .where  = "worker",
-			               .reason = "dispatch"});
+			    NoteBuild({.stage             = ShaderRecompiler::StageName(inputs->key.stage),
+			               .hash              = inputs->key.hash,
+			               .words             = pending->stage.spirv.size(),
+			               .steps             = pending->stage.steps,
+			               .where             = "worker",
+			               .reason            = "dispatch",
+			               .top_contributors  = pending->stage.top_contributors,
+			               .contributor_count = pending->stage.contributor_count});
 			    // Programs with calls are not stored: they depend on their callees' code.
 			    AddModule(cached, inputs->key, std::move(pending->stage));
 			    m_async->counters.modules_ready++;

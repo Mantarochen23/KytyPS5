@@ -1655,18 +1655,25 @@ void TestIndirectFormattedStridedAndGeneralStores() {
             failure_reason.find("first_diff=") != std::string::npos,
         "port-off formatted store refusal missing decoded format/stride/records/nearest/first_diff");
 
-  // Port ON: all five stride-16 formatted store candidates must materialize cleanly.
+  // Port ON: all five stride-16 formatted store candidates must materialize cleanly
+  // (CanonicalResources sorts candidates canonically, so verify the multiset of formats).
   Config::SetDisabledPorts({});
   Check(MaterializeResources(plan, runtime, snapshot, specialization, &failure_reason) &&
             failure_reason.empty(),
         "general strided formatted indirect store failed materialization with port enabled");
-  Check(specialization.buffers.size() == 6u &&
-            specialization.buffers[1].descriptor_format == F::k8UInt &&
-            specialization.buffers[1].packed_stride == 16u &&
-            specialization.buffers[2].descriptor_format == F::k32Float &&
-            specialization.buffers[3].descriptor_format == F::k8_8_8_8UNorm &&
-            specialization.buffers[4].descriptor_format == F::k10_10_10_2UNorm &&
-            specialization.buffers[5].descriptor_format == F::k32_32_32_32Float,
+  Check(specialization.buffers.size() == 6u,
+        "materialized indirect formatted store candidate count mismatch");
+  std::vector<F> got_formats;
+  for (size_t i = 1; i < specialization.buffers.size(); ++i) {
+    Check(specialization.buffers[i].packed_stride == 16u,
+          "materialized indirect formatted store candidates lost stride");
+    got_formats.push_back(specialization.buffers[i].descriptor_format);
+  }
+  std::ranges::sort(got_formats);
+  std::vector<F> expected_formats{
+      F::k8UInt, F::k32Float, F::k8_8_8_8UNorm, F::k10_10_10_2UNorm, F::k32_32_32_32Float};
+  std::ranges::sort(expected_formats);
+  Check(got_formats == expected_formats,
         "materialized indirect formatted store candidates lost format or stride");
 
   // Non-identity active swizzle (BGRA) must still fail with a one-line decoded diagnostic.
@@ -1944,6 +1951,62 @@ void TestCanonicalSpecializationAcrossBoots() {
   Check(Materialize(plan, other_kind).first != one, "a heap with another kind is another module");
 }
 
+void TestIndirectBufferCandidateBound() {
+  Config::SetDisabledPorts({});
+  const auto plan = TablePlan();
+  const auto run_rows = [&](uint32_t row_count, uint32_t distinct_count, std::string *error,
+                            size_t *out_buffers) -> bool {
+    Memory memory;
+    const uint64_t base  = 0x0000100000000000ull;
+    const uint64_t table = base + 0x10000u;
+    for (uint32_t row = 0; row < row_count; ++row) {
+      const uint32_t id = row % distinct_count;
+      memory.Write(table + static_cast<uint64_t>(row) * 16u,
+                   Buffer(base + 0x1000000ull + static_cast<uint64_t>(id) * 0x1000u, 16u, 64u,
+                          BufferFormat::k32UInt));
+    }
+    Heap heap;
+    heap.slots      = base + 0xdead0000u;
+    heap.slot_count = 64u;
+    heap.kinds.push_back(Texture(base + 0x20000000ull, BufferFormat::k32UInt, ImageType::kColor2D));
+    std::array<uint32_t, 8> user_data{};
+    const auto buffer_table = Buffer(table, 16u, row_count, BufferFormat::k32UInt);
+    const auto image_table  = Buffer(base + 0x90000u, 32u, 4u, BufferFormat::k32UInt);
+    std::copy_n(buffer_table.dwords.begin(), 4u, user_data.begin());
+    std::copy_n(image_table.dwords.begin(), 4u, user_data.begin() + 4u);
+    FakeGuestMemory guard(&Memory::Read, &memory);
+    const SrtRuntime runtime{.user_data = user_data, .userdata = &memory,
+                             .read_specialization_memory = &Memory::Read, .image_heap = &heap};
+    ResourceSnapshot snapshot;
+    ResourceSpecialization specialization;
+    const bool ok = MaterializeResources(plan, runtime, snapshot, specialization, error);
+    if (out_buffers != nullptr) *out_buffers = specialization.buffers.size();
+    return ok;
+  };
+
+  // Within the bound: succeeds even when row count exceeds the bound via duplicates.
+  {
+    std::string error;
+    size_t buffers = 0u;
+    Check(run_rows(MaxIndirectBufferCandidates + 500u, 64u, &error, &buffers) && error.empty() &&
+              buffers == 65u,
+          "duplicate indirect buffer rows within distinct candidate bound should materialize");
+  }
+  // Over the bound: refuses with a clear, self-explaining diagnostic.
+  {
+    std::string error;
+    size_t buffers = 0u;
+    const bool ok =
+        run_rows(MaxIndirectBufferCandidates + 1u, MaxIndirectBufferCandidates + 1u, &error, &buffers);
+    if (ok || error.find("buffer candidate bound") == std::string::npos ||
+        error.find("limit=4096") == std::string::npos) {
+      std::fprintf(stderr, "TestIndirectBufferCandidateBound overflow: ok=%d error=%s\n", ok,
+                   error.c_str());
+      Check(false, "indirect buffer table exceeding MaxIndirectBufferCandidates was not refused");
+    }
+  }
+}
+
 } // namespace canonical_boots
 
 namespace Common {
@@ -1994,6 +2057,7 @@ int main(int argc, char **argv) {
   TestShaderCacheRecords();
   if (!(argc > 1 && std::string_view(argv[1]) == "--old-layout"))
     canonical_boots::TestCanonicalSpecializationAcrossBoots();
+  canonical_boots::TestIndirectBufferCandidateBound();
   std::puts("ResourceMaterializationTests: all cases passed");
   return 0;
 }

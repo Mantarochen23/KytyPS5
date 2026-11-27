@@ -577,4 +577,8 @@ bool SpirvCompactEnabled() {
 	return g_config != nullptr && g_config->spirv_compact_enabled;
 }
 
+uint32_t MaxSpirvWords() {
+	return g_config != nullptr ? g_config->max_spirv_words : ConfigOptions::DefaultMaxSpirvWords;
+}
+
 } // namespace Config

@@ -331,6 +331,57 @@ void TestFailureValidityFollowsWideningPorts() {
 	Check(!FailureCacheApplies(v - 1u, 3u, 3u), "an older translator generation never applies");
 }
 
+void TestBuildTimingLargeModuleWarningLine() {
+	BuildTiming::Build small {
+	    .stage = "CS",
+	    .hash  = 0xaaaa000000000002ull,
+	    .words = BuildTiming::OversizedModuleWarningWords,
+	};
+	Check(BuildTiming::WarningLine(small).empty(),
+	      "module at or below 1,000,000 words must not emit [build] WARNING");
+
+	BuildTiming::Build large {
+	    .stage = "CS",
+	    .hash  = 0xaaaa000000000002ull,
+	    .words = 12'000'000u,
+	    .top_contributors =
+	        {{{
+	              .kind       = "indirect-buffer",
+	              .resource   = 0u,
+	              .candidates = 2000u,
+	              .accesses   = 20u,
+	              .words      = 11'600'000u,
+	          },
+	          {
+	              .kind       = "indirect-image",
+	              .resource   = 1u,
+	              .candidates = 32u,
+	              .accesses   = 4u,
+	              .words      = 240'000u,
+	          },
+	          {
+	              .kind       = "other",
+	              .resource   = 0u,
+	              .candidates = 0u,
+	              .accesses   = 1u,
+	              .words      = 160'000u,
+	          }}},
+	    .contributor_count = 3u,
+	};
+	const auto warn = BuildTiming::WarningLine(large);
+	Check(warn.find("[build] WARNING CS hash=0xaaaa000000000002 words=12000000") != std::string::npos,
+	      "warning line missing stage/hash/words header");
+	Check(warn.find("#1 indirect-buffer[res=0]: candidates=2000 accesses=20 words=11600000 (~580000/access)") !=
+	          std::string::npos,
+	      "warning line missing top contributor breakdown");
+	Check(warn.find("#2 indirect-image[res=1]: candidates=32 accesses=4 words=240000 (~60000/access)") !=
+	          std::string::npos,
+	      "warning line missing second contributor breakdown");
+	Check(warn.find("#3 other[res=0]: candidates=0 accesses=1 words=160000 (~160000/access)") !=
+	          std::string::npos,
+	      "warning line missing third contributor breakdown");
+}
+
 } // namespace
 
 int main() {
@@ -341,6 +392,7 @@ int main() {
 	TestMissDescriptions();
 	TestLookupCounters();
 	TestCapabilityVersionBumped();
+	TestBuildTimingLargeModuleWarningLine();
 	std::printf("ShaderStoreTests: ok\n");
 	return 0;
 }

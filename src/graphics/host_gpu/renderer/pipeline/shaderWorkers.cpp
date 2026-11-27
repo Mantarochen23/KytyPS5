@@ -12,6 +12,7 @@ ShaderWorkers::ShaderWorkers(uint32_t threads) {
 		m_threads.emplace_back([this, i](std::stop_token stop) {
 			Common::Thread::LowerPriority();
 			Common::FaultReport::SetThreadTag("shader worker", "shader-worker");
+			Common::FaultReport::RegisterThreadStack();
 			std::unique_lock lock(m_mutex);
 			// Once stop is requested the wait returns false only when no job may be taken.
 			while (m_ready.wait(lock, stop, [this, i] { return CanPick(i); })) {

@@ -191,6 +191,12 @@ struct ConfigOptions {
 	uint32_t                 fault_storm_faults         = 0;
 	uint32_t                 fault_storm_frames         = 8;
 	uint32_t                 fault_storm_hold           = 60;
+	// --max-spirv-words: refuse any emitted or stored shader module larger than this many SPIR-V
+	// words before CompileSPV or the graphics driver sees it. 0 = unlimited.
+	// Default 2,000,000 words (~7.6 MiB): ~3.7x above the largest measured good module (534,825
+	// words) and ~6x below the 11.5-13.8M-word modules that crash the driver.
+	static constexpr uint32_t DefaultMaxSpirvWords      = 2'000'000u;
+	uint32_t                 max_spirv_words            = DefaultMaxSpirvWords;
 };
 
 void Load(const ConfigOptions& cfg);
@@ -315,6 +321,7 @@ uint32_t MemLimitGb();
 uint32_t FaultStormFaults();
 uint32_t FaultStormFrames();
 uint32_t FaultStormHold();
+uint32_t MaxSpirvWords();
 
 } // namespace Config
 

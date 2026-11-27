@@ -56,8 +56,11 @@ struct StackLimits {
 	uintptr_t low  = 0;
 	uintptr_t high = 0;
 };
-thread_local StackLimits t_stack;
-thread_local const char* t_tag = nullptr;
+thread_local StackLimits           t_stack;
+thread_local const char*           t_tag = nullptr;
+thread_local char                  t_activity[2][160] {};
+thread_local std::atomic<uint32_t> t_activity_slot {0};
+thread_local std::atomic<bool>     t_activity_active {false};
 
 void LoadExecutableSymbols(const char* path) {
 	const int fd = ::open(path, O_RDONLY | O_CLOEXEC);
@@ -305,6 +308,31 @@ void SetThreadTag(const char* tag, const char* name) noexcept {
 	}
 }
 
+void SetThreadActivity(const char* detail) noexcept {
+	if (detail == nullptr || detail[0] == '\0') {
+		t_activity_active.store(false, std::memory_order_release);
+		return;
+	}
+	const uint32_t next = t_activity_slot.load(std::memory_order_relaxed) ^ 1u;
+	std::snprintf(t_activity[next], sizeof(t_activity[next]), "%s", detail);
+	std::atomic_signal_fence(std::memory_order_release);
+	t_activity_slot.store(next, std::memory_order_relaxed);
+	t_activity_active.store(true, std::memory_order_release);
+}
+
+ScopedActivity::ScopedActivity(const char* detail) noexcept {
+	if (t_activity_active.load(std::memory_order_relaxed)) {
+		const uint32_t slot = t_activity_slot.load(std::memory_order_relaxed) & 1u;
+		std::snprintf(m_previous, sizeof(m_previous), "%s", t_activity[slot]);
+		m_had_previous = true;
+	}
+	SetThreadActivity(detail);
+}
+
+ScopedActivity::~ScopedActivity() noexcept {
+	SetThreadActivity(m_had_previous ? m_previous : nullptr);
+}
+
 void RefreshModules() {
 	if (g_refreshing.exchange(true)) {
 		return;
@@ -384,8 +412,15 @@ void WriteHostContext(const Registers& regs, const Sink& sink) {
 	char name[32] {};
 	::pthread_getname_np(::pthread_self(), name, sizeof(name));
 	Out(sink, "--- Host fault context ---\n");
-	Out(sink, "host thread: %s tid=%ld doing: %s\n", name[0] != '\0' ? name : "(unnamed)",
-	    static_cast<long>(::gettid()), t_tag != nullptr ? t_tag : "(no tag)");
+	if (t_activity_active.load(std::memory_order_acquire)) {
+		std::atomic_signal_fence(std::memory_order_acquire);
+		const uint32_t slot = t_activity_slot.load(std::memory_order_relaxed) & 1u;
+		Out(sink, "host thread: %s tid=%ld doing: %s [%s]\n", name[0] != '\0' ? name : "(unnamed)",
+		    static_cast<long>(::gettid()), t_tag != nullptr ? t_tag : "(no tag)", t_activity[slot]);
+	} else {
+		Out(sink, "host thread: %s tid=%ld doing: %s\n", name[0] != '\0' ? name : "(unnamed)",
+		    static_cast<long>(::gettid()), t_tag != nullptr ? t_tag : "(no tag)");
+	}
 	char where[NAME_SIZE + 160];
 	FormatAddress(regs.pc, where, sizeof(where));
 	Out(sink, " pc       %016" PRIx64 " = %s\n", regs.pc, where);
@@ -448,6 +483,9 @@ void WriteHostContext(const Registers& regs, const Sink& sink) {
 
 namespace Common::FaultReport {
 void SetThreadTag(const char*, const char*) noexcept {}
+void SetThreadActivity(const char*) noexcept {}
+ScopedActivity::ScopedActivity(const char*) noexcept {}
+ScopedActivity::~ScopedActivity() noexcept {}
 void RefreshModules() {}
 void RegisterThreadStack() {}
 void FormatAddress(uint64_t, char* out, size_t size) {

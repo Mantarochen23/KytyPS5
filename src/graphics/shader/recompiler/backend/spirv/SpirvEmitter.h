@@ -5,9 +5,24 @@
 #include "common/stringUtils.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 
+#include <array>
 #include <vector>
 
 namespace Libs::Graphics::ShaderRecompiler::Spirv {
+
+struct EmitContributor {
+	const char* kind       = "";
+	uint32_t    resource   = 0;
+	uint32_t    candidates = 0;
+	uint32_t    accesses   = 0;
+	uint64_t    words      = 0;
+};
+
+struct EmitStats {
+	uint64_t                       total_words       = 0;
+	std::array<EmitContributor, 3> top_contributors {};
+	uint32_t                       contributor_count = 0;
+};
 
 // Host device capabilities and user options that change the emitted SPIR-V. Built once per device.
 struct Profile {
@@ -40,7 +55,8 @@ inline constexpr Profile DefaultProfile {};
 std::vector<uint32_t> EmitProgram(IR::Program& program, ShaderStageInputInfo input_info,
                                   IR::PushData::Window push_data       = {},
                                   const Profile&       profile         = DefaultProfile,
-                                  bool                 emit_debug_info = false);
+                                  bool                 emit_debug_info = false,
+                                  EmitStats*           stats           = nullptr);
 
 } // namespace Libs::Graphics::ShaderRecompiler::Spirv
 

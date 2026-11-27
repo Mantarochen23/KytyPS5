@@ -191,7 +191,10 @@ static void PrintUsage() {
 	         "                                       uploaded on every pass) for --fault-storm-hold frames.\n"
 	         "                                       0 = off. Default: 0.\n"
 	         "  --fault-storm-frames <n>             Window of the rule above. Default: 8.\n"
-	         "  --fault-storm-hold <n>               Frames a marked page stays unwatched. Default: 60.\n");
+	         "  --fault-storm-hold <n>               Frames a marked page stays unwatched. Default: 60.\n"
+	         "  --max-spirv-words <n>                Refuse any emitted or stored shader module larger than\n"
+	         "                                       n SPIR-V words before it reaches the driver. 0 = off.\n"
+	         "                                       Default: 2000000.\n");
 }
 
 static bool NextArg(int argc, char* argv[], int& index, std::string& out) {
@@ -673,6 +676,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 		} else if (arg == "--fault-storm-hold") {
 			if (!ParseUint32(value, options.config.fault_storm_hold)) {
 				::printf("invalid fault storm hold value: %s\n", value.c_str());
+				return false;
+			}
+		} else if (arg == "--max-spirv-words") {
+			if (!ParseUint32(value, options.config.max_spirv_words)) {
+				::printf("invalid max SPIR-V words value: %s\n", value.c_str());
 				return false;
 			}
 		} else {
