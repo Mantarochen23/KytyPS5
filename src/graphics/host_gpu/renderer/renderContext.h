@@ -8,6 +8,7 @@
 #include "graphics/host_gpu/pageManager.h"
 #include "graphics/host_gpu/rangeSet.h"
 #include "graphics/host_gpu/renderer/cache/bufferCache.h"
+#include "graphics/host_gpu/renderer/cache/guestReadWatch.h"
 #include "graphics/host_gpu/renderer/cache/samplerCache.h"
 #include "graphics/host_gpu/renderer/cache/textureCache.h"
 #include "graphics/host_gpu/renderer/commandScheduler.h"
@@ -60,6 +61,8 @@ public:
 
 	[[nodiscard]] bool HandleFault(PageFaultAccess access, uint64_t fault_vaddr) noexcept;
 	[[nodiscard]] bool InvalidateMemory(uint64_t vaddr, uint64_t size);
+	// Bytes of guest memory changed through the backing, which raises no fault.
+	void               NoteBackingWrite(uint64_t vaddr, uint64_t size) { m_read_watch.Touched(vaddr, size); }
 	[[nodiscard]] bool IsMapped(uint64_t vaddr, uint64_t size) const noexcept;
 	void               MapMemory(uint64_t vaddr, uint64_t size);
 	void               UnmapMemory(uint64_t vaddr, uint64_t size);
@@ -93,6 +96,7 @@ private:
 	ResolveCache              m_resolve_cache;
 	TextureCache              m_texture_cache;
 	ImageHeap                 m_image_heap;
+	GuestReadWatch            m_read_watch;
 	// WarmUp creates pipelines that reference m_image_heap's descriptor set layout.
 	PipelineCache             m_pipeline_cache;
 	OcclusionQueries          m_occlusion_queries;

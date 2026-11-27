@@ -604,6 +604,13 @@ add_executable(resource_materialization_tests EXCLUDE_FROM_ALL
 target_link_libraries(resource_materialization_tests fmt::fmt xbyak::xbyak)
 target_include_directories(resource_materialization_tests PRIVATE ${inc_headers})
 
+add_executable(materialization_memo_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/MaterializationMemoTests.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/pipeline/materializationMemo.cpp"
+)
+target_link_libraries(materialization_memo_tests fmt::fmt xbyak::xbyak xxhash)
+target_include_directories(materialization_memo_tests PRIVATE ${inc_headers})
+
 add_executable(resource_tracking_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/ResourceTrackingTests.cpp"
 	"${KYTY_SOURCE_DIR}/graphics/guest_gpu/gpu_format.cpp"

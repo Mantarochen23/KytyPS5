@@ -24,13 +24,29 @@ RenderContext::RenderContext(GraphicContext& graphics, const std::filesystem::pa
       m_buffer_cache(graphics, m_command_scheduler, m_page_manager, m_texture_cache),
       m_resolve_cache(*this), m_texture_cache(graphics, m_command_scheduler, m_page_manager,
 	                                          m_buffer_cache, m_resolve_cache),
-      m_image_heap(*this, m_page_manager), m_pipeline_cache(graphics, &m_image_heap, shader_store),
+      m_image_heap(*this, m_page_manager), m_read_watch(m_page_manager),
+      m_pipeline_cache(graphics, &m_image_heap, shader_store),
       m_occlusion_queries(graphics, m_command_scheduler) {
 	EXIT_NOT_IMPLEMENTED(!Common::Thread::IsMainThread());
 	Log::WriteToConsoleAndLog(Config::PortsSummary() + "\n");
 	FaultStats::ConfigureStorm(Config::FaultStormFaults(), Config::FaultStormFrames(),
 	                           Config::FaultStormHold());
 	FaultStats::StartReporter();
+	if (const auto stamps = Config::MaterializeMemoStamps(); stamps != 0u) {
+		m_read_watch.Configure(stamps, {.user      = this,
+		                                .trackable = [](void* user, uint64_t address, uint64_t size) {
+			                                auto& self = *static_cast<RenderContext*>(user);
+			                                return self.IsMapped(address, size) &&
+			                                       !self.m_texture_cache.IsRegionRegistered(address, size);
+		                                },
+		                                .gpu_holds = [](void* user, uint64_t address, uint64_t size) {
+			                                return static_cast<RenderContext*>(user)
+			                                    ->m_buffer_cache.HasGpuDirtyBytes(address, size);
+		                                }});
+	}
+	GlobalMaterializationMemoSettings() = {
+	    .entries = Config::MaterializeMemoEntries(),
+	    .stamps  = Config::MaterializeMemoStamps() != 0u ? &m_read_watch : nullptr};
 	// One unconditional line per debug option, so a log without findings still shows the option
 	// was active (a hang can end the process before any other line is written).
 	if (Config::BufferProbeEnabled()) {
@@ -56,6 +72,7 @@ RenderContext::RenderContext(GraphicContext& graphics, const std::filesystem::pa
 RenderContext::~RenderContext() {
 	ShutdownGpu();
 	m_command_scheduler.Shutdown();
+	GlobalMaterializationMemoSettings() = {};
 }
 
 void RenderContext::InitializeGpu(VideoOut::VideoOutDriver* video_out) {
@@ -115,6 +132,7 @@ bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr) no
 		return true;
 	}
 	if (access == PageFaultAccess::Write) {
+		m_read_watch.Written(fault_vaddr, fault_size);
 		m_buffer_cache.InvalidateMemory(fault_vaddr, fault_size);
 		m_texture_cache.InvalidateMemory(fault_vaddr, fault_size);
 		m_image_heap.InvalidateMemory(fault_vaddr, fault_size);
@@ -147,6 +165,7 @@ bool RenderContext::InvalidateMemory(uint64_t vaddr, uint64_t size) {
 	if (!IsMapped(vaddr, size)) {
 		return false;
 	}
+	m_read_watch.Written(vaddr, size);
 	m_buffer_cache.InvalidateMemory(vaddr, size);
 	m_texture_cache.InvalidateMemory(vaddr, size);
 	m_image_heap.InvalidateMemory(vaddr, size);
@@ -184,6 +203,7 @@ void RenderContext::UnmapMemory(uint64_t vaddr, uint64_t size) {
 			m_command_scheduler.Finish();
 			m_command_scheduler.WaitPriorityOperations(tick);
 		}
+		m_read_watch.Written(vaddr, size);
 		m_buffer_cache.InvalidateMemory(vaddr, size);
 		m_texture_cache.UnmapMemory(vaddr, size);
 		m_image_heap.UnmapMemory(vaddr, size);

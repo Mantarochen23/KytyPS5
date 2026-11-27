@@ -12,6 +12,7 @@
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/host_gpu/renderer/pipeline/buildTiming.h"
 #include "graphics/host_gpu/renderer/pipeline/flowPlan.h"
+#include "graphics/host_gpu/renderer/pipeline/materializationMemo.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderStoreDiff.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
 #include "graphics/shader/rectListShader.h"
@@ -320,29 +321,13 @@ private:
 	friend struct PipelineCacheTestAccess;
 
 	struct Program {
-		struct MaterializationRead {
-			uint64_t address = 0;
-			uint64_t size    = 0;
-			uint64_t hash    = 0;
-		};
-		struct MaterializationMemo {
-			std::vector<uint32_t>            user_data;
-			std::vector<uint32_t>            workgroup_counts;
-			std::vector<MaterializationRead> reads;
-			std::vector<uint32_t>            scratch;
-			uint64_t                         shader_base           = 0;
-			uint64_t                         indirect_args_address = 0;
-			bool                             legacy_hash           = false;
-			bool                             valid                 = false;
-		};
-
 		std::unique_ptr<ShaderRecompiler::ShaderSource> call_source;
 		ShaderRecompiler::IR::ResourcePlan           resource_plan;
 		ShaderRecompiler::IR::ResourceSnapshot       resources;
 		ShaderRecompiler::IR::ResourceSpecialization specialization;
 		uint64_t                                     specialization_hash = 0;
 		uint64_t                                     function_code_hash  = 0;
-		MaterializationMemo                          materialization_memo;
+		MemoizedMaterialization                      materialization_memo;
 		uint64_t                                     materialization_memo_hits = 0;
 		// A deque, so pipelines being made on workers keep valid pointers to their modules.
 		std::deque<ShaderModule>                     modules;
@@ -362,7 +347,7 @@ private:
 		[[nodiscard]] std::span<const uint32_t> FunctionCode() const;
 		bool Materialize(const ShaderRecompiler::IR::SrtRuntime& runtime,
 		                 std::string* failure_reason = nullptr);
-		void InvalidateMaterializationMemo() { materialization_memo.valid = false; }
+		void InvalidateMaterializationMemo() { materialization_memo.Clear(); }
 		bool RefreshCallSource(const ShaderRecompiler::IR::SrtRuntime& runtime);
 		// Takes the plan stored for the current callee code; false if there is none.
 		bool UseStoredCallPlan();

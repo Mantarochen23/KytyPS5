@@ -140,7 +140,14 @@ void FramePresented() noexcept {
 		    "materialize={:.3f} find_module={:.3f} wait_gpu={:.3f} wait_guest={:.3f} "
 		    "wait_lock={:.3f} idle={:.3f} other={:.3f} total={:.3f} "
 		    "ns/call materialize_hit={:.0f} materialize_miss={:.0f} module_hit={:.0f} "
-		    "module_miss={:.0f}\n",
+		    "module_miss={:.0f} "
+		    "memo_miss_empty={:.2f} memo_miss_heap_plan={:.2f} memo_miss_shader_base={:.2f} "
+		    "memo_miss_indirect_args={:.2f} memo_miss_legacy={:.2f} memo_miss_user_data={:.2f} "
+		    "memo_miss_workgroups={:.2f} memo_miss_unreadable={:.2f} memo_miss_range_changed={:.2f} "
+		    "memo_miss_heap_changed={:.2f} memo_stored={:.2f} memo_not_stored={:.2f} "
+		    "memo_evicted={:.2f} memo_heap_plan_calls={:.2f} memo_ranges_stamped={:.2f} "
+		    "memo_ranges_compared={:.2f} memo_bytes_compared={:.0f} memo_ranges_tracked={:.2f} "
+		    "memo_ranges_untracked={:.2f} memo_walk_changed={:.2f}\n",
 		    std::chrono::duration<double>(elapsed).count(), frames,
 		    Mean(delta, Counter::Draws, frames), Mean(delta, Counter::Dispatches, frames),
 		    Mean(delta, Counter::ImageHeapRebindCalls, frames),
@@ -163,7 +170,26 @@ void FramePresented() noexcept {
 		    NanosecondsPerCall(delta, Counter::MaterializationMemoMissNs,
 		                       Counter::MaterializationMemoMisses),
 		    NanosecondsPerCall(delta, Counter::FindModuleHitNs, Counter::FindModuleHits),
-		    NanosecondsPerCall(delta, Counter::FindModuleMissNs, Counter::FindModuleMisses)));
+		    NanosecondsPerCall(delta, Counter::FindModuleMissNs, Counter::FindModuleMisses),
+		    Mean(delta, Counter::MemoMissEmpty, frames),
+		    Mean(delta, Counter::MemoMissHeapPlan, frames),
+		    Mean(delta, Counter::MemoMissShaderBase, frames),
+		    Mean(delta, Counter::MemoMissIndirectArgs, frames),
+		    Mean(delta, Counter::MemoMissLegacyHash, frames),
+		    Mean(delta, Counter::MemoMissUserData, frames),
+		    Mean(delta, Counter::MemoMissWorkgroupCounts, frames),
+		    Mean(delta, Counter::MemoMissUnreadable, frames),
+		    Mean(delta, Counter::MemoMissRangeChanged, frames),
+		    Mean(delta, Counter::MemoMissHeapChanged, frames),
+		    Mean(delta, Counter::MemoStored, frames), Mean(delta, Counter::MemoNotStored, frames),
+		    Mean(delta, Counter::MemoEvicted, frames),
+		    Mean(delta, Counter::MemoHeapPlanCalls, frames),
+		    Mean(delta, Counter::MemoRangesStamped, frames),
+		    Mean(delta, Counter::MemoRangesCompared, frames),
+		    Mean(delta, Counter::MemoBytesCompared, frames),
+		    Mean(delta, Counter::MemoRangesTracked, frames),
+		    Mean(delta, Counter::MemoRangesUntracked, frames),
+		    Mean(delta, Counter::MemoWalkChanged, frames)));
 	}
 	if (g_store_loaded.load(std::memory_order_relaxed) && !g_bad_warned) {
 		const auto hits   = delta[static_cast<size_t>(Counter::FindModuleHits)];

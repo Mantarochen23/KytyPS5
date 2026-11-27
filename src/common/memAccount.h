@@ -69,6 +69,11 @@ struct ProcessMemory {
 	uint64_t rss      = 0;
 	uint64_t swap     = 0;
 	uint64_t peak_rss = 0; // 0 when the platform does not say
+	// RSS split (Linux): anonymous (heap, driver), file-backed (mapped files, binaries) and shared
+	// memory (the guest memory backing is a memfd, so its touched pages count here).
+	uint64_t rss_anon  = 0;
+	uint64_t rss_file  = 0;
+	uint64_t rss_shmem = 0;
 };
 // The text of /proc/<pid>/status (kB fields) -> bytes.
 [[nodiscard]] ProcessMemory ParseProcStatus(std::string_view text);
@@ -81,12 +86,60 @@ struct HeapStats {
 };
 [[nodiscard]] HeapStats ReadHeapStats();
 
+// One malloc arena from malloc_info: bytes freed but kept, and bytes the arena took from the system.
+struct Arena {
+	uint32_t nr           = 0;
+	uint64_t free_bytes   = 0;
+	uint64_t system_bytes = 0;
+};
+// The XML of malloc_info(3) -> its arenas (the trailing process-wide totals are not arenas).
+[[nodiscard]] std::vector<Arena> ParseMallocInfo(std::string_view xml);
+[[nodiscard]] std::vector<Arena> ReadArenas();
+
+// zram swap: what the swapped pages really cost. `orig` is the data it holds, `compressed` the RAM
+// it uses for it (mem_used_total of /sys/block/zram*/mm_stat, summed).
+struct ZramStats {
+	bool     known      = false;
+	uint64_t orig       = 0;
+	uint64_t compressed = 0;
+};
+// One mm_stat file: orig_data_size compr_data_size mem_used_total ...
+[[nodiscard]] ZramStats ParseZramMmStat(std::string_view text);
+[[nodiscard]] ZramStats ReadZram();
+// RSS plus the swap at its real RAM cost: on a zram host swapped pages stay in RAM compressed.
+[[nodiscard]] uint64_t Footprint(const ProcessMemory& process, const ZramStats& zram);
+
+// The guest memory backing (a memfd on Linux) reports its committed size here once.
+void NoteGuestBacking(uint64_t bytes);
+
 struct Sample {
 	ProcessMemory                                    process;
 	HeapStats                                        heap;
 	std::vector<Entry>                               owners;
 	std::vector<std::pair<std::string, std::string>> external;
+	ZramStats                                        zram;
+	std::vector<Arena>                               arenas;
+	uint64_t                                         guest_committed = 0;
 };
+
+// Every number that can grow, by name, from one sample (owners, heap, RSS parts, swap).
+[[nodiscard]] std::vector<std::pair<std::string, uint64_t>> Holders(const Sample& sample);
+// `heap-in-use +310MiB, rss-shmem +120MiB`: the holders that grew most between two samples.
+[[nodiscard]] std::string FormatGrowth(const std::vector<std::pair<std::string, uint64_t>>& before,
+                                       const std::vector<std::pair<std::string, uint64_t>>& after,
+                                       size_t top = 4);
+
+// Heap tuning of --heap-tune (arena cap, trim thresholds, mmap threshold); called once at start.
+void ApplyHeapTune();
+// Returns freed heap memory to the system at the end of a phase (store load, build burst) and prints
+// one `[mem] trim` line with what came back. Does nothing unless --heap-tune is on.
+void TrimHeap(std::string_view phase);
+// The one `[exit]` line: what the process held when it ended and what is torn down. `reason` names
+// the path (normal, fatal, signal, limit).
+void PrintExit(std::string_view reason);
+// Names the path the process is leaving by, for the `[exit]` line printed by the emergency path
+// (fatal assert, quick exit, limit stop, SIGTERM). `reason` must be a string literal.
+void NoteExitReason(const char* reason);
 [[nodiscard]] uint64_t Counted(const std::vector<Entry>& owners);
 // RSS minus the owners' sum; negative when the owners' estimates are larger than the process.
 [[nodiscard]] int64_t Unaccounted(uint64_t rss, uint64_t counted);

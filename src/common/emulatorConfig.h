@@ -197,6 +197,21 @@ struct ConfigOptions {
 	// words) and ~6x below the 11.5-13.8M-word modules that crash the driver.
 	static constexpr uint32_t DefaultMaxSpirvWords      = 2'000'000u;
 	uint32_t                 max_spirv_words            = DefaultMaxSpirvWords;
+	// --heap-tune <n>: at start cap the native allocator at n arenas (instead of 8 per core), return
+	// freed memory to the system sooner and serve large blocks from mmap; trim the heap at the end of
+	// the store load and of each build burst. 0 = the allocator's defaults.
+	uint32_t                 heap_tune_arenas           = 0;
+	// --driver-cache-cap-mb <n>: a driver pipeline cache file larger than n MB is not loaded (the run
+	// starts empty and saves only what it creates), and one that grows past it is not saved. 0 = no cap.
+	uint32_t                 driver_cache_cap_mb        = 0;
+	// --materialize-memo-entries: results each program keeps per set of inputs; 1 = one (the old
+	// memo, which also never memoizes plans that use the resident image heap), 2 or more also
+	// memoizes those plans.
+	uint32_t                 materialize_memo_entries   = 1;
+	// --materialize-memo-stamps: write-watch the guest pages a memoized materialization read, so a
+	// hit reads none of them; a page written more than this many times is compared by its bytes.
+	// 0 = off (every range is read and hashed on every lookup).
+	uint32_t                 materialize_memo_stamps    = 0;
 };
 
 void Load(const ConfigOptions& cfg);
@@ -321,7 +336,11 @@ uint32_t MemLimitGb();
 uint32_t FaultStormFaults();
 uint32_t FaultStormFrames();
 uint32_t FaultStormHold();
+uint32_t HeapTuneArenas();
+uint32_t DriverCacheCapMb();
 uint32_t MaxSpirvWords();
+uint32_t MaterializeMemoEntries();
+uint32_t MaterializeMemoStamps();
 
 } // namespace Config
 

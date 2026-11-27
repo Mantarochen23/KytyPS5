@@ -1,3 +1,4 @@
+#include "common/memAccount.h"
 #include "kernel/memory.h"
 
 #include "common/ports.h"
@@ -800,7 +801,12 @@ static uint64_t FindGuestFreeRange(uint64_t search_addr, uint64_t size, uint64_t
 }
 
 bool TryWriteBacking(uint64_t vaddr, const void* data, uint64_t size) {
-	return g_guest_address_space->TryWriteBacking(vaddr, data, size);
+	const bool written = g_guest_address_space->TryWriteBacking(vaddr, data, size);
+	// A write through the backing raises no fault on watched guest pages.
+	if (written && g_gpu_resources != nullptr) {
+		g_gpu_resources->NoteBackingWrite(vaddr, size);
+	}
+	return written;
 }
 
 bool TryReadBacking(uint64_t vaddr, void* data, uint64_t size) {

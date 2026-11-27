@@ -577,8 +577,24 @@ bool SpirvCompactEnabled() {
 	return g_config != nullptr && g_config->spirv_compact_enabled;
 }
 
+uint32_t MaterializeMemoEntries() {
+	return g_config != nullptr ? g_config->materialize_memo_entries : 1u;
+}
+
+uint32_t MaterializeMemoStamps() {
+	return g_config != nullptr ? g_config->materialize_memo_stamps : 0u;
+}
+
 uint32_t MaxSpirvWords() {
 	return g_config != nullptr ? g_config->max_spirv_words : ConfigOptions::DefaultMaxSpirvWords;
+}
+
+uint32_t HeapTuneArenas() {
+	return g_config != nullptr ? g_config->heap_tune_arenas : 0u;
+}
+
+uint32_t DriverCacheCapMb() {
+	return g_config != nullptr ? g_config->driver_cache_cap_mb : 0u;
 }
 
 } // namespace Config
