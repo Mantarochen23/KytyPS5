@@ -83,7 +83,7 @@ public:
 	// resolved once; only overlapping buffer recreation, map or unmap invalidates the BDA generation.
 	class RuntimeTableState final {
 	public:
-		explicit RuntimeTableState(RangeSet dependencies, RangeSet write_ranges = {})
+		explicit RuntimeTableState(RangeSet dependencies, RangeSet write_ranges)
 		    : m_dependencies(std::move(dependencies)), m_write_ranges(std::move(write_ranges)) {}
 
 		[[nodiscard]] uint64_t BackingGeneration() const noexcept {
@@ -95,8 +95,6 @@ public:
 			return true;
 		}
 		[[nodiscard]] const RangeSet& WriteRanges() const noexcept { return m_write_ranges; }
-		// Render thread only; set once the backing buffers are known, after registration.
-		void SetWriteRanges(RangeSet ranges) { m_write_ranges = std::move(ranges); }
 
 	private:
 		RangeSet             m_dependencies;
@@ -173,7 +171,7 @@ public:
 	[[nodiscard]] uint64_t WriteStamp(uint64_t vaddr, uint64_t size) const;
 	void                   NoteUntrackedWrite() noexcept { m_untracked_write_stamp = ++m_write_clock; }
 	[[nodiscard]] std::shared_ptr<RuntimeTableState> RegisterRuntimeTable(
-	    RangeSet dependencies, RangeSet write_ranges = {});
+	    RangeSet dependencies, RangeSet write_ranges);
 	// Called only for backing-lifetime changes, not ordinary guest writes.
 	void InvalidateRuntimeTables(uint64_t vaddr, uint64_t size);
 	// Marks the cached, mapped candidate-backing union once per dispatch, not once per candidate.

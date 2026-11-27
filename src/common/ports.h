@@ -25,7 +25,6 @@ enum class Port : uint32_t {
 	IndirectFormattedStores, // allow general aligned formatted indirect buffer stores
 	FiniteBufferDescriptors, // enumerate bounded GPU-selected buffer descriptors across select/phi/lane trees
 	ImageHeapIncremental, // rediscover resident images only after relevant cache changes
-	RuntimeTableCache, // reuse runtime-indexed buffer tables while their candidate backing is unchanged
 	Count
 };
 
@@ -54,7 +53,6 @@ inline constexpr PortInfo PORTS[] = {
     {Port::IndirectFormattedStores, "indirect-formatted-stores", "local matfail2", false, true},
     {Port::FiniteBufferDescriptors, "finite-buffer-descriptors", "local matfail2", false, true},
     {Port::ImageHeapIncremental, "image-heap-incremental", "upstream PR 1289 (NeySlim)", false, false},
-    {Port::RuntimeTableCache, "runtime-table-cache", "this tree (table1)", false, false},
 };
 static_assert(std::size(PORTS) == static_cast<size_t>(Port::Count));
 

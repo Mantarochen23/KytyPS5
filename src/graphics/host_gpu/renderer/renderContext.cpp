@@ -194,14 +194,10 @@ RangeSet RenderContext::IntersectMappedRanges(const RangeSet& ranges) const {
 }
 
 void RenderContext::MapMemory(uint64_t vaddr, uint64_t size) {
-	{
-		std::lock_guard lock(m_mapped_ranges_mutex);
-		m_mapped_ranges.Add(vaddr, size);
-		m_buffer_cache.QueueBdaSync(vaddr, size);
-	}
-	// After the range is published: a table rebuilt from here on sees it, and one built before is
-	// invalidated. Invalidating first would let a concurrent rebuild miss the new mapping for good.
 	m_buffer_cache.InvalidateRuntimeTables(vaddr, size);
+	std::lock_guard lock(m_mapped_ranges_mutex);
+	m_mapped_ranges.Add(vaddr, size);
+	m_buffer_cache.QueueBdaSync(vaddr, size);
 }
 
 void RenderContext::UnmapMemory(uint64_t vaddr, uint64_t size) {

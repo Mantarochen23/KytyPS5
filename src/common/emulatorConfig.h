@@ -224,10 +224,6 @@ struct ConfigOptions {
 	// materialization, module lookup) read the clock for one call in n and scale the result by n.
 	// 1 = every call.
 	uint32_t                 frame_timer_sample         = 16;
-	// --defer-new-targets-on-stall-ms: once no frame was recorded for this long, a draw into a
-	// target that was not seen redrawn is skipped while its shaders build, like a draw into a
-	// redrawn one, instead of building them on the render thread. 0 = never.
-	uint32_t                 defer_new_targets_on_stall_ms = 0;
 };
 
 void Load(const ConfigOptions& cfg);
@@ -360,7 +356,6 @@ uint32_t FrameTimerSample();
 uint32_t MaxSpirvWords();
 uint32_t MaterializeMemoEntries();
 uint32_t MaterializeMemoStamps();
-uint32_t DeferNewTargetsOnStallMs();
 
 } // namespace Config
 

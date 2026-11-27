@@ -321,13 +321,6 @@ void TestRuntimeTableBackingGenerations() {
         "unrelated backing change invalidated a runtime table");
   Check(state.InvalidateBacking(0x10800, 0x10) && state.BackingGeneration() == 2,
         "candidate backing change did not invalidate the runtime table generation");
-  RangeSet later;
-  later.Add(0x10000, 0x1000);
-  state.SetWriteRanges(std::move(later));
-  write_range_count = 0;
-  state.WriteRanges().ForEach([&](uint64_t, uint64_t) { ++write_range_count; });
-  Check(write_range_count == 1 && state.BackingGeneration() == 2,
-        "setting the write union after registration changed the generation");
 }
 
 void TestGuestRange() {

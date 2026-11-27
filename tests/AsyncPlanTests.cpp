@@ -270,41 +270,9 @@ void TestCreateStats() {
 	Check(line.find("in-driver now=0 peak=2") != std::string::npos, "concurrency");
 }
 
-// --defer-new-targets-on-stall-ms: draws are let through only once one frame has lasted the limit,
-// and the edges are reported once.
-void TestFrameStallTracker() {
-	using Change = AsyncPlan::FrameStallTracker::Change;
-	AsyncPlan::FrameStallTracker t;
-	Change c = Change::None;
-	// Off: never, however long the frame lasts.
-	Check(!t.Update(5, 1'000, 0, &c) && c == Change::None, "off at the first draw");
-	Check(!t.Update(5, 100'000, 0, &c) && c == Change::None, "off stays off");
-
-	AsyncPlan::FrameStallTracker s;
-	// Frames advance: no stall.
-	Check(!s.Update(1, 0, 2'000, &c) && c == Change::None, "first draw");
-	Check(!s.Update(2, 1'500, 2'000, &c) && c == Change::None, "new frame");
-	Check(!s.Update(2, 3'499, 2'000, &c) && c == Change::None, "just under the limit");
-	// The same frame for 2 s: the stall starts once.
-	Check(s.Update(2, 3'500, 2'000, &c) && c == Change::Started, "stall starts at the limit");
-	Check(s.Update(2, 9'000, 2'000, &c) && c == Change::None, "stall goes on");
-	Check(s.deferred == 2 && s.deferred_total == 2, "draws counted while stalled");
-	// The next frame ends it and resets the clock.
-	Check(!s.Update(3, 9'100, 2'000, &c) && c == Change::Ended, "stall ends with the next frame");
-	Check(s.deferred == 2, "the ended stall keeps its count for the log line");
-	Check(!s.Update(3, 11'000, 2'000, &c) && c == Change::None, "new frame clock");
-	Check(s.Update(3, 11'100, 2'000, &c) && c == Change::Started, "second stall");
-	Check(s.deferred == 1 && s.deferred_total == 3, "second stall counted afresh");
-	// A clock that goes backwards does not count as a stall.
-	AsyncPlan::FrameStallTracker b;
-	Check(!b.Update(1, 5'000, 2'000, &c), "first");
-	Check(!b.Update(1, 1'000, 2'000, &c) && c == Change::None, "backwards clock");
-}
-
 } // namespace
 
 int main() {
-	TestFrameStallTracker();
 	TestCreateStats();
 	TestRegistrationTranslatesOnlyWhatTheCacheKnows();
 	TestUnclaimedWaitingTranslationsRetire();
