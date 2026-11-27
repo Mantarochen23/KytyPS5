@@ -1,17 +1,22 @@
 #include "common/emulatorConfig.h"
 #include "common/recoverable.h"
 #include "common/shaderRegLedger.h"
+#include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
 #include "graphics/shader/recompiler/frontend/cfg/ShaderCFG.h"
 #include "graphics/shader/recompiler/frontend/decode/ShaderDecoder.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
 #include "graphics/shader/shader.h"
+#include "graphics/host_gpu/vulkanCommon.h"
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <chrono>
+#include <cinttypes>
 #include <csignal>
 #include <cctype>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -24,9 +29,14 @@
 #include <set>
 #include <type_traits>
 #include <span>
+#include <spirv/unified1/spirv.hpp>
+#include <spirv-tools/libspirv.hpp>
+#include <spirv-tools/optimizer.hpp>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -43,6 +53,7 @@ using Libs::Graphics::ShaderComputeInputInfo;
 using Libs::Graphics::ShaderPixelInputInfo;
 using Libs::Graphics::ShaderType;
 using Libs::Graphics::ShaderVertexInputInfo;
+namespace Prospero   = Libs::Graphics::Prospero;
 namespace Recompiler = Libs::Graphics::ShaderRecompiler;
 
 struct Options {
@@ -51,8 +62,10 @@ struct Options {
 	uint32_t              jobs       = 0;
 	uint32_t              limit      = 0;
 	uint32_t              timeout_ms = 20000;
+	uint32_t              spirv_profile = 0;
 	std::string           only;
 	bool                  emit_spirv = false;
+	bool                  time_pipeline = false;
 	bool                  self_test  = false;
 	std::filesystem::path compare_log;
 };
@@ -79,6 +92,14 @@ thread_local std::map<std::string, double>* g_pass_times = nullptr;
 
 double Milliseconds(std::chrono::steady_clock::duration duration) {
 	return std::chrono::duration<double, std::milli>(duration).count();
+}
+
+bool AnalysisRequested(const Options& options) {
+	return options.spirv_profile != 0 || options.time_pipeline;
+}
+
+std::filesystem::path AnalysisModulePath(const Options& options, size_t index) {
+	return options.output / ".analysis-modules" / (std::to_string(index) + ".spv");
 }
 
 void PassTiming(const char* name, uint64_t nanoseconds) {
@@ -250,10 +271,95 @@ bool PlanNeedsRuntime(const Recompiler::IR::ResourcePlan& plan) {
 	       !plan.info.buffers.empty() || !plan.info.images.empty() || !plan.info.samplers.empty();
 }
 
+Recompiler::IR::ResourceSpecialization SyntheticSpecialization(
+    const Recompiler::IR::ResourcePlan& plan) {
+	using namespace Recompiler::IR;
+	ResourceSpecialization specialization;
+	std::vector<uint32_t> indirect_buffers;
+	specialization.buffers.reserve(plan.info.buffers.size() * 2u);
+	for (uint32_t index = 0; index < plan.info.buffers.size(); index++) {
+		const auto& buffer = plan.info.buffers[index];
+		ResourceSpecialization::Buffer value;
+		value.packed_stride = buffer.packed_stride != 0u
+		                          ? buffer.packed_stride
+		                          : std::max(4u, buffer.max_byte_extent);
+		value.descriptor_format = buffer.descriptor_format;
+		if (buffer.formatted && value.descriptor_format == Prospero::BufferFormat::kInvalid) {
+			value.descriptor_format = Prospero::BufferFormat::k32_32_32_32UInt;
+		}
+		value.descriptor_swizzle = buffer.descriptor_swizzle;
+		const bool indirect = buffer.source < plan.descriptor_sources.size() &&
+		                      plan.descriptor_sources[buffer.source].indirect_descriptor.has_value();
+		if (indirect) {
+			value.indirect_root              = index;
+			value.indirect_search_iterations = 1;
+			indirect_buffers.push_back(index);
+		}
+		specialization.buffers.push_back(value);
+	}
+	for (const auto root: indirect_buffers) specialization.buffers.push_back(specialization.buffers[root]);
+
+	std::vector<uint32_t> indirect_images;
+	specialization.images.reserve(plan.info.images.size() * 2u);
+	for (uint32_t index = 0; index < plan.info.images.size(); index++) {
+		const auto& image = plan.info.images[index];
+		ResourceSpecialization::Image value;
+		value.numeric_class = image.numeric_class == Prospero::TextureNumericClass::Unsupported
+		                          ? (image.atomic ? Prospero::TextureNumericClass::Uint
+		                                          : Prospero::TextureNumericClass::Float)
+		                          : image.numeric_class;
+		value.dimension = image.dimension == Recompiler::Decoder::ImageDimension::Unknown
+		                      ? Recompiler::Decoder::ImageDimension::Dim2D
+		                      : image.dimension;
+		value.mip_count         = std::max(1u, image.mip_count);
+		value.conversion_format = image.conversion_format;
+		value.shader_swizzle    = image.shader_swizzle;
+		value.srgb_decode       = image.srgb_decode;
+		value.cube              = image.cube;
+		value.skip_degamma      = image.skip_degamma;
+		const bool indirect = image.source < plan.descriptor_sources.size() &&
+		                      plan.descriptor_sources[image.source].indirect_descriptor.has_value();
+		if (indirect) {
+			value.indirect_root              = index;
+			value.indirect_search_iterations = 1;
+			indirect_images.push_back(index);
+		}
+		specialization.images.push_back(value);
+	}
+	for (const auto root: indirect_images) specialization.images.push_back(specialization.images[root]);
+
+	std::vector<uint32_t> indirect_samplers;
+	specialization.samplers.reserve(plan.info.samplers.size() * 2u);
+	for (uint32_t index = 0; index < plan.info.samplers.size(); index++) {
+		const auto& sampler = plan.info.samplers[index];
+		ResourceSpecialization::Sampler value;
+		const bool indirect = sampler.source < plan.descriptor_sources.size() &&
+		                      plan.descriptor_sources[sampler.source].indirect_descriptor.has_value();
+		if (indirect) {
+			value.indirect_root              = index;
+			value.indirect_search_iterations = 1;
+			indirect_samplers.push_back(index);
+		}
+		specialization.samplers.push_back(value);
+	}
+	for (const auto root: indirect_samplers)
+		specialization.samplers.push_back(specialization.samplers[root]);
+	return specialization;
+}
+
 void WriteJson(const std::filesystem::path& path, const Json& value) {
 	std::ofstream output(path, std::ios::trunc);
 	if (!output) throw std::runtime_error("could not create result file");
 	output << value.dump() << '\n';
+}
+
+void WriteSpirv(const std::filesystem::path& path, std::span<const uint32_t> words) {
+	std::filesystem::create_directories(path.parent_path());
+	std::ofstream output(path, std::ios::binary | std::ios::trunc);
+	if (!output) throw std::runtime_error("could not create SPIR-V output");
+	output.write(reinterpret_cast<const char*>(words.data()),
+	             static_cast<std::streamsize>(words.size_bytes()));
+	if (!output) throw std::runtime_error("could not write SPIR-V output");
 }
 
 Json BaseResult(const CorpusEntry& entry) {
@@ -266,6 +372,7 @@ Json BaseResult(const CorpusEntry& entry) {
 	        {"blocks", 0},
 	        {"loops", 0},
 	        {"spirv_words", 0},
+	        {"synthetic_specialization", false},
 	        {"wave_size", 0},
 	        {"total_ms", 0.0}};
 }
@@ -472,7 +579,7 @@ bool RestoreInputInfo(const UseInputs& inputs, Info& info) {
 	return true;
 }
 
-void TranslateOne(const CorpusEntry& entry, const Options& options,
+void TranslateOne(const CorpusEntry& entry, size_t entry_index, const Options& options,
 	              const std::filesystem::path& result_path) {
 	Json result = BaseResult(entry);
 	const auto total_begin = std::chrono::steady_clock::now();
@@ -642,7 +749,7 @@ void TranslateOne(const CorpusEntry& entry, const Options& options,
 			result["total_ms"] = Milliseconds(std::chrono::steady_clock::now() - total_begin);
 			WriteJson(result_path, result);
 			return;
-		} else if (PlanNeedsRuntime(plan)) {
+		} else if (PlanNeedsRuntime(plan) && !AnalysisRequested(options)) {
 			result["outcome"] = "needs-runtime:user_data_values";
 			result["shape"]   = "resource specialization consumes registration-time unknown values";
 			result["total_ms"] = Milliseconds(std::chrono::steady_clock::now() - total_begin);
@@ -650,21 +757,25 @@ void TranslateOne(const CorpusEntry& entry, const Options& options,
 			return;
 		}
 
+		const bool synthetic = !has_use && PlanNeedsRuntime(plan);
+		if (synthetic) specialization = SyntheticSpecialization(plan);
 		begin = std::chrono::steady_clock::now();
 		const Recompiler::IR::PushData::Window push {use_inputs.push_begin, use_inputs.push_end};
 		auto compiled = Recompiler::CompileProgram(std::move(translated), compile, specialization,
 		                                           has_use ? push : Recompiler::IR::PushData::Window {});
 		result["phase_ms"]["spirv"] = Milliseconds(std::chrono::steady_clock::now() - begin);
 		result["spirv_words"]        = compiled.spirv.size();
+		result["synthetic_specialization"] = synthetic;
+		result["descriptor_mask"] = compiled.program.bindings.descriptor_mask;
+		result["descriptor_counts"] = compiled.program.bindings.descriptor_counts;
 		result["outcome"]            = "emitted";
+		if (AnalysisRequested(options)) {
+			WriteSpirv(AnalysisModulePath(options, entry_index), compiled.spirv);
+		}
 		if (options.emit_spirv) {
 			const auto folder = options.output / "spirv";
-			std::filesystem::create_directories(folder);
-			std::ofstream spirv(folder / (entry.stage + "_" + entry.hash.substr(2) + ".spv"),
-			                    std::ios::binary | std::ios::trunc);
-			spirv.write(reinterpret_cast<const char*>(compiled.spirv.data()),
-			            static_cast<std::streamsize>(compiled.spirv.size() * sizeof(uint32_t)));
-			if (!spirv) throw std::runtime_error("could not write SPIR-V output");
+			WriteSpirv(folder / (entry.stage + "_" + entry.hash.substr(2) + ".spv"),
+			           compiled.spirv);
 		}
 	} catch (const Common::RecoverableFailure& failure) {
 		Recompiler::SetPassTimingHook(nullptr);
@@ -717,7 +828,7 @@ std::vector<Json> RunChildren(const Options& options, const std::vector<CorpusEn
 				return {};
 			}
 			if (pid == 0) {
-				TranslateOne(entries[next], options, result_path);
+				TranslateOne(entries[next], next, options, result_path);
 				::_exit(0);
 			}
 			running.push_back({.pid = pid,
@@ -767,6 +878,657 @@ std::vector<Json> RunChildren(const Options& options, const std::vector<CorpusEn
 	std::filesystem::remove(work, ignored);
 	return results;
 #endif
+}
+
+struct SpirvInstruction {
+	size_t   offset = 0;
+	uint16_t opcode = 0;
+	uint16_t words  = 0;
+};
+
+std::vector<uint32_t> ReadSpirv(const std::filesystem::path& path) {
+	std::ifstream input(path, std::ios::binary | std::ios::ate);
+	if (!input) throw std::runtime_error("could not open analysis SPIR-V module");
+	const auto bytes = input.tellg();
+	if (bytes < static_cast<std::streamoff>(5 * sizeof(uint32_t)) ||
+	    static_cast<uint64_t>(bytes) % sizeof(uint32_t) != 0) {
+		throw std::runtime_error("analysis SPIR-V module has an invalid size");
+	}
+	std::vector<uint32_t> words(static_cast<size_t>(bytes) / sizeof(uint32_t));
+	input.seekg(0);
+	input.read(reinterpret_cast<char*>(words.data()), static_cast<std::streamsize>(bytes));
+	if (!input) throw std::runtime_error("could not read analysis SPIR-V module");
+	return words;
+}
+
+std::vector<SpirvInstruction> ParseSpirv(std::span<const uint32_t> words) {
+	if (words.size() < 5 || words.front() != spv::MagicNumber) {
+		throw std::runtime_error("analysis module is not SPIR-V");
+	}
+	std::vector<SpirvInstruction> instructions;
+	for (size_t offset = 5; offset < words.size();) {
+		const auto count  = static_cast<uint16_t>(words[offset] >> spv::WordCountShift);
+		const auto opcode = static_cast<uint16_t>(words[offset] & spv::OpCodeMask);
+		if (count == 0 || offset + count > words.size()) {
+			throw std::runtime_error("analysis module contains a malformed instruction");
+		}
+		instructions.push_back({offset, opcode, count});
+		offset += count;
+	}
+	return instructions;
+}
+
+bool IsTypeOrConstant(uint16_t opcode) {
+	return (opcode >= spv::OpTypeVoid && opcode <= spv::OpTypeForwardPointer) ||
+	       (opcode >= spv::OpConstantTrue && opcode <= spv::OpSpecConstantOp) ||
+	       opcode == spv::OpUndef;
+}
+
+bool IsDebugInstruction(uint16_t opcode) {
+	switch (opcode) {
+		case spv::OpSourceContinued:
+		case spv::OpSource:
+		case spv::OpSourceExtension:
+		case spv::OpName:
+		case spv::OpMemberName:
+		case spv::OpString:
+		case spv::OpLine:
+		case spv::OpNoLine:
+		case spv::OpModuleProcessed: return true;
+		default: return false;
+	}
+}
+
+bool IsControlScaffolding(uint16_t opcode) {
+	switch (opcode) {
+		case spv::OpPhi:
+		case spv::OpLoopMerge:
+		case spv::OpSelectionMerge:
+		case spv::OpLabel:
+		case spv::OpBranch:
+		case spv::OpBranchConditional:
+		case spv::OpSwitch: return true;
+		default: return false;
+	}
+}
+
+bool IsBoundsCheck(uint16_t opcode) {
+	return (opcode >= spv::OpIEqual && opcode <= spv::OpFUnordGreaterThanEqual) ||
+	       opcode == spv::OpSelect;
+}
+
+bool IsWaveInstruction(uint16_t opcode) {
+	return opcode >= spv::OpGroupNonUniformElect && opcode <= spv::OpGroupNonUniformQuadSwap;
+}
+
+bool IsImageInstruction(uint16_t opcode) {
+	return (opcode >= spv::OpSampledImage && opcode <= spv::OpImage) ||
+	       opcode == spv::OpImageTexelPointer;
+}
+
+bool IsAtomicInstruction(uint16_t opcode) {
+	return opcode >= spv::OpAtomicLoad && opcode <= spv::OpAtomicXor;
+}
+
+bool IsResourceStorage(uint32_t storage) {
+	return storage == spv::StorageClassUniformConstant || storage == spv::StorageClassUniform ||
+	       storage == spv::StorageClassStorageBuffer ||
+	       storage == spv::StorageClassPhysicalStorageBuffer;
+}
+
+uint32_t SequenceHash(std::span<const SpirvInstruction> instructions) {
+	uint32_t hash = 2166136261u;
+	for (const auto& instruction: instructions) {
+		hash ^= static_cast<uint32_t>(instruction.opcode) |
+		        (static_cast<uint32_t>(instruction.words) << 16u);
+		hash *= 16777619u;
+	}
+	return hash;
+}
+
+Json RepeatedSequences(const std::vector<SpirvInstruction>& instructions, size_t module_words) {
+	struct Repeat {
+		uint32_t hash         = 0;
+		uint32_t window       = 0;
+		uint32_t occurrences  = 0;
+		uint64_t covered_words = 0;
+	};
+	std::vector<Repeat> repeats;
+	for (const uint32_t window: {8u, 16u, 32u}) {
+		if (instructions.size() < window) continue;
+		std::unordered_map<uint32_t, std::vector<uint32_t>> starts;
+		for (uint32_t start = 0; start + window <= instructions.size(); start++) {
+			starts[SequenceHash(std::span(instructions).subspan(start, window))].push_back(start);
+		}
+		for (const auto& [hash, positions]: starts) {
+			uint32_t occurrences = 0;
+			uint32_t next         = 0;
+			uint64_t covered      = 0;
+			for (const auto start: positions) {
+				if (occurrences != 0 && start < next) continue;
+				uint64_t words = 0;
+				for (uint32_t i = 0; i < window; i++) words += instructions[start + i].words;
+				covered += words;
+				occurrences++;
+				next = start + window;
+			}
+			if (occurrences >= 2) repeats.push_back({hash, window, occurrences, covered});
+		}
+	}
+	std::ranges::sort(repeats, [](const Repeat& left, const Repeat& right) {
+		return left.covered_words != right.covered_words
+		           ? left.covered_words > right.covered_words
+		           : std::pair {left.window, left.hash} < std::pair {right.window, right.hash};
+	});
+	Json result = Json::array();
+	for (size_t i = 0; i < std::min(size_t {20}, repeats.size()); i++) {
+		const auto& repeat = repeats[i];
+		result.push_back({{"sequence_id", repeat.hash},
+		                  {"instruction_window", repeat.window},
+		                  {"non_overlapping_occurrences", repeat.occurrences},
+		                  {"covered_words", repeat.covered_words},
+		                  {"module_share_percent",
+		                   module_words == 0 ? 0.0
+		                                     : 100.0 * static_cast<double>(repeat.covered_words) /
+		                                           static_cast<double>(module_words)}});
+	}
+	return result;
+}
+
+Json ProfileSpirv(std::span<const uint32_t> words) {
+	const auto instructions = ParseSpirv(words);
+	std::unordered_map<uint32_t, uint32_t> pointer_types;
+	std::unordered_map<uint32_t, uint32_t> pointer_values;
+	std::unordered_set<uint32_t> constants;
+	for (const auto& instruction: instructions) {
+		const auto* operands = words.data() + instruction.offset;
+		const auto  opcode   = instruction.opcode;
+		if (opcode == spv::OpTypePointer && instruction.words >= 4) {
+			pointer_types[operands[1]] = operands[2];
+		} else if (opcode >= spv::OpConstantTrue && opcode <= spv::OpSpecConstantOp &&
+		           instruction.words >= 3) {
+			constants.insert(operands[2]);
+		}
+		if (instruction.words >= 3) {
+			const auto type_it = pointer_types.find(operands[1]);
+			if (type_it != pointer_types.end()) pointer_values[operands[2]] = type_it->second;
+		}
+		if (opcode == spv::OpVariable && instruction.words >= 4) {
+			pointer_values[operands[2]] = operands[3];
+		}
+	}
+
+	struct OpcodeCount { uint64_t instructions = 0; uint64_t words = 0; };
+	std::map<uint16_t, OpcodeCount> opcodes;
+	std::map<std::string, uint64_t> categories;
+	uint64_t functions = 0;
+	for (const auto& instruction: instructions) {
+		auto& count = opcodes[instruction.opcode];
+		count.instructions++;
+		count.words += instruction.words;
+		if (instruction.opcode == spv::OpFunction) functions++;
+
+		const auto* operands = words.data() + instruction.offset;
+		uint32_t pointer_storage = UINT32_MAX;
+		if ((instruction.opcode == spv::OpLoad || IsAtomicInstruction(instruction.opcode)) &&
+		    instruction.words >= 4) {
+			if (const auto it = pointer_values.find(operands[3]); it != pointer_values.end()) {
+				pointer_storage = it->second;
+			}
+		} else if (instruction.opcode == spv::OpStore && instruction.words >= 2) {
+			if (const auto it = pointer_values.find(operands[1]); it != pointer_values.end()) {
+				pointer_storage = it->second;
+			}
+		}
+
+		bool indirect_descriptor = false;
+		if ((instruction.opcode == spv::OpAccessChain ||
+		     instruction.opcode == spv::OpInBoundsAccessChain ||
+		     instruction.opcode == spv::OpPtrAccessChain) && instruction.words >= 5) {
+			const auto storage = pointer_values.find(operands[2]);
+			const bool resource = storage != pointer_values.end() && IsResourceStorage(storage->second);
+			for (uint16_t index = 4; resource && index < instruction.words; index++) {
+				indirect_descriptor |= !constants.contains(operands[index]);
+			}
+		}
+
+		const char* category = "other";
+		if (IsDebugInstruction(instruction.opcode)) category = "debug_names";
+		else if (IsTypeOrConstant(instruction.opcode)) category = "constants_types";
+		else if (indirect_descriptor) category = "indirect_descriptor_search";
+		else if (pointer_storage == spv::StorageClassFunction ||
+		         (instruction.opcode == spv::OpVariable && instruction.words >= 4 &&
+		          operands[3] == spv::StorageClassFunction)) {
+			category = "function_register_load_store";
+		} else if (IsImageInstruction(instruction.opcode) || IsResourceStorage(pointer_storage)) {
+			category = "resource_access_helpers";
+		} else if (IsWaveInstruction(instruction.opcode)) category = "wave_lane_emulation";
+		else if (IsBoundsCheck(instruction.opcode)) category = "bounds_checks";
+		else if (IsControlScaffolding(instruction.opcode)) category = "phi_merge_scaffolding";
+		categories[category] += instruction.words;
+	}
+	categories["module_header"] += 5;
+
+	std::vector<std::pair<uint16_t, OpcodeCount>> ranked(opcodes.begin(), opcodes.end());
+	std::ranges::sort(ranked, [](const auto& left, const auto& right) {
+		return left.second.words != right.second.words ? left.second.words > right.second.words
+		                                               : left.first < right.first;
+	});
+	Json histogram = Json::array();
+	for (const auto& [opcode, count]: ranked) {
+		histogram.push_back({{"opcode", opcode},
+		                     {"name", spvOpcodeString(opcode)},
+		                     {"instructions", count.instructions},
+		                     {"words", count.words},
+		                     {"module_share_percent",
+		                      100.0 * static_cast<double>(count.words) /
+		                          static_cast<double>(words.size())}});
+	}
+	Json attributed = Json::object();
+	for (const auto& [name, count]: categories) {
+		attributed[name] = {{"words", count},
+		                    {"module_share_percent",
+		                     100.0 * static_cast<double>(count) /
+		                         static_cast<double>(words.size())}};
+	}
+	return {{"words", words.size()},
+	        {"instructions", instructions.size()},
+	        {"functions", functions},
+	        {"attribution_method",
+	         "exclusive opcode/pointer-storage lower bounds; comparisons and selects are counted as bounds checks"},
+	        {"attributed_words", std::move(attributed)},
+	        {"opcode_histogram", std::move(histogram)},
+	        {"repeated_sequences", RepeatedSequences(instructions, words.size())}};
+}
+
+bool ValidateSpirv(std::span<const uint32_t> words, std::string& error) {
+	spvtools::SpirvTools tools(SPV_ENV_VULKAN_1_3);
+	tools.SetMessageConsumer([&](spv_message_level_t, const char*, const spv_position_t& position,
+	                             const char* message) {
+		error = "word " + std::to_string(position.index) + ": " + message;
+	});
+	return tools.Validate(words.data(), words.size());
+}
+
+enum class OptimizationRecipe { Size, Performance, Compact };
+
+std::vector<uint32_t> OptimizeSpirv(std::span<const uint32_t> words, OptimizationRecipe recipe,
+	                                double& milliseconds, std::string& error) {
+	if (recipe == OptimizationRecipe::Compact) {
+		std::vector<uint32_t> optimized;
+		const auto begin = std::chrono::steady_clock::now();
+		const bool valid = Recompiler::CompactSpirv(words, optimized, error);
+		milliseconds = Milliseconds(std::chrono::steady_clock::now() - begin);
+		if (!valid) optimized.clear();
+		return optimized;
+	}
+	spvtools::Optimizer optimizer(SPV_ENV_VULKAN_1_3);
+	optimizer.SetMessageConsumer([&](spv_message_level_t, const char*, const spv_position_t& position,
+	                                 const char* message) {
+		error = "word " + std::to_string(position.index) + ": " + message;
+	});
+	if (recipe == OptimizationRecipe::Size) {
+		optimizer.RegisterSizePasses();
+	} else if (recipe == OptimizationRecipe::Performance) {
+		optimizer.RegisterPerformancePasses();
+	}
+	std::vector<uint32_t> optimized;
+	const auto begin = std::chrono::steady_clock::now();
+	const bool valid = optimizer.Run(words.data(), words.size(), &optimized);
+	milliseconds = Milliseconds(std::chrono::steady_clock::now() - begin);
+	if (!valid) optimized.clear();
+	return optimized;
+}
+
+struct PipelineMeasurement {
+	double      module_ms   = 0.0;
+	double      pipeline_ms = 0.0;
+	std::string error;
+};
+
+class HeadlessVulkan {
+public:
+	~HeadlessVulkan() {
+		if (m_device != nullptr) {
+			m_device.destroy(nullptr);
+		}
+		if (m_instance != nullptr) m_instance.destroy(nullptr);
+	}
+
+	bool Initialize(std::string& error) {
+		static vk::detail::DynamicLoader loader;
+		const auto get_instance_proc_addr =
+		    loader.getProcAddress<PFN_vkGetInstanceProcAddr>("vkGetInstanceProcAddr");
+		if (get_instance_proc_addr == nullptr) {
+			error = "could not load the Vulkan loader";
+			return false;
+		}
+		VULKAN_HPP_DEFAULT_DISPATCHER.init(get_instance_proc_addr);
+
+		vk::ApplicationInfo app {};
+		app.pApplicationName = "shader_corpus_tool";
+		app.apiVersion        = VK_API_VERSION_1_3;
+		vk::InstanceCreateInfo instance_info {};
+		instance_info.pApplicationInfo = &app;
+		const auto instance_result = vk::createInstance(&instance_info, nullptr, &m_instance);
+		if (instance_result != vk::Result::eSuccess) {
+			error = "vkCreateInstance: " + vk::to_string(instance_result);
+			return false;
+		}
+		VULKAN_HPP_DEFAULT_DISPATCHER.init(m_instance);
+
+		uint32_t physical_count = 0;
+		auto result = m_instance.enumeratePhysicalDevices(&physical_count, nullptr);
+		if (result != vk::Result::eSuccess || physical_count == 0) {
+			error = result != vk::Result::eSuccess
+		            ? "vkEnumeratePhysicalDevices: " + vk::to_string(result)
+		            : "no Vulkan physical device";
+			return false;
+		}
+		std::vector<vk::PhysicalDevice> physical_devices(physical_count);
+		result = m_instance.enumeratePhysicalDevices(&physical_count, physical_devices.data());
+		if (result != vk::Result::eSuccess) {
+			error = "vkEnumeratePhysicalDevices: " + vk::to_string(result);
+			return false;
+		}
+		for (const auto physical: physical_devices) {
+			uint32_t queue_count = 0;
+			physical.getQueueFamilyProperties(&queue_count, nullptr);
+			std::vector<vk::QueueFamilyProperties> queues(queue_count);
+			physical.getQueueFamilyProperties(&queue_count, queues.data());
+			for (uint32_t index = 0; index < queue_count; index++) {
+				if ((queues[index].queueFlags & vk::QueueFlagBits::eCompute) !=
+				    vk::QueueFlagBits::eCompute) continue;
+				m_physical     = physical;
+				m_queue_family = index;
+				break;
+			}
+			if (m_physical != nullptr) break;
+		}
+		if (m_physical == nullptr) {
+			error = "no Vulkan compute queue";
+			return false;
+		}
+
+		vk::PhysicalDeviceVulkan11Features features11 {};
+		vk::PhysicalDeviceVulkan12Features features12 {};
+		vk::PhysicalDeviceVulkan13Features features13 {};
+		features13.pNext = &features12;
+		features12.pNext = &features11;
+		vk::PhysicalDeviceFeatures2 features2 {};
+		features2.pNext = &features13;
+		m_physical.getFeatures2(&features2);
+
+		const float priority = 1.0f;
+		vk::DeviceQueueCreateInfo queue_info {};
+		queue_info.queueFamilyIndex = m_queue_family;
+		queue_info.queueCount       = 1;
+		queue_info.pQueuePriorities = &priority;
+		vk::DeviceCreateInfo device_info {};
+		device_info.pNext                   = &features13;
+		device_info.queueCreateInfoCount    = 1;
+		device_info.pQueueCreateInfos       = &queue_info;
+		device_info.pEnabledFeatures        = &features2.features;
+		result = m_physical.createDevice(&device_info, nullptr, &m_device);
+		if (result != vk::Result::eSuccess) {
+			error = "vkCreateDevice: " + vk::to_string(result);
+			return false;
+		}
+		VULKAN_HPP_DEFAULT_DISPATCHER.init(m_device);
+
+		return true;
+	}
+
+	PipelineMeasurement Measure(std::span<const uint32_t> words, uint64_t descriptor_mask,
+	                            std::span<const uint32_t> descriptor_counts) const {
+		PipelineMeasurement measurement;
+		using BindingKind = Recompiler::IR::DescriptorBindingKind;
+		std::vector<vk::DescriptorSetLayoutBinding> bindings;
+		for (auto mask = descriptor_mask; mask != 0; mask &= mask - 1u) {
+			const auto index = static_cast<uint32_t>(std::countr_zero(mask));
+			if (index >= descriptor_counts.size()) {
+				measurement.error = "descriptor binding index is out of range";
+				return measurement;
+			}
+			const auto kind = static_cast<BindingKind>(index);
+			bindings.push_back({Recompiler::IR::NativeBinding(ShaderType::Compute, kind),
+			                    Libs::Graphics::NativeDescriptorType(kind), descriptor_counts[index],
+			                    vk::ShaderStageFlagBits::eCompute, nullptr});
+		}
+		vk::DescriptorSetLayoutCreateInfo descriptor_info {};
+		descriptor_info.bindingCount = static_cast<uint32_t>(bindings.size());
+		descriptor_info.pBindings    = bindings.data();
+		vk::DescriptorSetLayout descriptor_layout = nullptr;
+		auto result =
+		    m_device.createDescriptorSetLayout(&descriptor_info, nullptr, &descriptor_layout);
+		if (result != vk::Result::eSuccess) {
+			measurement.error = "vkCreateDescriptorSetLayout: " + vk::to_string(result);
+			return measurement;
+		}
+		const vk::PushConstantRange push_constants {vk::ShaderStageFlagBits::eCompute, 0,
+		                                              Recompiler::IR::NativePushConstantSize};
+		vk::PipelineLayoutCreateInfo layout_info {};
+		layout_info.setLayoutCount         = 1;
+		layout_info.pSetLayouts            = &descriptor_layout;
+		layout_info.pushConstantRangeCount = 1;
+		layout_info.pPushConstantRanges    = &push_constants;
+		vk::PipelineLayout layout = nullptr;
+		result = m_device.createPipelineLayout(&layout_info, nullptr, &layout);
+		if (result != vk::Result::eSuccess) {
+			m_device.destroyDescriptorSetLayout(descriptor_layout, nullptr);
+			measurement.error = "vkCreatePipelineLayout: " + vk::to_string(result);
+			return measurement;
+		}
+
+		vk::ShaderModuleCreateInfo module_info {};
+		module_info.codeSize = words.size_bytes();
+		module_info.pCode    = words.data();
+		vk::ShaderModule module = nullptr;
+		auto begin = std::chrono::steady_clock::now();
+		result = m_device.createShaderModule(&module_info, nullptr, &module);
+		measurement.module_ms = Milliseconds(std::chrono::steady_clock::now() - begin);
+		if (result != vk::Result::eSuccess) {
+			m_device.destroyPipelineLayout(layout, nullptr);
+			m_device.destroyDescriptorSetLayout(descriptor_layout, nullptr);
+			measurement.error = "vkCreateShaderModule: " + vk::to_string(result);
+			return measurement;
+		}
+
+		vk::ComputePipelineCreateInfo pipeline_info {};
+		pipeline_info.stage.stage  = vk::ShaderStageFlagBits::eCompute;
+		pipeline_info.stage.module = module;
+		pipeline_info.stage.pName  = "main";
+		pipeline_info.layout       = layout;
+		vk::Pipeline pipeline      = nullptr;
+		begin = std::chrono::steady_clock::now();
+		result = m_device.createComputePipelines(nullptr, 1, &pipeline_info, nullptr, &pipeline);
+		measurement.pipeline_ms = Milliseconds(std::chrono::steady_clock::now() - begin);
+		if (pipeline != nullptr) m_device.destroyPipeline(pipeline, nullptr);
+		m_device.destroyShaderModule(module, nullptr);
+		m_device.destroyPipelineLayout(layout, nullptr);
+		m_device.destroyDescriptorSetLayout(descriptor_layout, nullptr);
+		if (result != vk::Result::eSuccess) {
+			measurement.error = "vkCreateComputePipelines: " + vk::to_string(result);
+		}
+		return measurement;
+	}
+
+private:
+	vk::Instance       m_instance {};
+	vk::PhysicalDevice m_physical {};
+	vk::Device         m_device {};
+	uint32_t           m_queue_family = 0;
+};
+
+struct EmittedModule {
+	size_t   result_index = 0;
+	uint64_t words        = 0;
+};
+
+std::vector<EmittedModule> EmittedModules(const std::vector<Json>& results) {
+	std::vector<EmittedModule> modules;
+	for (size_t index = 0; index < results.size(); index++) {
+		if (results[index].value("outcome", "") == "emitted" &&
+		    results[index].value("stage", "") == "cs") {
+			modules.push_back({index, results[index].value("spirv_words", uint64_t {0})});
+		}
+	}
+	std::ranges::sort(modules, [](const auto& left, const auto& right) {
+		return left.words != right.words ? left.words < right.words
+		                                 : left.result_index < right.result_index;
+	});
+	return modules;
+}
+
+std::vector<EmittedModule> QuantileSample(const std::vector<EmittedModule>& modules,
+	                                      size_t count) {
+	if (modules.size() <= count) return modules;
+	std::vector<EmittedModule> sample;
+	std::unordered_set<size_t>  selected;
+	for (size_t index = 0; index < count; index++) {
+		const auto position = static_cast<size_t>(std::llround(
+		    static_cast<double>(index) * static_cast<double>(modules.size() - 1) /
+		    static_cast<double>(count - 1)));
+		if (selected.insert(position).second) sample.push_back(modules[position]);
+	}
+	return sample;
+}
+
+void WriteSpirvProfiles(const Options& options, const std::vector<Json>& results,
+	                    const std::vector<EmittedModule>& modules) {
+	if (options.spirv_profile == 0) return;
+	std::ofstream output(options.output / "spirv-profile.jsonl", std::ios::trunc);
+	if (!output) throw std::runtime_error("could not create spirv-profile.jsonl");
+	const auto count = std::min<size_t>(options.spirv_profile, modules.size());
+	for (size_t rank = 0; rank < count; rank++) {
+		const auto& module = modules[modules.size() - 1 - rank];
+		auto profile = ProfileSpirv(ReadSpirv(AnalysisModulePath(options, module.result_index)));
+		profile["rank"]         = rank + 1;
+		profile["corpus_index"] = module.result_index;
+		profile["blocks"]       = results[module.result_index].value("blocks", 0u);
+		profile["loops"]        = results[module.result_index].value("loops", 0u);
+		output << profile.dump() << '\n';
+
+		const auto category_words = [&](const char* name) {
+			const auto& attributed = profile["attributed_words"];
+			return attributed.contains(name) ? attributed[name]["words"].get<uint64_t>() : 0u;
+		};
+		std::string opcode_summary;
+		for (size_t i = 0; i < std::min(size_t {3}, profile["opcode_histogram"].size()); i++) {
+			const auto& opcode = profile["opcode_histogram"][i];
+			if (!opcode_summary.empty()) opcode_summary += '/';
+			opcode_summary += opcode["name"].get<std::string>() + ":" +
+			                  std::to_string(opcode["words"].get<uint64_t>());
+		}
+		const double repeat_share = profile["repeated_sequences"].empty()
+		                                ? 0.0
+		                                : profile["repeated_sequences"][0]["module_share_percent"]
+		                                      .get<double>();
+		std::printf("SPIRV_PROFILE rank=%zu words=%" PRIu64 " blocks=%u loops=%u functions=%" PRIu64
+		            " categories=reg:%" PRIu64 ",resource:%" PRIu64 ",indirect:%" PRIu64
+		            ",bounds:%" PRIu64 ",wave:%" PRIu64 ",control:%" PRIu64
+		            ",types:%" PRIu64 ",debug:%" PRIu64 ",other:%" PRIu64
+		            " opcodes=%s repeat_share=%.2f\n",
+		            rank + 1, module.words, profile["blocks"].get<uint32_t>(),
+		            profile["loops"].get<uint32_t>(), profile["functions"].get<uint64_t>(),
+		            category_words("function_register_load_store"),
+		            category_words("resource_access_helpers"),
+		            category_words("indirect_descriptor_search"), category_words("bounds_checks"),
+		            category_words("wave_lane_emulation"), category_words("phi_merge_scaffolding"),
+		            category_words("constants_types"), category_words("debug_names"),
+		            category_words("other"), opcode_summary.c_str(), repeat_share);
+	}
+}
+
+void WritePipelineTimings(const Options& options, const std::vector<Json>& results,
+	                      const std::vector<EmittedModule>& modules) {
+	if (!options.time_pipeline) return;
+#if !defined(_WIN32)
+	::setenv("MESA_SHADER_CACHE_DISABLE", "true", 1);
+#endif
+	HeadlessVulkan vulkan;
+	std::string device_error;
+	const bool have_device = vulkan.Initialize(device_error);
+	std::ofstream output(options.output / "pipeline-timings.jsonl", std::ios::trunc);
+	if (!output) throw std::runtime_error("could not create pipeline-timings.jsonl");
+	const auto sample = QuantileSample(modules, 20);
+	if (!have_device) {
+		output << Json({{"error", device_error}, {"sample_count", sample.size()}}).dump() << '\n';
+		std::printf("PIPELINE_TIMING unavailable error=%s\n", device_error.c_str());
+		return;
+	}
+
+	std::printf("PIPELINE_TIMING columns=sample,raw_words,raw_module_ms,raw_pipeline_ms,"
+	            "compact_words,compact_opt_ms,compact_pipeline_ms,size_words,size_opt_ms,"
+	            "size_pipeline_ms,perf_words,perf_opt_ms,perf_pipeline_ms\n");
+	for (size_t sample_index = 0; sample_index < sample.size(); sample_index++) {
+		const auto& module = sample[sample_index];
+		const auto descriptor_mask =
+		    results[module.result_index].value("descriptor_mask", uint64_t {0});
+		const auto descriptor_counts =
+		    results[module.result_index].value("descriptor_counts", std::vector<uint32_t> {});
+		auto raw = ReadSpirv(AnalysisModulePath(options, module.result_index));
+		double compact_opt_ms = 0.0, size_opt_ms = 0.0, perf_opt_ms = 0.0;
+		std::string compact_error, size_error, perf_error, raw_validation, compact_validation,
+		    size_validation, perf_validation;
+		auto compact =
+		    OptimizeSpirv(raw, OptimizationRecipe::Compact, compact_opt_ms, compact_error);
+		auto size = OptimizeSpirv(raw, OptimizationRecipe::Size, size_opt_ms, size_error);
+		auto perf = OptimizeSpirv(raw, OptimizationRecipe::Performance, perf_opt_ms, perf_error);
+		const bool raw_valid  = ValidateSpirv(raw, raw_validation);
+		const bool compact_valid =
+		    !compact.empty() && ValidateSpirv(compact, compact_validation);
+		const bool size_valid = !size.empty() && ValidateSpirv(size, size_validation);
+		const bool perf_valid = !perf.empty() && ValidateSpirv(perf, perf_validation);
+		const auto raw_time = raw_valid ? vulkan.Measure(raw, descriptor_mask, descriptor_counts)
+		                                : PipelineMeasurement {};
+		const auto compact_time = compact_valid
+		                              ? vulkan.Measure(compact, descriptor_mask, descriptor_counts)
+		                              : PipelineMeasurement {};
+		const auto size_time = size_valid ? vulkan.Measure(size, descriptor_mask, descriptor_counts)
+		                                  : PipelineMeasurement {};
+		const auto perf_time = perf_valid ? vulkan.Measure(perf, descriptor_mask, descriptor_counts)
+		                                  : PipelineMeasurement {};
+
+		Json record {{"sample", sample_index + 1}, {"corpus_index", module.result_index}};
+		auto add_recipe = [&](const char* name, size_t words, double optimize_ms, bool valid,
+		                      const std::string& optimize_error, const std::string& validation_error,
+		                      const PipelineMeasurement& timing) {
+			record[name] = {{"words", words},
+			                {"optimize_ms", optimize_ms},
+			                {"valid", valid},
+			                {"module_ms", timing.module_ms},
+			                {"pipeline_ms", timing.pipeline_ms},
+			                {"error", !optimize_error.empty() ? optimize_error
+			                          : !validation_error.empty() ? validation_error
+			                                                        : timing.error}};
+		};
+		add_recipe("raw", raw.size(), 0.0, raw_valid, {}, raw_validation, raw_time);
+		add_recipe("compact", compact.size(), compact_opt_ms, compact_valid, compact_error,
+		           compact_validation, compact_time);
+		add_recipe("size", size.size(), size_opt_ms, size_valid, size_error, size_validation,
+		           size_time);
+		add_recipe("performance", perf.size(), perf_opt_ms, perf_valid, perf_error,
+		           perf_validation, perf_time);
+		output << record.dump() << '\n';
+		std::printf("PIPELINE_TIMING sample=%zu raw=%zu,%.3f,%.3f compact=%zu,%.3f,%.3f "
+		            "size=%zu,%.3f,%.3f perf=%zu,%.3f,%.3f valid=%d/%d/%d/%d\n",
+		            sample_index + 1, raw.size(), raw_time.module_ms, raw_time.pipeline_ms,
+		            compact.size(), compact_opt_ms, compact_time.pipeline_ms, size.size(), size_opt_ms,
+		            size_time.pipeline_ms, perf.size(), perf_opt_ms, perf_time.pipeline_ms, raw_valid,
+		            compact_valid, size_valid, perf_valid);
+	}
+}
+
+void WriteAnalysis(const Options& options, const std::vector<Json>& results) {
+	if (!AnalysisRequested(options)) return;
+	const auto modules = EmittedModules(results);
+	WriteSpirvProfiles(options, results, modules);
+	WritePipelineTimings(options, results, modules);
+	if (!options.self_test) {
+		std::error_code ignored;
+		std::filesystem::remove_all(options.output / ".analysis-modules", ignored);
+	}
 }
 
 void WriteSummary(const Options& options, const std::vector<Json>& results) {
@@ -970,6 +1732,10 @@ int Run(const Options& options) {
 		             error_code.message().c_str());
 		return 1;
 	}
+	if (AnalysisRequested(options)) {
+		std::filesystem::remove_all(options.output / ".analysis-modules", error_code);
+		error_code.clear();
+	}
 	std::vector<CorpusEntry> entries;
 	std::string              error;
 	if (!LoadEntries(options, entries, error)) {
@@ -986,6 +1752,7 @@ int Run(const Options& options) {
 	for (const auto& result: results) jsonl << result.dump() << '\n';
 	jsonl.close();
 	WriteSummary(options, results);
+	WriteAnalysis(options, results);
 	if (!options.compare_log.empty()) {
 		std::ifstream log(options.compare_log);
 		if (!log) {
@@ -1152,7 +1919,12 @@ int SelfTest() {
 	WriteUseFixture(input, use_index, "cs", 4, sizeof(ShaderComputeInputInfo), memory);
 	WriteUseFixture(input, use_index, "cs", 5, sizeof(ShaderComputeInputInfo) - 4, memory);
 	use_index.close();
-	Options options {.input = input, .output = output, .jobs = 2, .timeout_ms = 5000};
+	Options options {.input = input,
+	                 .output = output,
+	                 .jobs = 2,
+	                 .timeout_ms = 5000,
+	                 .spirv_profile = 1,
+	                 .self_test = true};
 	const int status = Run(options);
 	std::vector<Json> results;
 	std::string error;
@@ -1172,15 +1944,26 @@ int SelfTest() {
 		if (hash == TestHash(3) && outcome.starts_with("rejected:")) no_false_rejection = false;
 		if (result.value("shape", "").empty() && outcome != "emitted") no_false_rejection = false;
 	}
+	const bool have_profile = std::filesystem::exists(output / "spirv-profile.jsonl");
+	bool compact_valid = false;
+	if (have_emitted) {
+		auto module = ReadSpirv(AnalysisModulePath(options, 0));
+		std::vector<uint32_t> compact;
+		std::string compact_error, validation_error;
+		compact_valid = Recompiler::CompactSpirv(module, compact, compact_error) &&
+		                ValidateSpirv(compact, validation_error);
+	}
 	std::error_code ignored;
 	std::filesystem::remove_all(root, ignored);
 	if (status != 0 || !read || results.size() != 5 || !have_emitted || !have_rejected ||
-	    !have_runtime || !use_emitted || !layout_not_rejected || !no_false_rejection) {
+	    !have_runtime || !use_emitted || !layout_not_rejected || !no_false_rejection ||
+	    !have_profile || !compact_valid) {
 		std::fprintf(stderr,
 		             "shader_corpus_tool self-test failed: count=%zu emitted=%d rejected=%d runtime=%d "
-		             "use_emitted=%d layout=%d no_false_rejection=%d %s\n",
+		             "use_emitted=%d layout=%d no_false_rejection=%d profile=%d compact=%d %s\n",
 		             results.size(), have_emitted, have_rejected, have_runtime, use_emitted,
-		             layout_not_rejected, no_false_rejection, error.c_str());
+		             layout_not_rejected, no_false_rejection, have_profile, compact_valid,
+		             error.c_str());
 		return 1;
 	}
 	return 0;
@@ -1189,7 +1972,8 @@ int SelfTest() {
 
 void Usage() {
 	std::printf("shader_corpus_tool --dir <dump dir> --out <report dir> [--jobs N] "
-	            "[--only <stage>] [--limit N] [--timeout-ms N] [--emit-spirv] [--compare-log <run log>]\n");
+	            "[--only <stage>] [--limit N] [--timeout-ms N] [--emit-spirv] "
+	            "[--compare-log <run log>] [--spirv-profile N] [--time-pipeline]\n");
 }
 
 bool ParseUnsigned(const char* text, uint32_t& value) {
@@ -1213,6 +1997,10 @@ std::optional<Options> ParseOptions(int argc, char** argv) {
 			options.emit_spirv = true;
 			continue;
 		}
+		if (argument == "--time-pipeline") {
+			options.time_pipeline = true;
+			continue;
+		}
 		if (index + 1 >= argc) return {};
 		const char* value = argv[++index];
 		if (argument == "--dir") options.input = value;
@@ -1226,6 +2014,8 @@ std::optional<Options> ParseOptions(int argc, char** argv) {
 			if (!ParseUnsigned(value, options.limit)) return {};
 		} else if (argument == "--timeout-ms") {
 			if (!ParseUnsigned(value, options.timeout_ms) || options.timeout_ms == 0) return {};
+		} else if (argument == "--spirv-profile") {
+			if (!ParseUnsigned(value, options.spirv_profile) || options.spirv_profile == 0) return {};
 		} else return {};
 	}
 	if (!options.self_test && (options.input.empty() || options.output.empty())) return {};

@@ -177,6 +177,8 @@ struct ConfigOptions {
 	// --warmup-budget-s: the title starts after this many seconds of loading the shader store; the
 	// rest loads in the background. 0 = load everything first.
 	uint32_t                 warmup_budget_s            = 0;
+	// --spirv-compact: run the measured conservative post-emission cleanup recipe. Off by default.
+	bool                     spirv_compact_enabled = false;
 };
 
 void Load(const ConfigOptions& cfg);
@@ -292,6 +294,7 @@ uint32_t AsyncComputeWaitMs();
 bool     AsyncLookaheadEnabled();
 uint32_t AsyncSpeculativeModulesMode();
 uint32_t WarmUpBudgetSeconds();
+bool SpirvCompactEnabled();
 
 } // namespace Config
 

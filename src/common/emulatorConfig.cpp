@@ -551,4 +551,8 @@ uint32_t WarmUpBudgetSeconds() {
 	return g_config != nullptr ? g_config->warmup_budget_s : 0u;
 }
 
+bool SpirvCompactEnabled() {
+	return g_config != nullptr && g_config->spirv_compact_enabled;
+}
+
 } // namespace Config

@@ -179,7 +179,9 @@ static void PrintUsage() {
 	         "                                       built before their dispatch is reached. Default: 1.\n"
 	         "  --warmup-budget-s <n>                Start the title after n seconds of loading the shader\n"
 	         "                                       store (first-used first); the rest loads in the\n"
-	         "                                       background. 0 = load all first. Default: 0.\n");
+	         "                                       background. 0 = load all first. Default: 0.\n"
+	         "  --spirv-compact                     Run conservative SPIR-V cleanup after emission.\n"
+	         "                                       Default: off.\n");
 }
 
 static bool NextArg(int argc, char* argv[], int& index, std::string& out) {
@@ -315,6 +317,7 @@ static constexpr Flag FLAGS[] = {
     {"--shader-key-index", &ConfigOptions::shader_key_index_enabled},
     {"--guest-fault-park", &ConfigOptions::guest_fault_park},
     {"--guest-fault-report-only", &ConfigOptions::guest_fault_report_only},
+    {"--spirv-compact", &ConfigOptions::spirv_compact_enabled},
 };
 
 static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_help) {

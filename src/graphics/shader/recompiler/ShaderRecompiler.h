@@ -73,6 +73,9 @@ struct ShaderSource {
 // Optional observer for IR pass durations (benchmarks); null by default, no effect on output.
 using PassTimingHook = void (*)(const char* pass_name, uint64_t nanoseconds);
 void SetPassTimingHook(PassTimingHook hook);
+// Conservative post-emission cleanup used by the opt-in prototype and the corpus benchmark.
+[[nodiscard]] bool CompactSpirv(std::span<const uint32_t> input, std::vector<uint32_t>& output,
+	                            std::string& error);
 [[nodiscard]] ShaderSource PrepareShaderSource(std::span<const uint32_t> code,
 	                                           const CompileOptions& options);
 const Decoder::Program& RefreshShaderSource(ShaderSource& source, const IR::SrtRuntime& runtime);
