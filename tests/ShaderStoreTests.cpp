@@ -242,7 +242,7 @@ void TestLookupCounters() {
 }
 
 void TestCapabilityVersionBumped() {
-	Check(kTranslatorCapabilityVersion >= 4u,
+	Check(kTranslatorCapabilityVersion >= 5u,
 	      "capability version was bumped to retry previously failed shaders");
 	Check(FailureCacheApplies(kTranslatorCapabilityVersion) &&
 	          !FailureCacheApplies(kTranslatorCapabilityVersion - 1u),
