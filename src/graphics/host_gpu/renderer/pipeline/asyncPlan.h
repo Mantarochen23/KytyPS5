@@ -179,6 +179,49 @@ Dropped TakeExpired(Table& table, uint64_t now, uint64_t ttl_ms, Out& dropped) {
 	return result;
 }
 
+// A draw into a target the game was not seen to redraw waits for its shaders (see the decision in
+// pipelineCache.cpp). "Redrawn" counts frames, so while no frame is recorded the count stands
+// still and no target first drawn in that time can ever qualify: every such draw then builds on
+// the render thread, one after another, and the frame it belongs to cannot finish. A title that
+// loads a scene behind one long frame (a few hundred new shaders) does not get out of it, and a
+// title with a hang watchdog aborts. The tracker tells how long the current frame has lasted, so
+// that such draws may be skipped like redrawn ones once it has lasted `stall_ms`
+// (--defer-new-targets-on-stall-ms; 0 = never).
+struct FrameStallTracker {
+	enum class Change : uint8_t { None, Started, Ended };
+
+	uint64_t frame    = ~uint64_t {0};
+	uint64_t since_ms = 0;
+	bool     stalled  = false;
+	// Draws let through while stalled: in the current (or last) stall, and in all.
+	uint64_t deferred       = 0;
+	uint64_t deferred_total = 0;
+
+	// Called for a draw that would otherwise wait for its shaders. True when it may be skipped.
+	// `change` reports the edges, for the log line.
+	bool Update(uint64_t frame_now, uint64_t now_ms, uint32_t stall_ms, Change* change) {
+		Change edge = Change::None;
+		if (frame_now != frame) {
+			if (stalled) edge = Change::Ended;
+			frame    = frame_now;
+			since_ms = now_ms;
+			stalled  = false;
+		}
+		const bool want = stall_ms != 0 && now_ms >= since_ms && now_ms - since_ms >= stall_ms;
+		if (want && !stalled) {
+			stalled  = true;
+			deferred = 0;
+			edge     = Change::Started;
+		}
+		if (stalled) {
+			deferred++;
+			deferred_total++;
+		}
+		if (change != nullptr) *change = edge;
+		return stalled;
+	}
+};
+
 } // namespace Libs::Graphics::AsyncPlan
 
 #endif // EMULATOR_SRC_GRAPHICS_HOST_GPU_RENDERER_PIPELINE_ASYNCPLAN_H_

@@ -609,4 +609,8 @@ uint32_t FrameTimerSample() {
 	return g_config != nullptr ? std::max(g_config->frame_timer_sample, 1u) : 1u;
 }
 
+uint32_t DeferNewTargetsOnStallMs() {
+	return g_config != nullptr ? g_config->defer_new_targets_on_stall_ms : 0u;
+}
+
 } // namespace Config

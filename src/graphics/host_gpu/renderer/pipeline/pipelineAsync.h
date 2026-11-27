@@ -3,6 +3,7 @@
 
 #include "common/common.h"
 #include "common/uniqueFunction.h"
+#include "graphics/host_gpu/renderer/pipeline/asyncPlan.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderWorkers.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
@@ -182,6 +183,9 @@ struct PipelineCache::Async {
 	// it every frame: it was drawn in at least three of the last six. Only then may a draw into it
 	// be skipped while its shaders are built, because the next frame draws it again.
 	bool NoteTargetDraw(uint64_t address);
+	// Render thread only: how long the current frame has lasted, for draws into targets that were
+	// not seen redrawn (--defer-new-targets-on-stall-ms).
+	AsyncPlan::FrameStallTracker frame_stall;
 
 	// Render thread only: what the render thread built itself since the last report, because a
 	// draw or dispatch could not be skipped. These are the freezes async compile leaves.

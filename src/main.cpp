@@ -217,7 +217,12 @@ static void PrintUsage() {
 	         "                                       compute shader known, scan one submission in 2, 4, ... 2^n\n"
 	         "                                       until a scan finds news. 0 = scan every one. Default: 4.\n"
 	         "  --frame-timer-sample <n>             The per-call timers of the [frame] line read the clock for\n"
-	         "                                       one call in n. 1 = every call. Default: 16.\n");
+	         "                                       one call in n. 1 = every call. Default: 16.\n"
+	         "  --defer-new-targets-on-stall-ms <n>  Bring-up: once no frame was recorded for n ms, a draw\n"
+	         "                                       into a target not seen redrawn is skipped while its\n"
+	         "                                       shaders build instead of building them on the render\n"
+	         "                                       thread (what it draws may be missing). 0 = never.\n"
+	         "                                       Default: 0.\n");
 }
 
 static bool NextArg(int argc, char* argv[], int& index, std::string& out) {
@@ -737,6 +742,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			if (!ParseUint32(value, options.config.frame_timer_sample) ||
 			    options.config.frame_timer_sample == 0u) {
 				::printf("invalid frame timer sample value: %s\n", value.c_str());
+				return false;
+			}
+		} else if (arg == "--defer-new-targets-on-stall-ms") {
+			if (!ParseUint32(value, options.config.defer_new_targets_on_stall_ms)) {
+				::printf("invalid defer new targets on stall value: %s\n", value.c_str());
 				return false;
 			}
 		} else {

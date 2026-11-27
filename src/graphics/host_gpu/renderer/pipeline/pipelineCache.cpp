@@ -40,6 +40,7 @@
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <cinttypes>
 #include <cstdio>
 #include <cstring>
 #include <fmt/format.h>
@@ -1956,7 +1957,27 @@ void PipelineCache::GetGraphicsPrograms(const CommandBuffer& command, DrawRender
 	const auto& depth_control = context.GetDepthControl();
 	const bool  gbuffer_pass  = color_targets >= 2 && large_targets == color_targets &&
 	                           depth_control.z_enable && depth_control.z_write_enable;
-	state.deferrable          = m_async != nullptr && (redrawn || gbuffer_pass);
+	// While the frame stands still the redraw history cannot grow (asyncPlan.h, FrameStallTracker):
+	// after --defer-new-targets-on-stall-ms the other draws may be skipped as well.
+	bool stall_deferrable = false;
+	if (m_async != nullptr && !redrawn && !gbuffer_pass) {
+		using Change   = AsyncPlan::FrameStallTracker::Change;
+		auto&  tracker = m_async->frame_stall;
+		Change change  = Change::None;
+		stall_deferrable = tracker.Update(CurrentFrame(), RenderActivity::NowMs(),
+		                                  Config::DeferNewTargetsOnStallMs(), &change);
+		if (change == Change::Started) {
+			std::printf("[async] no frame for %u ms (frame %" PRIu64 "): draws into targets not seen "
+			            "redrawn are skipped while their shaders build "
+			            "(--defer-new-targets-on-stall-ms)\n",
+			            Config::DeferNewTargetsOnStallMs(), tracker.frame);
+		} else if (change == Change::Ended) {
+			std::printf("[async] frame %" PRIu64 " recorded after the stall: %" PRIu64
+			            " draws into targets not seen redrawn were let through (%" PRIu64 " in all)\n",
+			            tracker.frame, tracker.deferred, tracker.deferred_total);
+		}
+	}
+	state.deferrable = m_async != nullptr && (redrawn || gbuffer_pass || stall_deferrable);
 	if (m_async != nullptr) {
 		m_async->reason = all_small && color_targets != 0 ? Async::StallReason::SmallTarget
 		                                                  : Async::StallReason::NotRedrawn;
