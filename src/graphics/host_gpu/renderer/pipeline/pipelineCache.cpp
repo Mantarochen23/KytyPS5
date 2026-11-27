@@ -1429,6 +1429,7 @@ struct DriverCacheFile {
 	std::vector<uint8_t> owned; // where the platform has no mapping: the file read into memory
 
 	DriverCacheFile() = default;
+	DriverCacheFile(DriverCacheFile&& other) noexcept { *this = std::move(other); }
 	DriverCacheFile(const DriverCacheFile&)            = delete;
 	DriverCacheFile& operator=(const DriverCacheFile&) = delete;
 	DriverCacheFile& operator=(DriverCacheFile&& other) noexcept {
