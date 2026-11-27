@@ -2049,7 +2049,7 @@ namespace Common::FrameCost {
 void Add(Counter, uint64_t) noexcept {}
 ScopedTimer::ScopedTimer(Counter duration) noexcept : m_duration(duration) {}
 ScopedTimer::~ScopedTimer() = default;
-void ScopedTimer::Stop() noexcept {}
+uint64_t ScopedTimer::Stop() noexcept { return 0; }
 } // namespace Common::FrameCost
 
 namespace Common {
