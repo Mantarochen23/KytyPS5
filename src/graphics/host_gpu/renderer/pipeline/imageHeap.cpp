@@ -603,10 +603,12 @@ void ImageHeap::Rebind(RenderExecutor& executor) {
 	};
 	// One journal read turns the texture-cache generation into only the retry entries whose data
 	// or metadata page changed. The page index may contain stale references, which stamps reject.
+	bool journal_incomplete = false;
 	m_cache_generation =
-	    textures.TakeResolutionChangesSince(m_cache_generation, m_resolution_changes);
+	    textures.TakeResolutionChangesSince(m_cache_generation, m_resolution_changes,
+	                                        &journal_incomplete);
 	m_retry_candidates.clear();
-	if (Config::PortEnabled(Config::Port::ImageHeapIncremental)) {
+	if (Config::PortEnabled(Config::Port::ImageHeapIncremental) && !journal_incomplete) {
 		m_changed_pages.clear();
 		for (const auto range: m_resolution_changes) {
 			textures.ForEachPage(range.address, range.size,

@@ -301,8 +301,10 @@ private:
 	void                      TouchResolutionGenerationLocked(uint64_t address, uint64_t size);
 	// Returns the ranges whose discovery state changed after `generation`, together with one
 	// coherent generation that covers the returned records. ImageHeap is the sole consumer.
+	// `incomplete` is set when records after `generation` were dropped to bound the journal.
 	[[nodiscard]] uint64_t    TakeResolutionChangesSince(uint64_t generation,
-	                                                     std::vector<GuestRange>& changes);
+	                                                     std::vector<GuestRange>& changes,
+	                                                     bool* incomplete = nullptr);
 	void                      TouchRegistrationsLocked(uint64_t address, uint64_t size);
 	[[nodiscard]] bool        RegistrationsSinceLocked(uint64_t address, uint64_t size,
 	                                                   uint64_t generation) const;
@@ -377,7 +379,9 @@ private:
 		GuestRange range;
 		uint64_t   generation = 0;
 	};
+	static constexpr size_t                           MaxResolutionChanges = 1u << 16;
 	std::vector<ResolutionChange>                     m_resolution_changes;
+	uint64_t                                          m_resolution_journal_floor = 0;
 	std::atomic<uint64_t>                             m_resolution_generation {1};
 	std::unordered_map<ExactImageKey, ExactImage, ExactImageKeyHash> m_exact_images;
 	ResolutionPageTable                               m_registration_page_table;

@@ -377,6 +377,10 @@ struct TextureCacheTestAccess {
   static void TouchResolution(TextureCache &cache, uint64_t address, uint64_t size) {
     cache.TouchResolutionGeneration(address, size);
   }
+  static size_t JournalSize(const TextureCache &cache) {
+    return cache.m_resolution_changes.size();
+  }
+  static constexpr size_t JournalLimit = TextureCache::MaxResolutionChanges;
   // Suspend points that collect nothing.
   static void SkipFrames(TextureCache &cache, uint64_t frames) {
     cache.m_gc_tick += frames;
@@ -6854,6 +6858,19 @@ public:
               ImageHeapTestAccess::ResolveCalls(heap) == resolves &&
                   ImageHeapTestAccess::EntriesVisited(heap) == visited,
               "an unrelated texture-cache range scanned resident entries");
+      // A journal nobody drained is bounded; the entry whose records were dropped still retries.
+      for (size_t i = 0; i < TextureCacheTestAccess::JournalLimit + 8u; ++i) {
+        TextureCacheTestAccess::TouchResolution(textures, base + 0x1f0000u, 0x1000u);
+      }
+      Require(name, "journal bounded",
+              TextureCacheTestAccess::JournalSize(textures) <= TextureCacheTestAccess::JournalLimit,
+              "the texture-cache journal grew without a consumer");
+      Require(name, "overflow discovery", acquire(sampled), "the view was declined");
+      draw();
+      Require(name, "overflow entry resolved",
+              ImageHeapTestAccess::ResolveCalls(heap) > resolves,
+              "dropped journal records left a resident entry unchecked");
+      resolves = ImageHeapTestAccess::ResolveCalls(heap);
       TextureCacheTestAccess::TouchResolution(textures, texture(1), 0x1000u);
       Require(name, "generation discovery", acquire(sampled), "the view was declined");
       draw();

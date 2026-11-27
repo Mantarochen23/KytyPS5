@@ -301,16 +301,24 @@ bool TextureCache::RegistrationsSinceLocked(uint64_t address, uint64_t size,
 void TextureCache::TouchResolutionGenerationLocked(uint64_t address, uint64_t size) {
 	if (!GuestRange {address, size}.Valid()) return;
 	const auto generation = m_resolution_generation.fetch_add(1u, std::memory_order_relaxed) + 1u;
+	if (m_resolution_changes.size() >= MaxResolutionChanges) {
+		// Nobody drains the journal (no resident image heap is rebinding): keep memory bounded.
+		// A consumer older than this generation must treat every range as changed.
+		m_resolution_changes.clear();
+		m_resolution_journal_floor = generation;
+	}
 	m_resolution_changes.push_back({{address, size}, generation});
 	ForEachPage(address, size,
 	            [this, generation](uint64_t page) { m_resolution_page_table[page] = generation; });
 }
 
 uint64_t TextureCache::TakeResolutionChangesSince(uint64_t generation,
-	                                               std::vector<GuestRange>& changes) {
+	                                               std::vector<GuestRange>& changes,
+	                                               bool* incomplete) {
 	std::scoped_lock lock {m_lock};
 	const auto current = ResolutionGeneration();
 	changes.clear();
+	if (incomplete != nullptr) *incomplete = generation < m_resolution_journal_floor;
 	for (const auto& change: m_resolution_changes) {
 		if (change.generation > generation && change.generation <= current) {
 			changes.push_back(change.range);
