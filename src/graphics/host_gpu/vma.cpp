@@ -16,11 +16,14 @@
 
 #include "common/assert.h"
 #include "common/logging/log.h"
+#include "common/memAccount.h"
 #include "common/profiler.h"
 #include "graphics/host_gpu/graphicContext.h"
 
 #include <algorithm>
 #include <cinttypes>
+#include <cstdio>
+#include <string>
 
 namespace Libs::Graphics {
 
@@ -50,6 +53,34 @@ bool GraphicContext::CreateAllocator() {
 		return false;
 	}
 	breadcrumbs.Init(*this);
+	// The `[mem]` line's Vulkan side: per heap, what the driver says the process uses
+	// (VK_EXT_memory_budget), and what this allocator has handed out and holds in blocks.
+	Common::MemAccount::SetExternal("vk", [this]() -> std::string {
+		if (allocator == nullptr) {
+			return "none";
+		}
+		VmaBudget budgets[VK_MAX_MEMORY_HEAPS] {};
+		vmaGetHeapBudgets(allocator, budgets);
+		std::string text;
+		for (uint32_t heap = 0; heap < physical_device_memory_properties.memoryHeapCount; heap++) {
+			const bool local = static_cast<bool>(
+			    physical_device_memory_properties.memoryHeaps[heap].flags &
+			    vk::MemoryHeapFlagBits::eDeviceLocal);
+			constexpr double MiB = 1048576.0;
+			char             part[192];
+			std::snprintf(part, sizeof(part),
+			              "%sheap%u(%s) usage=%.0fMiB budget=%.0fMiB allocated=%.0fMiB blocks=%.0fMiB "
+			              "allocations=%u",
+			              text.empty() ? "" : "; ", heap, local ? "device" : "host",
+			              static_cast<double>(budgets[heap].usage) / MiB,
+			              static_cast<double>(budgets[heap].budget) / MiB,
+			              static_cast<double>(budgets[heap].statistics.allocationBytes) / MiB,
+			              static_cast<double>(budgets[heap].statistics.blockBytes) / MiB,
+			              budgets[heap].statistics.allocationCount);
+			text += part;
+		}
+		return text;
+	});
 	return true;
 }
 
@@ -57,6 +88,7 @@ void GraphicContext::DestroyAllocator() {
 	if (allocator == nullptr) {
 		return;
 	}
+	Common::MemAccount::ClearExternal("vk");
 	breadcrumbs.Shutdown(*this);
 	vmaDestroyAllocator(allocator);
 	allocator = nullptr;

@@ -5,6 +5,7 @@
 #include "common/common.h"
 #include "common/emulatorConfig.h"
 #include "common/logging/log.h"
+#include "common/memAccount.h"
 #include "common/profiler.h"
 #include "common/shaderRegLedger.h"
 #include "common/stringUtils.h"
@@ -60,6 +61,30 @@ static std::mutex                                                      g_shader_
 static std::deque<ComputeShaderPrefetch>                               g_compute_prefetches;
 static std::mutex                                                      g_prefetch_notify_mutex;
 static Common::UniqueFunction<void> g_prefetch_notifier;
+// The code copy of each registered shader hash, shared by all registrations of that hash (the same
+// shader registered again at another address, as titles do for every pipeline that uses it), and
+// counted in the `[mem]` line as `shader-code`. Under g_shader_map_mutex.
+static std::unordered_map<uint64_t, std::weak_ptr<const std::vector<uint32_t>>> g_code_by_hash;
+
+static std::shared_ptr<const std::vector<uint32_t>> SharedShaderCode(uint64_t hash,
+                                                                   const uint32_t* words,
+                                                                   size_t count) {
+	std::scoped_lock lock(g_shader_map_mutex);
+	auto&            slot = g_code_by_hash[hash];
+	if (auto alive = slot.lock(); alive != nullptr && alive->size() == count) {
+		return alive;
+	}
+	auto& gauge = Common::MemAccount::Owner("shader-code");
+	const int64_t bytes = static_cast<int64_t>(count * sizeof(uint32_t));
+	gauge.Add(bytes, 1);
+	std::shared_ptr<const std::vector<uint32_t>> code(
+	    new std::vector<uint32_t>(words, words + count), [bytes](const std::vector<uint32_t>* v) {
+		    Common::MemAccount::Owner("shader-code").Add(-bytes, -1);
+		    delete v;
+	    });
+	slot = code;
+	return code;
+}
 static ComputePrefetchQueueStats g_prefetch_queue_stats; // Under g_shader_map_mutex.
 
 // The same coarse buckets are used for first use in the pipeline cache. Guest halves map to the
@@ -129,8 +154,7 @@ void ShaderMapUserData(uint64_t addr, const ShaderMappedData& data) {
 	mapped.code_size_bytes = ShaderProgramSize(binary, data.code_size_bytes);
 	const auto hash        = XXH3_64bits(binary, mapped.code_size_bytes);
 	Common::ShaderRegLedger::NoteRegistration(hash, LedgerStage(data.type));
-	auto       code_copy   = std::make_shared<std::vector<uint32_t>>(
-	    binary, binary + mapped.code_size_bytes / sizeof(uint32_t));
+	auto       code_copy   = SharedShaderCode(hash, binary, mapped.code_size_bytes / sizeof(uint32_t));
 	uint32_t sharp_resources = 0;
 	if (data.user_data != nullptr) {
 		for (const auto count: data.user_data->sharp_resource_count) sharp_resources += count;
@@ -888,6 +912,9 @@ void ShaderQueueComputePrefetch(const HW::CsStageRegisters& cs_regs,
 		g_prefetch_queue_stats.queued++;
 		wake = g_compute_prefetches.empty();
 		g_compute_prefetches.push_back({cs_regs, dispatch_thread_dimensions});
+		Common::MemAccount::Owner("prefetch-queue")
+		    .Set(g_compute_prefetches.size() * sizeof(ComputeShaderPrefetch),
+		         g_compute_prefetches.size());
 	}
 	if (wake) {
 		std::scoped_lock notify_lock(g_prefetch_notify_mutex);
@@ -916,6 +943,7 @@ std::vector<ComputeShaderPrefetch> ShaderTakeComputePrefetches() {
 		batch.push_back(g_compute_prefetches.front());
 		g_compute_prefetches.pop_front();
 	}
+	Common::MemAccount::Owner("prefetch-queue").Set(0, 0);
 	return batch;
 }
 

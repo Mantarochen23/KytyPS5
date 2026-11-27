@@ -203,6 +203,7 @@ private:
 	std::atomic<uint64_t>                    m_appended {0};
 	std::atomic<uint64_t>                    m_written {0};
 	std::atomic<uint64_t>                    m_failed {0};
+	std::atomic<uint64_t>                    m_dropped {0};
 	std::mutex                               m_mutex;
 	std::condition_variable_any              m_ready;
 	std::queue<Common::UniqueFunction<void>> m_jobs;
@@ -269,6 +270,8 @@ public:
 	void NoteDispatchSkipped(uint64_t waited_ms);
 	// The `[prefetch]` line.
 	void ReportPrefetch() const;
+	// The `[mem]` owners the cache can count (render thread, every 2 s); also drops on --mem-limit-gb.
+	void AccountMemory();
 	// Counters of what the scans and registrations queued for translation, printed every 30 s.
 	struct PrefetchCounters {
 		uint64_t requested   = 0; // calls

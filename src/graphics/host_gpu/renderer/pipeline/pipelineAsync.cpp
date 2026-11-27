@@ -4,6 +4,7 @@
 #include "common/debugCounters.h"
 #include "common/emulatorConfig.h"
 #include "common/logging/log.h"
+#include "common/memAccount.h"
 #include "common/recoverable.h"
 #include "common/threads.h"
 #include "graphics/host_gpu/renderer/pipeline/asyncPlan.h"
@@ -97,6 +98,73 @@ static uint64_t EstimateIrBytes(const ShaderRecompiler::TranslateResult& transla
 	}
 	return count * (sizeof(ShaderRecompiler::IR::Inst) + 2 * sizeof(void*)) +
 	       translated.decoded_dump.size() + translated.cfg_dump.size();
+}
+
+// What a kept resource plan holds: its instructions at the size of a list node, its tables, and the
+// scan cache (bounded to 64 entries, each with the descriptors the scan produced).
+static uint64_t EstimatePlanBytes(const ShaderRecompiler::IR::ResourcePlan& plan, uint64_t* scan_cache) {
+	uint64_t bytes = plan.value_storage.size() * (sizeof(ShaderRecompiler::IR::Inst) + 2 * sizeof(void*));
+	bytes += plan.memory_info.capacity() * sizeof(plan.memory_info[0]);
+	bytes += plan.descriptor_sources.capacity() * sizeof(plan.descriptor_sources[0]);
+	bytes += plan.selector_groups.capacity() * sizeof(uint32_t);
+	bytes += plan.control_flow.capacity() * sizeof(plan.control_flow[0]);
+	bytes += plan.srt_reads.capacity() * sizeof(plan.srt_reads[0]);
+	bytes += plan.source_reads.capacity() * sizeof(plan.source_reads[0]);
+	bytes += plan.srt_scratch.capacity() * sizeof(uint64_t) + plan.material_keys.capacity() * sizeof(uint32_t);
+	bytes += plan.control_phi_predecessors.size() * 64;
+	if (plan.srt_code != nullptr) {
+		bytes += plan.srt_code->getSize();
+	}
+	uint64_t scan = 0;
+	for (const auto& entry: plan.scan_cache) {
+		scan += sizeof(entry) + (entry.children.capacity() + entry.mapping.capacity()) * sizeof(uint32_t);
+	}
+	if (scan_cache != nullptr) {
+		*scan_cache += scan;
+	}
+	return bytes + scan;
+}
+
+// Every two seconds, on the render thread: what the cache's own tables hold, for the `[mem]` line.
+// Also frees what the limit guard (--mem-limit-gb) asked to drop: every waiting translation, which
+// a draw or dispatch that still wants it translates again.
+void PipelineCache::AccountMemory() {
+	namespace Mem = Common::MemAccount;
+	if (m_async != nullptr) {
+		if (Mem::TakeDropRequest()) {
+			std::vector<Async::Translation> dropped;
+			const auto now    = AskClockMs();
+			const auto result = AsyncPlan::TakeOverBudget(m_async->translations, now, 1, dropped);
+			m_async->counters.expired += result.count;
+			std::printf("[mem] limit: dropped %zu waiting translations (%.0f MiB)\n", result.count,
+			            static_cast<double>(result.bytes) / 1048576.0);
+			(void)m_async->workers.Post([dropped = std::move(dropped)]() mutable { dropped.clear(); });
+		}
+		uint64_t ir = 0;
+		for (const auto& entry: m_async->translations) {
+			ir += entry.second.bytes;
+		}
+		Mem::Owner("ir-table").Set(ir, m_async->translations.size());
+		Mem::Owner("jobs-queued").Set(0, m_async->workers.Queued());
+		Mem::Owner("pipeline-jobs").Set(0, m_async->pipelines_building);
+	}
+	uint64_t plans = 0, scan = 0, module_meta = 0, modules = 0, call_sources = 0;
+	for (const auto& [key, program]: m_program_cache) {
+		plans += EstimatePlanBytes(program.resource_plan, &scan);
+		for (const auto& module: program.modules) {
+			module_meta += sizeof(module) + module.function_code.capacity() * sizeof(uint32_t) +
+			               module.rect_parameters.capacity() * sizeof(module.rect_parameters[0]);
+			modules++;
+		}
+		call_sources += program.call_source != nullptr ? 1u : 0u;
+	}
+	Mem::Owner("program-plans").Set(plans - scan, m_program_cache.size());
+	Mem::Owner("plan-scan-cache").Set(scan, 0);
+	Mem::Owner("module-meta").Set(module_meta, modules);
+	Mem::Owner("pipelines").Set(
+	    (m_graphics_pipelines.size() + m_compute_pipelines.size()) * sizeof(Pipeline),
+	    m_graphics_pipelines.size() + m_compute_pipelines.size());
+	(void)call_sources;
 }
 
 template <typename InputInfo>
@@ -439,7 +507,9 @@ void PipelineCache::RequestAsync(const ProgramKey& key, Program* program,
 				         ShaderRecompiler::StageName(inputs->key.stage), inputs->key.hash);
 				return;
 			}
-			const auto bytes = EstimateIrBytes(*translated);
+			// The request's copy of the shader code lives as long as the translation does.
+			const auto bytes = EstimateIrBytes(*translated) +
+			                   (inputs->code.size() + inputs->back_code.size()) * sizeof(uint32_t);
 			m_async->translations.insert_or_assign(
 			    inputs->key, Async::Translation {inputs, std::move(translated), AskClockMs(),
 			                                     AskClockMs(), bytes, translate_us, plan_us});
@@ -634,6 +704,10 @@ void PipelineCache::PumpAsync() {
 	m_async->pump_us += spent;
 	m_async->pump_worst_us = std::max(m_async->pump_worst_us, spent);
 	m_async->ReportStatus();
+	if (const auto now = AskClockMs(); now - m_async->last_account_ms >= 2000) {
+		m_async->last_account_ms = now;
+		AccountMemory();
+	}
 	if (const auto now = AskClockMs(); now - m_async->last_store_report_ms >= 30000) {
 		m_async->last_store_report_ms = now;
 		m_async->ReportStore(m_store.GetCounts());

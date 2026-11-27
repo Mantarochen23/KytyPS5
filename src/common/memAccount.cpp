@@ -28,9 +28,25 @@ namespace {
 
 constexpr uint64_t ReportIntervalMs = 10'000;
 
-std::mutex                                 g_mutex;
-std::vector<std::pair<std::string, std::unique_ptr<Gauge>>> g_owners;
-std::vector<std::pair<std::string, ExternalReader>>         g_external;
+// Never destroyed: owners count down from destructors that run during static destruction.
+std::mutex& Mutex() {
+	static auto* mutex = new std::mutex;
+	return *mutex;
+}
+std::vector<std::pair<std::string, std::unique_ptr<Gauge>>>& Owners() {
+	static auto* owners = new std::vector<std::pair<std::string, std::unique_ptr<Gauge>>>;
+	return *owners;
+}
+// Held while the external readers run, so that a reader's owner can take it away (ClearExternal)
+// before it is destroyed.
+std::mutex& ReadMutex() {
+	static auto* mutex = new std::mutex;
+	return *mutex;
+}
+std::vector<std::pair<std::string, ExternalReader>>& Externals() {
+	static auto* externals = new std::vector<std::pair<std::string, ExternalReader>>;
+	return *externals;
+}
 std::atomic<bool>                          g_drop_requested {false};
 
 std::mutex              g_thread_mutex;
@@ -49,12 +65,13 @@ Sample TakeSample() {
 	sample.process = ReadProcessMemory();
 	sample.heap    = ReadHeapStats();
 	sample.owners  = Snapshot();
+	std::scoped_lock read_lock(ReadMutex());
 	std::vector<std::pair<std::string, ExternalReader>> readers;
 	{
-		std::scoped_lock lock(g_mutex);
-		readers = g_external;
+		std::scoped_lock lock(Mutex());
+		readers = Externals();
 	}
-	// A reader is called without the lock: it may take its owner's locks.
+	// A reader is called without the table's lock: it may take its owner's locks.
 	for (const auto& [name, reader]: readers) {
 		sample.external.emplace_back(name, reader());
 	}
@@ -78,39 +95,40 @@ uint64_t ReadKb(std::string_view text, std::string_view key) {
 } // namespace
 
 Gauge& Owner(std::string_view name) {
-	std::scoped_lock lock(g_mutex);
-	for (auto& [key, gauge]: g_owners) {
+	std::scoped_lock lock(Mutex());
+	for (auto& [key, gauge]: Owners()) {
 		if (key == name) {
 			return *gauge;
 		}
 	}
-	return *g_owners.emplace_back(std::string(name), std::make_unique<Gauge>()).second;
+	return *Owners().emplace_back(std::string(name), std::make_unique<Gauge>()).second;
 }
 
 std::vector<Entry> Snapshot() {
 	std::vector<Entry> entries;
 	std::scoped_lock   lock(g_mutex);
-	entries.reserve(g_owners.size());
-	for (const auto& [name, gauge]: g_owners) {
+	entries.reserve(Owners().size());
+	for (const auto& [name, gauge]: Owners()) {
 		entries.push_back({name, gauge->Bytes(), gauge->Items()});
 	}
 	return entries;
 }
 
 void SetExternal(std::string_view name, ExternalReader reader) {
-	std::scoped_lock lock(g_mutex);
-	for (auto& [key, existing]: g_external) {
+	std::scoped_lock lock(Mutex());
+	for (auto& [key, existing]: Externals()) {
 		if (key == name) {
 			existing = std::move(reader);
 			return;
 		}
 	}
-	g_external.emplace_back(std::string(name), std::move(reader));
+	Externals().emplace_back(std::string(name), std::move(reader));
 }
 
 void ClearExternal(std::string_view name) {
-	std::scoped_lock lock(g_mutex);
-	std::erase_if(g_external, [&](const auto& entry) { return entry.first == name; });
+	std::scoped_lock read_lock(ReadMutex());
+	std::scoped_lock lock(Mutex());
+	std::erase_if(Externals(), [&](const auto& entry) { return entry.first == name; });
 }
 
 ProcessMemory ParseProcStatus(std::string_view text) {

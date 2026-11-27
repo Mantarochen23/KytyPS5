@@ -5,6 +5,7 @@
 
 #include "common/emulatorConfig.h"
 #include "common/logging/log.h"
+#include "common/memAccount.h"
 #include "common/parallelFor.h"
 #include "common/recoverable.h"
 #include "common/stringUtils.h"
@@ -16,6 +17,8 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cinttypes>
+#include <cstdio>
 #include <cstring>
 #include <fmt/format.h>
 #include <ranges>
@@ -89,9 +92,26 @@ ShaderStoreWriter::ShaderStoreWriter() {
 }
 
 void ShaderStoreWriter::Append(std::vector<uint8_t>&& record) {
+	// The queue holds each record, SPIR-V included, until the one writer thread has compressed and
+	// written it. Over the cap the record is not kept for the next boot (the module is built again
+	// then; a pipeline whose stage is missing from the store is dropped at load) instead of the
+	// queue growing without a bound while builds outrun the disk.
+	constexpr uint64_t MaxQueuedBytes = uint64_t {1} << 30;
+	auto&              queued         = Common::MemAccount::Owner("store-queue");
+	const uint64_t     size           = record.size();
+	if (queued.Bytes() + size > MaxQueuedBytes) {
+		if ((m_dropped.fetch_add(1, std::memory_order_relaxed) & 63u) == 0u) {
+			std::printf("[store] queue over %" PRIu64 " MiB: record of %" PRIu64
+			            " KiB not stored (%" PRIu64 " dropped so far)\n",
+			            MaxQueuedBytes >> 20, size >> 10, m_dropped.load(std::memory_order_relaxed));
+		}
+		return;
+	}
+	queued.Add(static_cast<int64_t>(size), 1);
 	m_appended.fetch_add(1, std::memory_order_relaxed);
-	Post([this, record = std::move(record)] {
+	Post([this, size, record = std::move(record)] {
 		const auto bytes = ShaderStoreFile::Encode(record);
+		Common::MemAccount::Owner("store-queue").Add(-static_cast<int64_t>(size), -1);
 		// A failed write leaves a partial record; the next run drops it and everything after it.
 		const auto total   = static_cast<uint32_t>(bytes.size());
 		uint32_t   written = 0;
