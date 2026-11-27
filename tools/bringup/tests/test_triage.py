@@ -55,7 +55,8 @@ def sections(text):
 
 
 ALL_SECTIONS = ('TIMELINE', 'STALLS', 'QUEUES', 'SHADERS', 'ASYNC',
-                'BUILD RATE', 'PARKED', 'FAULT COST', 'HOLES', 'STORE', 'REJECTIONS', 'LEDGER')
+                'BUILD RATE', 'PARKED', 'FAULT COST', 'HOLES', 'FRAME HOLES',
+                'STORE', 'REJECTIONS', 'LEDGER')
 
 
 class TriageTests(unittest.TestCase):
@@ -265,6 +266,30 @@ class TriageTests(unittest.TestCase):
         self.assertEqual(by_reason[norm_key]['holes'], 2)
         joined = '\n'.join(sections(out)['HOLES'])
         self.assertIn('descriptor N uses unsupported format N', joined)
+
+    def test_frame_holes(self):
+        text = ('@@T 12\n'
+                '[frame-holes] frame=3 draws skipped=4 (shader-building=3, failed-shader=1) '
+                'dispatches skipped=5 (wait=2, tainted=2, refused=1) '
+                'targets affected=2 (0x000100010000, 0x000100020000)\n'
+                '@@T 14\n'
+                '[frame-holes] frame=4 draws skipped=0 (none) '
+                'dispatches skipped=3 (failed-shader=2, wait=1) '
+                'targets affected=1 (0x000100020000)\n')
+        out, data = run_triage(text)
+        fh = data['findings']['frame_holes']
+        self.assertEqual(fh['incomplete_frames'], 2)
+        self.assertEqual(fh['draws_skipped'], 4)
+        self.assertEqual(fh['dispatches_skipped'], 8)
+        self.assertEqual([(r['reason'], r['count']) for r in fh['draw_reasons']],
+                         [('shader-building', 3), ('failed-shader', 1)])
+        self.assertEqual([(r['reason'], r['count']) for r in fh['dispatch_reasons']],
+                         [('wait', 3), ('tainted', 2), ('failed-shader', 2), ('refused', 1)])
+        self.assertEqual(fh['top_targets'][0], dict(address='0x000100020000', frames=2))
+        joined = '\n'.join(sections(out)['FRAME HOLES'])
+        self.assertIn('2 incomplete frames; draws skipped=4, dispatches skipped=8', joined)
+        self.assertIn('ranked reasons: dispatch:wait=3, draw:shader-building=3', joined)
+        self.assertIn('0x000100020000=2', joined)
 
     def test_store(self):
         text = ('@@T 60\n'
