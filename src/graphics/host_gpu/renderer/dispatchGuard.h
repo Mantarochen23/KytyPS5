@@ -3,7 +3,9 @@
 
 #include "common/common.h"
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
+#include "graphics/host_gpu/renderer/dispatchLimits.h"
 
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <utility>
@@ -28,12 +30,20 @@ public:
 	// Records the check of the three counts at `offset` of `args`. Returns the buffer and offset
 	// to dispatch from. Binds its own compute pipeline and push descriptors: record it before
 	// the dispatch's own bindings are committed.
+	//
+	// `write_stamp` is BufferCache::WriteStamp of the counts' guest range, taken after the buffer
+	// was obtained. When the previous check of the same range in the same command buffer was made
+	// under the same stamp (nothing wrote the counts since), that check's result is returned and
+	// nothing is recorded. Pass 0 when the stamp is not trustworthy (the counts were not written by
+	// the GPU): the check is then always recorded.
 	[[nodiscard]] std::pair<vk::Buffer, uint64_t> Record(CommandBuffer& buffer, const Buffer& args,
-	                                                     uint64_t offset, uint64_t guest_address);
+	                                                     uint64_t offset, uint64_t guest_address,
+	                                                     uint64_t write_stamp = 0);
 
 private:
 	static constexpr uint64_t SlotBytes = 16;
 	static constexpr uint64_t SlotCount = 65536;
+	static constexpr uint32_t CheckedCount = 256;
 
 	void Report();
 
@@ -43,6 +53,7 @@ private:
 	std::unique_ptr<Buffer> m_trips;
 	uint32_t                m_reported_trips    = 0;
 	uint64_t                m_next              = 0;
+	std::array<ValidatedArgs, CheckedCount> m_checked {};
 	uint32_t                m_max_groups        = 1u << 22u;
 	vk::DescriptorSetLayout m_descriptor_layout = nullptr;
 	vk::PipelineLayout      m_layout            = nullptr;

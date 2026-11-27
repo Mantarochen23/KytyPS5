@@ -1238,17 +1238,20 @@ bool RenderExecutor::DispatchDirectLocked(CommandBuffer& buffer, uint32_t thread
 	}
 
 	vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.pipeline);
-	OpBreadcrumb dispatch_op {};
-	dispatch_op.kind        = BreadcrumbOpKind::Dispatch;
-	dispatch_op.dim_x       = thread_group_x;
-	dispatch_op.dim_y       = thread_group_y;
-	dispatch_op.dim_z       = thread_group_z;
-	dispatch_op.stage_count = 1;
-	dispatch_op.stages[0]   = {program.stage, program.shader_hash, input_info.stage.module->id,
-	                           program.info.uses_dma};
-	CaptureComputeBufferBreadcrumbs(m_context, cs_regs, bindings, dispatch_op);
-	auto&          graphics  = m_context.GetGraphics();
-	const uint32_t marker_id = graphics.breadcrumbs.BeginOp(graphics, vk_buffer, dispatch_op);
+	auto&    graphics  = m_context.GetGraphics();
+	uint32_t marker_id = 0;
+	if (graphics.breadcrumbs.Active()) {
+		OpBreadcrumb dispatch_op {};
+		dispatch_op.kind        = BreadcrumbOpKind::Dispatch;
+		dispatch_op.dim_x       = thread_group_x;
+		dispatch_op.dim_y       = thread_group_y;
+		dispatch_op.dim_z       = thread_group_z;
+		dispatch_op.stage_count = 1;
+		dispatch_op.stages[0]   = {program.stage, program.shader_hash, input_info.stage.module->id,
+		                           program.info.uses_dma};
+		CaptureComputeBufferBreadcrumbs(m_context, cs_regs, bindings, dispatch_op);
+		marker_id = graphics.breadcrumbs.BeginOp(graphics, vk_buffer, dispatch_op);
+	}
 	constexpr uint32_t DISPATCH_INITIATOR_ORDERED_APPEND_ENABLE = 1u << 3u;
 	const uint64_t     group_threads = uint64_t {std::max(input_info.threads_num[0], 1u)} *
 	                                   std::max(input_info.threads_num[1], 1u) *
@@ -1311,7 +1314,8 @@ bool RenderExecutor::DispatchIndirectLocked(CommandBuffer& buffer, uint64_t args
 	vk::DispatchIndirectCommand args {};
 	// The counts are known here only when the guest wrote them (the GPU-written ones are checked
 	// by DispatchArgsGuard on the GPU).
-	const bool args_on_host = !m_context.GetBufferCache().HasGpuDirtyBytes(args_addr, sizeof(args)) &&
+	const bool args_gpu_dirty = m_context.GetBufferCache().HasGpuDirtyBytes(args_addr, sizeof(args));
+	const bool args_on_host   = !args_gpu_dirty &&
 	                          LibKernel::Memory::TryReadBacking(args_addr, &args, sizeof(args));
 	if (args_on_host && (args.x == 0 || args.y == 0 || args.z == 0)) {
 		Common::FrameCost::Add(Common::FrameCost::Counter::DispatchesSkipped);
@@ -1426,13 +1430,25 @@ bool RenderExecutor::DispatchIndirectLocked(CommandBuffer& buffer, uint64_t args
 	vk::Buffer indirect_buffer = args_buffer->Handle();
 	uint64_t   indirect_offset = args_offset;
 	if (DispatchArgsGuard::Enabled()) {
-		if (!m_dispatch_guard) {
-			m_dispatch_guard = std::make_unique<DispatchArgsGuard>(
-			    m_context.GetGraphics(), m_context.GetCommandScheduler());
+		// Counts the CPU read are already checked against the limits here (the dispatch was skipped
+		// above when too large): no GPU pass. Counts the GPU wrote are checked on the GPU, once
+		// per write of the range.
+		const auto& device_limits = m_context.GetGraphics().GetPhysicalDeviceProperties().limits;
+		if (args_on_host &&
+		    CountsSafeWithoutGuard(args.x, args.y, args.z, device_limits.maxComputeWorkGroupCount[0],
+		                           device_limits.maxComputeWorkGroupCount[1],
+		                           device_limits.maxComputeWorkGroupCount[2], DispatchGroupLimit())) {
+			Common::FrameCost::Add(Common::FrameCost::Counter::GuardCpuChecks);
+		} else {
+			if (!m_dispatch_guard) {
+				m_dispatch_guard = std::make_unique<DispatchArgsGuard>(
+				    m_context.GetGraphics(), m_context.GetCommandScheduler());
+			}
+			const uint64_t stamp =
+			    args_gpu_dirty ? m_context.GetBufferCache().WriteStamp(args_addr, sizeof(args)) : 0;
+			std::tie(indirect_buffer, indirect_offset) =
+			    m_dispatch_guard->Record(buffer, *args_buffer, args_offset, args_addr, stamp);
 		}
-		std::tie(indirect_buffer, indirect_offset) =
-		    m_dispatch_guard->Record(buffer, *args_buffer, args_offset, args_addr);
-		Common::FrameCost::Add(Common::FrameCost::Counter::DispatchesGuard);
 	}
 	sample.clock.AddTo(sample.guard_ns);
 	RebindBuffers(bindings);
@@ -1450,14 +1466,17 @@ bool RenderExecutor::DispatchIndirectLocked(CommandBuffer& buffer, uint64_t args
 	}
 	sample.clock.AddTo(sample.commit_ns);
 	vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.pipeline);
-	OpBreadcrumb dispatch_op {};
-	dispatch_op.kind        = BreadcrumbOpKind::DispatchIndirect;
-	dispatch_op.stage_count = 1;
-	dispatch_op.stages[0]   = {program.stage, program.shader_hash, input_info.stage.module->id,
-	                           program.info.uses_dma};
-	CaptureComputeBufferBreadcrumbs(m_context, cs_regs, bindings, dispatch_op);
-	auto&          graphics  = m_context.GetGraphics();
-	const uint32_t marker_id = graphics.breadcrumbs.BeginOp(graphics, vk_buffer, dispatch_op);
+	auto&    graphics  = m_context.GetGraphics();
+	uint32_t marker_id = 0;
+	if (graphics.breadcrumbs.Active()) {
+		OpBreadcrumb dispatch_op {};
+		dispatch_op.kind        = BreadcrumbOpKind::DispatchIndirect;
+		dispatch_op.stage_count = 1;
+		dispatch_op.stages[0]   = {program.stage, program.shader_hash, input_info.stage.module->id,
+		                           program.info.uses_dma};
+		CaptureComputeBufferBreadcrumbs(m_context, cs_regs, bindings, dispatch_op);
+		marker_id = graphics.breadcrumbs.BeginOp(graphics, vk_buffer, dispatch_op);
+	}
 	vk_buffer.dispatchIndirect(indirect_buffer, indirect_offset);
 	graphics.breadcrumbs.EndOp(graphics, vk_buffer, marker_id);
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::Dispatches);

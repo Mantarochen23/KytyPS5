@@ -653,6 +653,7 @@ bool BufferCache::SynchronizeBuffer(Buffer& buffer, uint64_t vaddr, uint64_t siz
 	    [&](uint64_t address, uint64_t bytes) noexcept {
 		    copies.emplace_back(total_size, buffer.Offset(address), bytes);
 		    total_size += bytes;
+		    NoteWrite(address, bytes);
 	    },
 	    [&]() noexcept {
 		    const BufferUpload upload {&buffer, copies.size()};
@@ -750,6 +751,7 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 	(void)SynchronizeBuffer(buffer, vaddr, size, is_written, is_texel_buffer);
 	if (is_written) {
 		m_gpu_modified_ranges.Add(vaddr, size);
+		NoteWrite(vaddr, size);
 		ForgetColorMetadataChecks(vaddr, size);
 	}
 	return {&buffer, buffer.Offset(vaddr)};
@@ -879,6 +881,34 @@ void BufferCache::ForgetColorMetadataChecks(uint64_t vaddr, uint64_t size) {
 	for (auto& checked: m_checked_color_metadata) {
 		checked.Subtract(vaddr, size);
 	}
+}
+
+void BufferCache::NoteWrite(uint64_t vaddr, uint64_t size) {
+	PageTable::PageRange pages {};
+	if (!PageTable::TryGetPageRange(vaddr, size, pages) ||
+	    pages.last_exclusive - pages.first > kWriteStampMaxPages) {
+		NoteUntrackedWrite();
+		return;
+	}
+	const auto stamp = ++m_write_clock;
+	for (auto page = pages.first; page < pages.last_exclusive; ++page) {
+		m_write_stamps[page] = stamp;
+	}
+}
+
+uint64_t BufferCache::WriteStamp(uint64_t vaddr, uint64_t size) const {
+	PageTable::PageRange pages {};
+	if (!PageTable::TryGetPageRange(vaddr, size, pages)) {
+		return UINT64_MAX;
+	}
+	auto stamp = m_untracked_write_stamp;
+	for (auto page = pages.first; page < pages.last_exclusive; ++page) {
+		const auto* entry = m_write_stamps.Find(page);
+		if (entry != nullptr) {
+			stamp = std::max(stamp, *entry);
+		}
+	}
+	return stamp;
 }
 
 bool BufferCache::IsRegionGpuModified(uint64_t vaddr, uint64_t size) {

@@ -1,5 +1,6 @@
 #include "common/frameCost.h"
 
+#include "common/emulatorConfig.h"
 #include "common/logging/log.h"
 
 #include <algorithm>
@@ -151,27 +152,6 @@ void RecordSubmit() noexcept {
 		case SubmitReason::Present: Add(Counter::SubmitPresent); break;
 		case SubmitReason::Other: Add(Counter::SubmitOther); break;
 	}
-}
-
-ScopedTimer::ScopedTimer(Counter duration) noexcept
-    : m_duration(duration), m_start(Clock::now()), m_parent(g_active_timer) {
-	g_active_timer = this;
-}
-
-ScopedTimer::~ScopedTimer() {
-	(void)Stop();
-}
-
-uint64_t ScopedTimer::Stop() noexcept {
-	if (m_start == Clock::time_point {}) return 0;
-	const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - m_start);
-	m_start            = {};
-	const auto elapsed_ns = static_cast<uint64_t>(elapsed.count());
-	if (g_active_timer == this) g_active_timer = m_parent;
-	if (m_parent != nullptr) m_parent->m_child_ns += elapsed_ns;
-	const auto exclusive_ns = elapsed_ns - std::min(elapsed_ns, m_child_ns);
-	Add(m_duration, exclusive_ns);
-	return exclusive_ns;
 }
 
 std::array<uint64_t, CounterCount> SnapshotCounters() {
@@ -333,7 +313,69 @@ ReportLines FormatWindow(const std::array<uint64_t, CounterCount>& delta, double
 	    NanosecondsPerCall(delta, Counter::DispatchStepGuardNs, Counter::DispatchStepSamples),
 	    NanosecondsPerCall(delta, Counter::DispatchStepCommitNs, Counter::DispatchStepSamples),
 	    NanosecondsPerCall(delta, Counter::DispatchStepRecordNs, Counter::DispatchStepSamples));
+	lines.cuts = fmt::format(
+	    "[frame] cuts breadcrumb_ops={:.2f} gpu_invalidate={:.2f} gpu_invalidate_skipped={:.2f} "
+	    "gpu_invalidate_gen_bumps={:.2f} guard_gpu={:.2f} guard_cpu={:.2f} guard_skipped={:.2f} "
+	    "prefetch_scans={:.2f} prefetch_skipped={:.2f} pump={:.2f} pump_skipped={:.2f} "
+	    "timer_sample={} prefetch_backoff={}\n",
+	    Mean(delta, Counter::BreadcrumbOps, frames),
+	    Mean(delta, Counter::GpuInvalidateCalls, frames),
+	    Mean(delta, Counter::GpuInvalidateSkipped, frames),
+	    Mean(delta, Counter::GpuInvalidateGenBumps, frames),
+	    Mean(delta, Counter::GuardGpuRuns, frames), Mean(delta, Counter::GuardCpuChecks, frames),
+	    Mean(delta, Counter::GuardSkipped, frames), Mean(delta, Counter::PrefetchScans, frames),
+	    Mean(delta, Counter::PrefetchSkipped, frames), Mean(delta, Counter::PumpAsyncCalls, frames),
+	    Mean(delta, Counter::PumpAsyncSkipped, frames), Config::FrameTimerSample(),
+	    Config::PrefetchBackoffExponent());
 	return lines;
+}
+
+namespace {
+// Timers of waits are exact; the per-call timers are sampled.
+constexpr bool IsWait(Counter counter) {
+	return counter == Counter::GpuFenceWaitNs || counter == Counter::GpuFenceWaitBgNs ||
+	       counter == Counter::GpuPriorityOpWaitNs || counter == Counter::GuestMemoryWaitNs ||
+	       counter == Counter::IdleNs;
+}
+thread_local uint32_t g_timer_sequence = 0;
+} // namespace
+
+ScopedTimer::ScopedTimer(Counter duration) noexcept
+    : m_duration(duration), m_parent(g_active_timer) {
+	if (IsWait(duration)) {
+		m_measured = true;
+		m_weight   = 1;
+	} else if (m_parent != nullptr) {
+		m_measured = m_parent->m_measured;
+		m_weight   = m_parent->m_weight;
+	} else {
+		const auto sample = Config::FrameTimerSample();
+		m_measured        = sample <= 1u || (++g_timer_sequence % sample) == 0u;
+		m_weight          = sample;
+	}
+	if (m_measured) {
+		m_start = Clock::now();
+	}
+	g_active_timer = this;
+}
+
+ScopedTimer::~ScopedTimer() {
+	(void)Stop();
+}
+
+// Returns the exclusive elapsed nanoseconds of this call (not multiplied by the sampling weight),
+// or 0 when this call was not sampled. Waits are always measured, so their callers get the real value.
+uint64_t ScopedTimer::Stop() noexcept {
+	if (m_done) return 0;
+	m_done = true;
+	if (g_active_timer == this) g_active_timer = m_parent;
+	if (!m_measured) return 0;
+	const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - m_start);
+	const auto elapsed_ns = static_cast<uint64_t>(elapsed.count());
+	if (m_parent != nullptr && m_parent->m_measured) m_parent->m_child_ns += elapsed_ns;
+	const auto exclusive_ns = elapsed_ns - std::min(elapsed_ns, m_child_ns);
+	Add(m_duration, exclusive_ns * m_weight);
+	return exclusive_ns;
 }
 
 namespace {
@@ -366,6 +408,7 @@ void FramePresented() noexcept {
 		const auto lines = FormatWindow(delta, elapsed_seconds);
 		Log::WriteToConsoleAndLog(lines.summary);
 		Log::WriteToConsoleAndLog(lines.arch);
+		Log::WriteToConsoleAndLog(lines.cuts);
 	}
 	if (g_store_loaded.load(std::memory_order_relaxed) && !g_bad_warned) {
 		const auto hits   = delta[static_cast<size_t>(Counter::FindModuleHits)];

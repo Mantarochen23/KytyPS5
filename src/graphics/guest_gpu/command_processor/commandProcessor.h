@@ -4,6 +4,7 @@
 #include "common/assert.h"
 #include "common/emulatorConfig.h"
 #include "graphics/guest_gpu/hardwareContext.h"
+#include "graphics/guest_gpu/prefetchBackoff.h"
 #include "graphics/guest_gpu/pssr.h"
 #include "graphics/host_gpu/renderer/dispatchOrigin.h"
 #include "graphics/host_gpu/renderer/pipeline/flowPlan.h"
@@ -133,6 +134,8 @@ public:
 	[[nodiscard]] bool IsAsyncComputeQueue() const { return m_interrupt_event_id >= 0x20; }
 
 private:
+	void ScanComputeShaders(std::span<const uint32_t> commands);
+	PrefetchBackoff m_prefetch_backoff;
 	void ProcessPm4(Pm4Execution& execution);
 	void SuspendPm4();
 	void SuspendPm4ForShader();
