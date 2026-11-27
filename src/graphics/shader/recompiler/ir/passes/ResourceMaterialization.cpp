@@ -32,7 +32,22 @@ namespace {
 
 constexpr uint64_t AddressMask            = 0x0000ffffffffffffull;
 
+thread_local std::string* g_specialization_failure_sink = nullptr;
+
+struct SpecializationFailureScope {
+	std::string* previous = nullptr;
+	explicit SpecializationFailureScope(std::string* sink)
+	    : previous(g_specialization_failure_sink) {
+		if (sink != nullptr) sink->clear();
+		g_specialization_failure_sink = sink;
+	}
+	~SpecializationFailureScope() { g_specialization_failure_sink = previous; }
+};
+
 bool SpecializationFail(std::string_view message) {
+	if (g_specialization_failure_sink != nullptr && g_specialization_failure_sink->empty()) {
+		g_specialization_failure_sink->assign(message);
+	}
 	std::fprintf(stderr, "shader resource specialization failed: %.*s\n",
 	             static_cast<int>(message.size()), message.data());
 	return false;
@@ -1751,9 +1766,11 @@ ResourcePlan ExtractResourcePlan(const Program& program) {
 }
 
 bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime,
-                          ResourceSnapshot& snapshot, ResourceSpecialization& specialization) {
+                          ResourceSnapshot& snapshot, ResourceSpecialization& specialization,
+                          std::string* failure_reason) {
+	const SpecializationFailureScope failure_scope(failure_reason);
 	for (auto& keys: program.selector_keys) keys.resolved = false;
-	if (!program.resource_tracking_complete) return false;
+	if (!program.resource_tracking_complete) return SpecializationFail("resource tracking incomplete");
 	const auto uses_workgroup_count = [](const DescriptorSource& source) {
 		return source.indirect_descriptor && source.indirect_descriptor->workgroup_axis != UINT32_MAX;
 	};

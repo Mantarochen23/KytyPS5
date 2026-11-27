@@ -294,7 +294,8 @@ private:
 		template <bool HasCalls>
 		ShaderModule* FindModule(const ShaderRecompiler::IR::SrtRuntime& runtime,
 		                         ShaderRecompiler::IR::PushData::Window  push_data,
-		                         bool*                                   materialized = nullptr);
+		                         bool*                                   materialized          = nullptr,
+		                         std::string*                            materialization_error = nullptr);
 		// The module of a program without calls that was built for these inputs, if any.
 		ShaderModule* FindCandidate(const ShaderRecompiler::IR::ResourceSpecialization& wanted,
 		                            ShaderRecompiler::IR::PushData::Window              push_data);

@@ -367,7 +367,8 @@ PipelineCache::LoadRecordStatus PipelineCache::LoadRecord(std::span<const uint8_
 			if (FailureCacheApplies(capability_version) && !Config::ShaderCacheRetryFailed()) {
 				auto& program          = m_program_cache.try_emplace(std::move(key)).first->second;
 				program.skip_dispatch  = true;
-				program.failure_reason = std::move(reason);
+				program.failure_reason =
+				    reason.empty() ? "unspecified failure" : std::move(reason);
 			}
 			break;
 		}
@@ -412,7 +413,7 @@ void PipelineCache::StoreFailedProgram(const ProgramKey& key, std::string_view r
 		return;
 	}
 	Writer      record;
-	std::string text(reason);
+	std::string text(reason.empty() ? std::string_view {"unspecified failure"} : reason);
 	IoAll(record, Record::FailedProgram);
 	IoKey(record, key);
 	IoAll(record, kTranslatorCapabilityVersion, text);

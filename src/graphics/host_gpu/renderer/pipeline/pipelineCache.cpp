@@ -284,9 +284,10 @@ bool PipelineCache::Program::RefreshCallSource(const ShaderRecompiler::IR::SrtRu
 template <bool HasCalls>
 ShaderModule* PipelineCache::Program::FindModule(const ShaderRecompiler::IR::SrtRuntime& runtime,
                                                  ShaderRecompiler::IR::PushData::Window push_data,
-                                                 bool* materialized) {
+                                                 bool*        materialized,
+                                                 std::string* materialization_error) {
 	if (!ShaderRecompiler::IR::MaterializeResources(resource_plan, runtime, resources,
-	                                                specialization)) {
+	                                                specialization, materialization_error)) {
 		if (materialized != nullptr) {
 			*materialized = false;
 		}
@@ -489,7 +490,8 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 		auto& prog          = m_program_cache.try_emplace(m_lookup_key).first->second;
 		prog.skip_dispatch  = true;
 		prog.logged_neg_hit = true;
-		prog.failure_reason = std::move(failure_reason);
+		prog.failure_reason =
+		    failure_reason.empty() ? "unspecified shader failure" : std::move(failure_reason);
 		PipelineCacheLog("ShaderRecompiler {} translation end: hash=0x{:016x} outcome=failed ({})",
 		                 ShaderRecompiler::StageName(m_lookup_key.stage), params.hash,
 		                 prog.failure_reason);
@@ -643,11 +645,14 @@ const ShaderModule* PipelineCache::GetProgramImpl(const ShaderParams& params, In
 		}
 		ShaderModule* module       = nullptr;
 		bool          materialized = true;
+		std::string   mat_error;
 		if (cached.call_source) {
 			source_changed = cached.RefreshCallSource(runtime);
-			if (!source_changed) module = cached.FindModule<true>(runtime, push_data, &materialized);
+			if (!source_changed) {
+				module = cached.FindModule<true>(runtime, push_data, &materialized, &mat_error);
+			}
 		} else {
-			module = cached.FindModule<false>(runtime, push_data, &materialized);
+			module = cached.FindModule<false>(runtime, push_data, &materialized, &mat_error);
 		}
 		if (module != nullptr) {
 			m_lookup_stats.hit++;
@@ -657,11 +662,20 @@ const ShaderModule* PipelineCache::GetProgramImpl(const ShaderParams& params, In
 			NoteLookupMiss(m_lookup_key, &cached, push_data);
 		}
 		if (!cached.call_source && !materialized) {
-			PipelineCacheLog("!!! SHADER DISPATCH SKIP (resource materialization failed) "
+			const std::string reason =
+			    mat_error.empty() ? "resource materialization failed"
+			                      : fmt::format("resource materialization failed: {}", mat_error);
+			PipelineCacheLog("!!! SHADER DISPATCH SKIP ({}) "
 			                 "shader=0x{:016x}; rendering is incomplete",
-			                 params.hash);
+			                 reason, params.hash);
 			if (cached.modules.empty()) {
-				cached.skip_dispatch = true;
+				cached.skip_dispatch  = true;
+				cached.logged_neg_hit = true;
+				cached.failure_reason = reason;
+				PipelineCacheLog(
+				    "ShaderRecompiler {} translation end: hash=0x{:016x} outcome=failed ({})",
+				    ShaderRecompiler::StageName(options.stage), params.hash, cached.failure_reason);
+				StoreFailedProgram(m_lookup_key, cached.failure_reason);
 				if (m_async != nullptr) {
 					m_async->translations.erase(m_lookup_key);
 				}
@@ -781,15 +795,20 @@ const ShaderModule* PipelineCache::GetProgramImpl(const ShaderParams& params, In
 		    .call_source   = std::move(retained),
 		    .resource_plan = ShaderRecompiler::IR::ExtractResourcePlan(translated.program),
 		}).first;
-		auto& program = entry->second;
+		auto&       program = entry->second;
+		std::string mat_error;
 		if (!ShaderRecompiler::IR::MaterializeResources(program.resource_plan, runtime,
-		                                                program.resources, program.specialization)) {
-			PipelineCacheLog("!!! SHADER DISPATCH SKIP (resource materialization failed) "
+		                                                program.resources, program.specialization,
+		                                                &mat_error)) {
+			const std::string reason =
+			    mat_error.empty() ? "resource materialization failed"
+			                      : fmt::format("resource materialization failed: {}", mat_error);
+			PipelineCacheLog("!!! SHADER DISPATCH SKIP ({}) "
 			                 "shader=0x{:016x}; rendering is incomplete",
-			                 params.hash);
+			                 reason, params.hash);
 			program.skip_dispatch  = true;
 			program.logged_neg_hit = true;
-			program.failure_reason = "resource materialization failed";
+			program.failure_reason = reason;
 			PipelineCacheLog(
 			    "ShaderRecompiler {} translation end: hash=0x{:016x} outcome=failed ({})",
 			    ShaderRecompiler::StageName(options.stage), params.hash, program.failure_reason);
