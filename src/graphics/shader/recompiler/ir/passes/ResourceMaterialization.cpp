@@ -764,16 +764,29 @@ bool MaterializeIndirectDescriptor(const ResourcePlan& program, uint32_t source_
 	auto& byte_offsets = program.material_keys;
 	const auto children_begin = descriptors.size();
 	const auto root_resource = specializations[resource_index];
-	const auto intern_candidate = [&](const DescriptorValue& candidate) {
-		if (candidate == descriptors[resource_index]) return 0u;
-		const auto found = std::find(descriptors.begin() + children_begin, descriptors.end(), candidate);
-		const auto ordinal = static_cast<uint32_t>(found - descriptors.begin() - children_begin + 1u);
-		if (found == descriptors.end()) {
-			descriptors.push_back(candidate);
-			auto child = root_resource;
-			child.indirect_root = resource_index;
-			specializations.push_back(child);
+	struct DescriptorValueHash {
+		size_t operator()(const DescriptorValue& v) const noexcept {
+			return static_cast<size_t>(
+			    XXH3_64bits(v.dwords.data(), std::min<size_t>(v.dword_count, v.dwords.size()) * sizeof(uint32_t)));
 		}
+	};
+	std::unordered_map<DescriptorValue, uint32_t, DescriptorValueHash> interned;
+	const auto intern_candidate = [&](const DescriptorValue& candidate) -> uint32_t {
+		if (candidate == descriptors[resource_index]) return 0u;
+		if (const auto found = interned.find(candidate); found != interned.end()) {
+			return found->second;
+		}
+		if constexpr (std::is_same_v<Specialization, ResourceSpecialization::Buffer>) {
+			if (descriptors.size() - children_begin + 1u >= MaxIndirectBufferCandidates) {
+				return UINT32_MAX;
+			}
+		}
+		const auto ordinal = static_cast<uint32_t>(descriptors.size() - children_begin + 1u);
+		descriptors.push_back(candidate);
+		auto child = root_resource;
+		child.indirect_root = resource_index;
+		specializations.push_back(child);
+		interned.emplace(candidate, ordinal);
 		return ordinal;
 	};
 	uint64_t table_base = 0;
@@ -1037,6 +1050,11 @@ bool MaterializeIndirectDescriptor(const ResourcePlan& program, uint32_t source_
 						return normalization_failed(table_offset, word, step,
 						                            indirect.table_maximum ? "key" : "probe");
 					const auto ordinal = intern_candidate(candidate);
+					if (ordinal == UINT32_MAX) {
+						return failed("buffer candidate bound",
+						              fmt::format("distinct_candidates>{} limit={}",
+						                          MaxIndirectBufferCandidates, MaxIndirectBufferCandidates));
+					}
 					if (ordinal == 0u) continue;
 					const auto mapping_word = image_heap ? table_offset / 4u : word * child_count + child;
 					snapshot.flattened_srt.resize(mapping_offset + 2u + mapping_word, 0u);
@@ -1149,6 +1167,11 @@ bool MaterializeIndirectDescriptor(const ResourcePlan& program, uint32_t source_
 			descriptors[resource_index] = candidate;
 		} else {
 			ordinal = intern_candidate(candidate);
+			if (ordinal == UINT32_MAX) {
+				return failed("buffer candidate bound",
+				              fmt::format("distinct_candidates>{} limit={}",
+				                          MaxIndirectBufferCandidates, MaxIndirectBufferCandidates));
+			}
 		}
 		// Bounded buffer selections use a DWORD offset in both dense and sparse mappings.
 		snapshot.flattened_srt[mapping_offset + 1u + entry * 2u] = buffer_selector ? key * 4u : key;

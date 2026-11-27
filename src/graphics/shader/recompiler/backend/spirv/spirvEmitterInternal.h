@@ -128,6 +128,20 @@ struct EmitterState {
 	uint32_t                                         indirect_format_function = 0;
 	uint32_t                                         indirect_format_geometry_function = 0;
 	std::map<std::array<uint32_t, 5>, uint32_t>        indirect_buffer_load_functions;
+	struct IndirectBufferGroup {
+		uint32_t representative = 0;
+		bool     empty          = false;
+		uint32_t count          = 0;
+	};
+	struct IndirectBufferRootPlan {
+		std::vector<IndirectBufferGroup> groups;
+		std::vector<uint32_t>            ordinal_groups;
+		uint32_t                         select_func = 0;
+		bool                             needs_lane  = false;
+	};
+	std::unordered_map<uint32_t, IndirectBufferRootPlan> indirect_buffer_roots;
+	std::map<std::array<uint32_t, 11>, uint32_t>         indirect_buffer_class_helpers;
+	std::map<std::array<uint32_t, 7>, uint32_t>          indirect_buffer_dispatch_helpers;
 	uint32_t                                         bvh_intersect_function  = 0;
 	uint32_t                                         bvh8_result_type       = 0;
 	uint32_t                                         bvh8_intersect_function = 0;
@@ -432,6 +446,7 @@ Prospero::BufferFormat StorageBufferFormat(const EmitterState& state, const IR::
 bool EmptyIndirectBufferCandidate(const EmitterState& state, uint32_t resource);
 
 uint32_t SharedIndirectBufferResource(const EmitterState& state, uint32_t resource);
+bool     UsesDynamicIndirectBufferSlots(const EmitterState& state, uint32_t resource);
 
 void EmitMemoryBindings(EmitterState& state);
 // Loop guard: if this invocation used up its loop-exit budget, adds a record to the fault buffer.
@@ -502,6 +517,9 @@ spv::Op SpirvAtomicOpcode(IR::ValueOpcode opcode);
 
 uint32_t EmitAtomicOperation(ValueEmitContext& ctx, const IR::Inst& inst, uint32_t pointer,
                              uint32_t scope);
+uint32_t EmitAtomicOperation(EmitterState& state, IR::ValueOpcode ir_opcode, bool wide,
+                             uint32_t pointer, uint32_t scope, uint32_t value_or_desired,
+                             uint32_t comparator = 0u);
 
 void EmitAtomicMemoryBarrier(EmitterState& state, IR::ResourceKind kind);
 
@@ -559,6 +577,7 @@ void EmitProgram(EmitterState& state);
 
 void DefineGetBdaPointer(EmitterState& state);
 void DefineIndirectBufferLoads(ValueEmitContext& ctx);
+void DefineIndirectBufferAccesses(ValueEmitContext& ctx);
 void DefineBvhIntersect(EmitterState& state);
 void DefineTrinityBvhIntersect(EmitterState& state);
 uint32_t BvhNode(EmitterState& state, uint32_t address);
