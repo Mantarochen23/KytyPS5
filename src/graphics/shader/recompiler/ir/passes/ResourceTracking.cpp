@@ -4533,6 +4533,12 @@ private:
 		}
 
 		std::list<Inst> scratch;
+		struct ScratchGuard {
+			std::list<Inst>& list;
+			~ScratchGuard() {
+				for (auto& inst: list) inst.Invalidate();
+			}
+		} scratch_guard {scratch};
 		const auto make_inst = [&](ValueOpcode op, uint64_t flags,
 		                           std::span<const Value> args) -> Value {
 			if (op == ValueOpcode::SelectU32 && args.size() == 3u) {
