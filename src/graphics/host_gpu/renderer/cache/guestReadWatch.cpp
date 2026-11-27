@@ -9,6 +9,9 @@ namespace Libs::Graphics {
 
 namespace {
 constexpr uint64_t PageSize = TRACKER_PAGE_SIZE;
+// Tables and user data blocks are small. A range over this many pages is compared by its bytes: it
+// would hold the watch mutex for a long arming and fault on any write into megabytes of data.
+constexpr uint64_t MaxTrackedPages = 1024;
 }
 
 GuestReadWatch::~GuestReadWatch() {
@@ -34,6 +37,7 @@ bool GuestReadWatch::Track(uint64_t address, uint64_t size, std::vector<PageStam
 	}
 	const uint64_t first = address / PageSize;
 	const uint64_t last  = (address + size - 1u) / PageSize;
+	if (last - first + 1u > MaxTrackedPages) return false;
 	std::scoped_lock lock {m_mutex};
 	std::vector<Page*> pages;
 	pages.reserve(static_cast<size_t>(last - first + 1u));
