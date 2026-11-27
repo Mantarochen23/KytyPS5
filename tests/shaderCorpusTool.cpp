@@ -24,6 +24,7 @@
 #include <optional>
 #include <set>
 #include <span>
+#include <spirv/unified1/spirv.hpp>
 #include <spirv-tools/libspirv.hpp>
 #include <spirv-tools/optimizer.hpp>
 #include <string>
