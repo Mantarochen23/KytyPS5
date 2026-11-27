@@ -14562,6 +14562,159 @@ void TestFiniteBufferDescriptorShapesShader() {
         "non-finite GPU-offset buffer descriptor did not emit one-line diagnostic");
 }
 
+void TestIndirectBufferSharedHelpersStayCompact() {
+  using F = Prospero::BufferFormat;
+  Config::SetDisabledPorts({});
+  const auto make_desc = [](uint64_t base, uint32_t stride, uint32_t records, F fmt,
+                            uint32_t swizzle) {
+    return std::array<uint32_t, 4>{
+        static_cast<uint32_t>(base),
+        static_cast<uint32_t>((base >> 32u) & 0xffffu) | (stride << 16u),
+        records,
+        swizzle | (static_cast<uint32_t>(fmt) << 12u),
+    };
+  };
+
+  // Synthetic compute shader with 128 interleaved heterogeneous buffer candidates (4 format/stride
+  // classes plus an empty entry) and 40 accesses (32 formatted stores + 8 formatted loads with
+  // distinct immediate offsets). Inline expansion would emit >1.4M SPIR-V words; shared helpers
+  // must stay strictly under 20,000 words and pass Vulkan 1.3 validation.
+  std::vector<uint32_t> shader{
+      EncodeVop3Word0(0x182, 4),
+      EncodeVop3Word1(256u + 0u, 0, 0), // v_readfirstlane_b32 s4, v0
+      EncodeSop2(0x0e, 4, 4, 255),
+      0x0000007fu,                      // s_and_b32 s4, s4, 127
+      EncodeSop2(0x1e, 4, 4, 132),      // s_lshl_b32 s4, s4, 4
+      EncodeSmem0(0x0a, 8, 0),
+      4u << 25u,                        // s_buffer_load_dwordx4 s[8:11], s[0:3], s4
+      0xbf8cc07fu,                      // s_waitcnt lgkmcnt(0)
+  };
+  for (uint32_t i = 0; i < 8u; ++i) {
+    shader.push_back(EncodeMubuf0(0x03, i * 16u, true)); // buffer_load_format_xyzw
+    shader.push_back(EncodeMubuf1(1u, 2u, 0u));
+  }
+  for (uint32_t i = 0; i < 32u; ++i) {
+    shader.push_back(EncodeMubuf0(0x07, i * 16u, true)); // buffer_store_format_xyzw
+    shader.push_back(EncodeMubuf1(1u, 2u, 0u));
+  }
+  shader.push_back(EncodeSopp(0x01)); // s_endpgm
+
+  constexpr uint32_t kRows = 128u;
+  alignas(16) std::array<std::array<uint32_t, 4>, kRows> table_rows{};
+  const std::array<F, 4> formats{F::k8UInt, F::k32Float, F::k8_8_8_8UNorm, F::k32_32_32_32Float};
+  const std::array<uint32_t, 4> strides{16u, 16u, 32u, 64u};
+  const std::array<uint32_t, 4> swizzles{
+      DstSel(4, 0, 0, 1), DstSel(4, 0, 0, 1), DstSel(4, 5, 6, 7), DstSel(4, 5, 6, 7)};
+  table_rows[0] = {0u, 0u, 0u, 0u};
+  for (uint32_t row = 1u; row < kRows; ++row) {
+    const uint32_t cls = row % 4u;
+    table_rows[row] = make_desc(0x1005000000ull + static_cast<uint64_t>(row) * 0x10000ull,
+                                strides[cls], 1024u, formats[cls], swizzles[cls]);
+  }
+  const auto table_addr = reinterpret_cast<uint64_t>(table_rows.data());
+  std::array<uint32_t, 4> user_data{
+      static_cast<uint32_t>(table_addr),
+      static_cast<uint32_t>((table_addr >> 32u) & 0xffffu) | (16u << 16u),
+      kRows,
+      0x00005204u,
+  };
+
+  auto options = MakeCompileOptions(ShaderType::Compute);
+  options.shader_hash = 0xaaaa000000000004ull;
+  ShaderComputeInputInfo compute = *options.input_info.compute;
+  compute.thread_ids_num = 1u;
+  compute.threads_num[0] = 64u;
+  options.input_info.compute = &compute;
+  options.user_data = user_data;
+
+  auto translated = ShaderRecompiler::TranslateProgram(shader, options);
+  const auto plan = ShaderRecompiler::IR::ExtractResourcePlan(translated.program);
+  ShaderRecompiler::IR::ResourceSnapshot snapshot;
+  ShaderRecompiler::IR::ResourceSpecialization specialization;
+  const ShaderRecompiler::IR::SrtRuntime runtime{
+      .user_data = user_data, .read_specialization_memory = ReadHostTestMemory};
+  std::string mat_error;
+  Check(ShaderRecompiler::IR::MaterializeResources(plan, runtime, snapshot, specialization,
+                                                   &mat_error) &&
+            mat_error.empty(),
+        "128-candidate heterogeneous indirect buffer shader failed materialization");
+  Check(specialization.buffers.size() >= kRows,
+        "128-candidate heterogeneous indirect buffer shader did not retain its candidates");
+
+  const auto compiled =
+      ShaderRecompiler::CompileProgram(std::move(translated), options, specialization);
+  spvtools::SpirvTools tools(SPV_ENV_VULKAN_1_3);
+  Check(tools.Validate(compiled.spirv.data(), compiled.spirv.size()),
+        "128-candidate shared-helper indirect buffer shader failed Vulkan 1.3 SPIR-V validation");
+  constexpr size_t kMaxWords = 20'000u;
+  if (compiled.spirv.size() >= kMaxWords) {
+    std::fprintf(stderr, "TestIndirectBufferSharedHelpersStayCompact: words=%zu (limit=%zu)\n",
+                 compiled.spirv.size(), kMaxWords);
+    Check(false, "shared indirect buffer helpers exceeded expected SPIR-V word bound");
+  }
+  bool saw_indirect = false;
+  for (uint32_t i = 0; i < compiled.emit_stats.contributor_count; ++i) {
+    const auto &c = compiled.emit_stats.top_contributors[i];
+    if (c.kind != nullptr && std::strcmp(c.kind, "indirect-buffer") == 0 &&
+        c.candidates >= kRows && c.accesses == 40u) {
+      saw_indirect = true;
+    }
+  }
+  Check(saw_indirect, "emit stats did not attribute indirect-buffer candidates and accesses");
+}
+
+void TestEmittedSpirvWordBudgetRefusesOversizedModule() {
+  Config::SetDisabledPorts({});
+  const uint32_t shader[] = {
+      EncodeVop1(0x01, 1, 128 + 1), // v_mov_b32 v1, 1
+      EncodeMubuf0(0x1c, 0, true),
+      EncodeMubuf1(1, 0, 0),        // buffer_store_dword v1, v0, s[0:3], 0 idxen
+      EncodeSopp(0x01),             // s_endpgm
+  };
+  const std::array<uint32_t, 4> user_data{0x100000u, 0x00040010u, 256u, 0x00014004u};
+  auto options = MakeCompileOptions(ShaderType::Compute);
+  options.shader_hash = 0xaaaa000000000003ull;
+  ShaderComputeInputInfo compute = *options.input_info.compute;
+  compute.thread_ids_num = 1u;
+  compute.threads_num[0] = 64u;
+  options.input_info.compute = &compute;
+  options.user_data = user_data;
+
+  const auto compile_with_budget = [&](std::optional<uint32_t> budget) {
+    options.max_spirv_words = budget;
+    auto translated = ShaderRecompiler::TranslateProgram(shader, options);
+    const auto plan = ShaderRecompiler::IR::ExtractResourcePlan(translated.program);
+    ShaderRecompiler::IR::ResourceSnapshot snapshot;
+    ShaderRecompiler::IR::ResourceSpecialization specialization;
+    const ShaderRecompiler::IR::SrtRuntime runtime{
+        .user_data = user_data, .read_specialization_memory = ReadHostTestMemory};
+    Check(ShaderRecompiler::IR::MaterializeResources(plan, runtime, snapshot, specialization),
+          "word-budget test shader failed materialization");
+    return ShaderRecompiler::CompileProgram(std::move(translated), options, specialization);
+  };
+
+  const auto baseline = compile_with_budget(std::nullopt);
+  const auto words = static_cast<uint32_t>(baseline.spirv.size());
+  Check(words > 10u, "word-budget test baseline shader was unexpectedly empty");
+
+  // Exact budget and 0 (unlimited) both succeed.
+  Check(compile_with_budget(words).spirv.size() == words,
+        "exact SPIR-V word budget should allow the module");
+  Check(compile_with_budget(0u).spirv.size() == words,
+        "zero SPIR-V word budget should disable refusal");
+
+  // One word below emitted size must throw SpirvWordBudgetError before CompileSPV.
+  bool refused = false;
+  try {
+    (void)compile_with_budget(words - 1u);
+  } catch (const ShaderRecompiler::SpirvWordBudgetError &e) {
+    refused = e.words == words && e.budget == words - 1u &&
+              std::string_view(e.what()).find("emitted SPIR-V exceeds word budget") !=
+                  std::string_view::npos;
+  }
+  Check(refused, "oversized SPIR-V module was not refused by the emitted-word budget");
+}
+
 } // namespace
 } // namespace Libs::Graphics
 
@@ -14600,6 +14753,8 @@ int main(int argc, char** argv) {
     TestAtomicImageUint8Shader();
     TestIndirectFormattedStride16StoreShader();
     TestFiniteBufferDescriptorShapesShader();
+    TestIndirectBufferSharedHelpersStayCompact();
+    TestEmittedSpirvWordBudgetRefusesOversizedModule();
     std::puts("ShaderCfgTests (--matfail-only): all cases passed");
     return 0;
   }
@@ -14825,6 +14980,8 @@ int main(int argc, char** argv) {
   TestAtomicImageUint8Shader();
   TestIndirectFormattedStride16StoreShader();
   TestFiniteBufferDescriptorShapesShader();
+  TestIndirectBufferSharedHelpersStayCompact();
+  TestEmittedSpirvWordBudgetRefusesOversizedModule();
 
   return PassBenchReport();
 }

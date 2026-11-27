@@ -178,6 +178,46 @@ TEST(FaultReport, WorkerThreadFaultNamesModuleFunctionAndFrames) {
 	EXPECT_NE(text.find("[KytyFaultReportTestNullWrite+0x"), std::string::npos) << text;
 	EXPECT_GE(frames, 3u) << text;
 }
+
+TEST(FaultReport, ScopedActivityNamesShaderStageHashAndWords) {
+	int fds[2];
+	ASSERT_EQ(::pipe(fds), 0);
+	const pid_t child = ::fork();
+	ASSERT_GE(child, 0);
+	if (child == 0) {
+		::close(fds[0]);
+		g_fault_pipe = fds[1];
+		Common::FaultReport::RefreshModules();
+		Common::HostException::InstallHandler(ReportAndExit);
+		std::thread worker([] {
+			Common::FaultReport::SetThreadTag("shader worker", "kyty-shdwk-0");
+			Common::FaultReport::RegisterThreadStack();
+			{
+				Common::FaultReport::ScopedActivity transient("transient-step");
+			}
+			Common::FaultReport::ScopedActivity activity(
+			    "pipeline-create stage=CS hash=0xaaaa000000000001 words=11545822");
+			KytyFaultReportTestNullWrite(nullptr);
+		});
+		worker.join();
+		std::_Exit(2);
+	}
+	::close(fds[1]);
+	std::string text;
+	char        buffer[4096];
+	for (ssize_t n; (n = ::read(fds[0], buffer, sizeof(buffer))) > 0;) {
+		text.append(buffer, static_cast<size_t>(n));
+	}
+	::close(fds[0]);
+	int status = 0;
+	::waitpid(child, &status, 0);
+	EXPECT_TRUE(WIFEXITED(status) && WEXITSTATUS(status) == 0) << "status " << status;
+	EXPECT_NE(text.find("doing: shader worker [pipeline-create stage=CS hash=0xaaaa000000000001 "
+	                    "words=11545822]"),
+	          std::string::npos)
+	    << text;
+	EXPECT_EQ(text.find("transient-step"), std::string::npos) << text;
+}
 #endif
 
 TEST(SysDbg, StackUsageReportsTheCallingThreadStackBase) {
@@ -550,6 +590,24 @@ TEST(Config, ShaderKeyIndexDefaultsOffAndTracksLoadedOption) {
 	options.shader_key_index_enabled = true;
 	Config::Load(options);
 	EXPECT_TRUE(Config::ShaderKeyIndexEnabled());
+	Config::Shutdown();
+}
+
+TEST(Config, MaxSpirvWordsDefaultsOnAndTracksLoadedOption) {
+	Config::Initialize();
+	Config::ConfigOptions options;
+	EXPECT_EQ(options.max_spirv_words, Config::ConfigOptions::DefaultMaxSpirvWords);
+	EXPECT_EQ(options.max_spirv_words, 2'000'000u);
+	Config::Load(options);
+	EXPECT_EQ(Config::MaxSpirvWords(), 2'000'000u);
+
+	options.max_spirv_words = 0u;
+	Config::Load(options);
+	EXPECT_EQ(Config::MaxSpirvWords(), 0u);
+
+	options.max_spirv_words = 750'000u;
+	Config::Load(options);
+	EXPECT_EQ(Config::MaxSpirvWords(), 750'000u);
 	Config::Shutdown();
 }
 
