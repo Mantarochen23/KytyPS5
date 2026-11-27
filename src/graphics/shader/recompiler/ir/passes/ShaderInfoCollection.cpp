@@ -614,6 +614,9 @@ void CollectShaderInfo(Program& program, ShaderStageInputInfo input_info) {
 	info.uses_flattened_srt |= std::ranges::any_of(info.buffers, uses_mapping) ||
 	                           std::ranges::any_of(info.images, uses_mapping) ||
 	                           std::ranges::any_of(info.samplers, uses_mapping);
+	info.uses_device_address |= std::ranges::any_of(info.buffers, [](const BufferResource& buffer) {
+		return buffer.live && IsIndirectBufferRuntimeTable(buffer.indirect_mapping_offset);
+	});
 	info.uses_image_heap = std::ranges::any_of(info.images, &ImageResource::heap);
 	switch (program.stage) {
 		case ShaderType::Vertex:

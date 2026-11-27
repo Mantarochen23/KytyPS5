@@ -342,8 +342,10 @@ uint32_t LoadBda(ValueEmitContext& ctx, uint32_t address, uint32_t active, uint3
 
 uint32_t BufferByteAddressWithPrefix(EmitterState& state, const IR::MemoryInfo& mem,
                                      const BufferCallArgs& args, uint32_t prefix = 0) {
-	const auto resource = state.program.info.buffers.at(mem.resource).descriptor_index;
-	if (prefix == 0u) prefix = state.memory_byte_offsets[resource];
+	if (prefix == 0u) {
+		const auto resource = state.program.info.buffers.at(mem.resource).descriptor_index;
+		prefix              = state.memory_byte_offsets[resource];
+	}
 	const auto address = Binary(state, spv::OpIAdd, TypeU32(state),
 	                            BufferByteAddressFromArgs(state, mem, args), prefix);
 	// The host binding prefix must not wrap an out-of-range guest address into the buffer.
@@ -557,8 +559,14 @@ uint32_t LoadWordInBounds(ValueEmitContext& ctx, const MemoryResourceAccess& res
                           uint32_t index) {
 	const auto value   = ctx.state.builder.AllocateId();
 	const auto pointer = EmitMemoryElementPointer(ctx.state, resource, index);
-	ctx.state.builder.AddFunction(spv::OpLoad, TypeU32(ctx.state), value, pointer,
-	                              resource.memory_access);
+	if (resource.physical_address) {
+		ctx.state.builder.AddFunction(
+		    spv::OpLoad, TypeU32(ctx.state), value, pointer,
+		    resource.memory_access | spv::MemoryAccessAlignedMask, 4u);
+	} else {
+		ctx.state.builder.AddFunction(spv::OpLoad, TypeU32(ctx.state), value, pointer,
+		                              resource.memory_access);
+	}
 	return value;
 }
 
@@ -743,9 +751,14 @@ void StoreSubword(ValueEmitContext& ctx, const IR::Inst& inst, IR::MemoryInfo me
 
 void StoreWordInBounds(ValueEmitContext& ctx, const MemoryResourceAccess& resource, uint32_t index,
                        uint32_t data) {
-	ctx.state.builder.AddFunction(spv::OpStore,
-	                              EmitMemoryElementPointer(ctx.state, resource, index), data,
-	                              resource.memory_access);
+	const auto pointer = EmitMemoryElementPointer(ctx.state, resource, index);
+	if (resource.physical_address) {
+		ctx.state.builder.AddFunction(
+		    spv::OpStore, pointer, data,
+		    resource.memory_access | spv::MemoryAccessAlignedMask, 4u);
+	} else {
+		ctx.state.builder.AddFunction(spv::OpStore, pointer, data, resource.memory_access);
+	}
 }
 
 template <typename Fn>
@@ -1352,7 +1365,7 @@ uint32_t LoadRawBufferFromArgs(ValueEmitContext& ctx, IR::ValueOpcode opcode,
 		}
 		return ConstructU32Composite(state, components, values);
 	};
-	if (!mem.IsCoherentBufferPairLoad(opcode)) return scalar();
+	if (!mem.IsCoherentBufferPairLoad(opcode) || resource.physical_address) return scalar();
 
 	const auto first  = BufferByteAddressWithPrefix(state, mem, args, resource.byte_offset);
 	const auto second = BufferByteAddressWithPrefix(
@@ -1596,14 +1609,15 @@ std::array<uint32_t, 7> IndirectBufferDispatchKey(uint32_t root_resource,
 }
 
 std::array<uint32_t, 11> IndirectBufferClassKey(const std::array<uint32_t, 6>& op_key, bool empty,
-                                                bool indexed, const IR::BufferResource& buffer) {
+                                                bool indexed, bool runtime_table,
+                                                const IR::BufferResource& buffer) {
 	return {op_key[0],
 	        op_key[1],
 	        op_key[2],
 	        op_key[3],
 	        op_key[4],
 	        op_key[5],
-	        empty ? 1u : 0u,
+	        (empty ? 1u : 0u) | (runtime_table ? 2u : 0u),
 	        indexed ? 1u : 0u,
 	        empty ? 0u : buffer.packed_stride,
 	        static_cast<uint32_t>(buffer.descriptor_format),
@@ -1714,10 +1728,43 @@ EmitterState::IndirectBufferRootPlan& EnsureIndirectBufferRootPlan(EmitterState&
                                                                    uint32_t root_resource) {
 	auto [it, inserted] = state.indirect_buffer_roots.try_emplace(root_resource);
 	if (!inserted) return it->second;
-	auto&       plan       = it->second;
-	const auto& buffers    = state.program.info.buffers;
-	const auto& candidates = buffers[root_resource].indirect_resources;
-	const auto  words_before = state.builder.FunctionWordCount();
+	auto&       plan          = it->second;
+	const auto& buffers       = state.program.info.buffers;
+	const auto& root          = buffers[root_resource];
+	const auto& candidates    = root.indirect_resources;
+	const auto  words_before  = state.builder.FunctionWordCount();
+	plan.runtime_table        = IsRuntimeTableIndirectBuffer(state, root_resource);
+
+	if (plan.runtime_table) {
+		// In runtime-table mode, candidates[0] is the empty root and candidates[1..C] are one
+		// representative per distinct (stride, format, swizzle, oob) class.
+		plan.groups.reserve(candidates.size());
+		for (uint32_t ordinal = 0u; ordinal < static_cast<uint32_t>(candidates.size()); ++ordinal) {
+			const auto  cand_res = candidates[ordinal];
+			const auto& cand     = buffers[cand_res];
+			const bool  empty    = ordinal == 0u || EmptyIndirectBufferCandidate(state, cand_res);
+			if (!empty && (cand.packed_stride & (1u << 20u)) != 0u) plan.needs_lane = true;
+			plan.groups.push_back({.representative = cand_res, .empty = empty, .count = 1u});
+		}
+		const auto vec4_type = TypeU32Vector(state, 4u);
+		const auto fn_type   = state.builder.Type(spv::OpTypeFunction, vec4_type, TypeU32(state));
+		plan.select_func     = state.builder.AllocateId();
+		const auto name      = "select_indirect_buffer_table_" + std::to_string(root_resource);
+		state.builder.AddName(plan.select_func, name.c_str());
+		state.builder.AddFunction(spv::OpFunction, vec4_type, plan.select_func,
+		                          spv::FunctionControlMaskNone, fn_type);
+		const auto selected = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpFunctionParameter, TypeU32(state), selected);
+		EmitLabel(state, state.builder.AllocateId());
+		const auto entry =
+		    EmitLoadIndirectBufferTableEntry(state, selected, root.indirect_mapping_offset);
+		state.builder.AddFunction(spv::OpReturnValue, entry);
+		state.builder.AddFunction(spv::OpFunctionEnd);
+		RecordEmitContributor(state, "indirect-buffer", root_resource,
+		                      static_cast<uint32_t>(candidates.size()), 0u,
+		                      state.builder.FunctionWordCount() - words_before);
+		return plan;
+	}
 
 	std::map<std::array<uint32_t, 5>, uint32_t> group_map;
 	plan.ordinal_groups.reserve(candidates.size());
@@ -1793,23 +1840,31 @@ EmitterState::IndirectBufferRootPlan& EnsureIndirectBufferRootPlan(EmitterState&
 uint32_t EnsureIndirectBufferClassHelper(ValueEmitContext& ctx, uint32_t root_resource,
                                          IR::ValueOpcode op, const IR::MemoryInfo& base_mem,
                                          const std::array<uint32_t, 6>& op_key,
-                                         const EmitterState::IndirectBufferGroup& group) {
+                                         const EmitterState::IndirectBufferGroup& group,
+                                         bool runtime_table) {
 	auto&       state   = ctx.state;
 	const auto& cand    = state.program.info.buffers[group.representative];
 	const bool  indexed = !group.empty && IsIndexedIndirectBuffer(state, group.representative);
-	const auto  ckey    = IndirectBufferClassKey(op_key, group.empty, indexed, cand);
+	const auto  ckey    = IndirectBufferClassKey(op_key, group.empty, indexed, runtime_table, cand);
 	auto [it, inserted] = state.indirect_buffer_class_helpers.try_emplace(ckey, 0u);
 	if (!inserted) return it->second;
 
 	const auto words_before = state.builder.FunctionWordCount();
 	const auto sig          = MakeIndirectBufferOpSignature(state, op);
 	const auto u32          = TypeU32(state);
-	std::vector<uint32_t> param_types {u32, u32, u32, u32, u32, u32};
+	// Direct mode passes (slot, index, offset, soffset, mem_offset, lane, ...).
+	// Runtime-table mode passes (bda_lo, bda_hi, byte_size, byte_offset, index, offset, soffset,
+	// mem_offset, lane, ...).
+	std::vector<uint32_t> param_types =
+	    runtime_table ? std::vector<uint32_t> {u32, u32, u32, u32, u32, u32, u32, u32, u32}
+	                  : std::vector<uint32_t> {u32, u32, u32, u32, u32, u32};
 	param_types.insert(param_types.end(), sig.extra_param_types.begin(), sig.extra_param_types.end());
 	const auto fn_type =
 	    state.builder.Type(spv::OpTypeFunction, sig.result_type, std::span<const uint32_t>(param_types));
 	const auto func = it->second = state.builder.AllocateId();
-	const auto name = "indirect_buffer_class_" + std::to_string(group.representative) + "_op" +
+	const auto name = std::string(runtime_table ? "indirect_buffer_table_class_"
+	                                            : "indirect_buffer_class_") +
+	                  std::to_string(group.representative) + "_op" +
 	                  std::to_string(static_cast<uint32_t>(op));
 	state.builder.AddName(func, name.c_str());
 	state.builder.AddFunction(spv::OpFunction, sig.result_type, func, spv::FunctionControlMaskNone,
@@ -1821,24 +1876,45 @@ uint32_t EnsureIndirectBufferClassHelper(ValueEmitContext& ctx, uint32_t root_re
 	}
 	EmitLabel(state, state.builder.AllocateId());
 
-	const uint32_t       slot = params[0];
+	const size_t         arg_base = runtime_table ? 4u : 1u;
+	const uint32_t       slot     = runtime_table ? 0u : params[0];
 	const BufferCallArgs args {
-	    .index      = params[1],
-	    .offset     = params[2],
-	    .soffset    = params[3],
-	    .mem_offset = params[4],
-	    .lane       = params[5],
+	    .index      = params[arg_base + 0u],
+	    .offset     = params[arg_base + 1u],
+	    .soffset    = params[arg_base + 2u],
+	    .mem_offset = params[arg_base + 3u],
+	    .lane       = params[arg_base + 4u],
 	};
-	IR::MemoryInfo mem = base_mem;
-	mem.resource       = group.representative;
-	mem.offset         = 0u;
+	const size_t   extra_base = arg_base + 5u;
+	IR::MemoryInfo mem        = base_mem;
+	mem.resource              = group.representative;
+	mem.offset                = 0u;
+	const auto make_resource  = [&](bool wide_64) -> MemoryResourceAccess {
+		if (!runtime_table) {
+			if (wide_64) {
+				return PrepareStorageBufferResourceAccess(state, mem, state.storage_buffers[3], slot);
+			}
+			return PrepareMemoryResourceAccess(state, mem, slot);
+		}
+		return MemoryResourceAccess {
+		    .kind             = mem.kind,
+		    .object_pointer   = PackU64(state, params[0], params[1]),
+		    .length           = Binary(state, spv::OpShiftRightLogical, TypeU32(state), params[2],
+		                               ConstantU32(state, wide_64 ? 3u : 2u)),
+		    .byte_offset      = params[3],
+		    .element_bits     = wide_64 ? 64u : 32u,
+		    .physical_address = true,
+		    .memory_access    = (mem.coherent ? spv::MemoryAccessVolatileMask
+		                                      : spv::MemoryAccessMaskNone) |
+		                        spv::MemoryAccessAlignedMask,
+		};
+	};
 	const auto access     = IR::BufferAccessOf(op);
 	const auto components = std::max(IR::BufferComponentCount(op), 1u);
 
 	if (access == IR::BufferAccess::Read) {
-		const auto resource =
-		    group.empty ? MemoryResourceAccess {} : PrepareMemoryResourceAccess(state, mem, slot);
-		uint32_t result = 0u;
+		const auto resource = group.empty ? MemoryResourceAccess {} : make_resource(false);
+		uint32_t   result   = 0u;
 		if (components > 1u || (op == IR::ValueOpcode::LoadBufferU32 && mem.formatted)) {
 			const auto info = Format::GetFormatInfo(
 			    mem.formatted ? BufferFormat(ctx, mem) : Prospero::BufferFormat::kInvalid);
@@ -1861,8 +1937,8 @@ uint32_t EnsureIndirectBufferClassHelper(ValueEmitContext& ctx, uint32_t root_re
 		state.builder.AddFunction(spv::OpReturnValue, result);
 	} else if (access == IR::BufferAccess::Write) {
 		if (!group.empty) {
-			const auto resource = PrepareMemoryResourceAccess(state, mem, slot);
-			const auto data     = params[6];
+			const auto resource = make_resource(false);
+			const auto data     = params[extra_base];
 			if (components > 1u || (op == IR::ValueOpcode::StoreBufferU32 && mem.formatted)) {
 				const auto info = Format::GetFormatInfo(
 				    mem.formatted ? BufferFormat(ctx, mem) : Prospero::BufferFormat::kInvalid);
@@ -1894,8 +1970,7 @@ uint32_t EnsureIndirectBufferClassHelper(ValueEmitContext& ctx, uint32_t root_re
 		uint32_t   result = sig.default_zero;
 		if (!group.empty) {
 			if (wide) {
-				const auto resource =
-				    PrepareStorageBufferResourceAccess(state, mem, state.storage_buffers[3], slot);
+				const auto resource     = make_resource(true);
 				const auto byte_address =
 				    BufferByteAddressWithPrefix(state, mem, args, resource.byte_offset);
 				const auto index = Binary(state, spv::OpShiftRightLogical, TypeU32(state),
@@ -1903,15 +1978,19 @@ uint32_t EnsureIndirectBufferClassHelper(ValueEmitContext& ctx, uint32_t root_re
 				result = EmitValueOrDefaultIfCondition(
 				    state, EmitMemoryElementInBounds(state, resource, index), TypeU64(state),
 				    ConstantU64(state, 0u), [&]() {
-					    const auto pointer = EmitStorageBufferElementPointer(
-					        state, resource, index, TypeStorageBufferElementPointer(state, 64));
+					    const auto pointer =
+					        runtime_table
+					            ? EmitMemoryElementPointer(state, resource, index)
+					            : EmitStorageBufferElementPointer(
+					                  state, resource, index,
+					                  TypeStorageBufferElementPointer(state, 64));
 					    const auto old = EmitAtomicOperation(state, op, true, pointer,
-					                                         spv::ScopeDevice, params[6]);
+					                                         spv::ScopeDevice, params[extra_base]);
 					    EmitAtomicMemoryBarrier(state, mem.kind);
 					    return old;
 				    });
 			} else {
-				const auto resource = PrepareMemoryResourceAccess(state, mem, slot);
+				const auto resource = make_resource(false);
 				const auto index =
 				    BufferDwordIndexFromArgs(state, mem, args, resource.byte_offset);
 				const auto in_bounds = Config::PortEnabled(Config::Port::GpuSelectedWrites)
@@ -1925,12 +2004,12 @@ uint32_t EnsureIndirectBufferClassHelper(ValueEmitContext& ctx, uint32_t root_re
 					    op == IR::ValueOpcode::BufferAtomicFMax32) {
 						const bool max_value = op == IR::ValueOpcode::BufferAtomicFMax32;
 						return AtomicUpdate(state, pointer, mem.kind, [&](uint32_t old) {
-							return EmitFloatAtomicReplacement(state, old, params[6], max_value);
+							return EmitFloatAtomicReplacement(state, old, params[extra_base], max_value);
 						});
 					}
 					const auto old = EmitAtomicOperation(
-					    state, op, false, pointer, spv::ScopeDevice, params[6],
-					    params.size() > 7u ? params[7] : 0u);
+					    state, op, false, pointer, spv::ScopeDevice, params[extra_base],
+					    params.size() > extra_base + 1u ? params[extra_base + 1u] : 0u);
 					EmitAtomicMemoryBarrier(state, mem.kind);
 					return old;
 				});
@@ -2116,8 +2195,8 @@ void DefineIndirectBufferAccesses(ValueEmitContext& ctx) {
 			std::vector<uint32_t> class_funcs;
 			class_funcs.reserve(plan.groups.size());
 			for (const auto& group: plan.groups) {
-				class_funcs.push_back(
-				    EnsureIndirectBufferClassHelper(ctx, mem.resource, op, mem, op_key, group));
+				class_funcs.push_back(EnsureIndirectBufferClassHelper(
+				    ctx, mem.resource, op, mem, op_key, group, plan.runtime_table));
 			}
 
 			const auto words_before = state.builder.FunctionWordCount();
@@ -2143,6 +2222,59 @@ void DefineIndirectBufferAccesses(ValueEmitContext& ctx) {
 
 			const auto candidates =
 			    static_cast<uint32_t>(state.program.info.buffers[mem.resource].indirect_resources.size());
+			if (plan.runtime_table) {
+				const auto entry = state.builder.AllocateId();
+				state.builder.AddFunction(spv::OpFunctionCall, TypeU32Vector(state, 4u), entry,
+				                          plan.select_func, params[0]);
+				const auto extract = [&](uint32_t idx) {
+					const auto id = state.builder.AllocateId();
+					state.builder.AddFunction(spv::OpCompositeExtract, u32, id, entry, idx);
+					return id;
+				};
+				const auto bda_lo      = extract(0u);
+				const auto bda_hi      = extract(1u);
+				const auto byte_size   = extract(2u);
+				const auto meta        = extract(3u);
+				const auto byte_offset = Binary(state, spv::OpShiftRightLogical, u32, meta,
+				                                ConstantU32(state, 24u));
+				const auto group =
+				    Binary(state, spv::OpBitwiseAnd, u32, meta, ConstantU32(state, 0x00ffffffu));
+				std::vector<uint32_t> forward_args {bda_lo, bda_hi, byte_size, byte_offset};
+				forward_args.insert(forward_args.end(), params.begin() + 1, params.end());
+				const auto call_group = [&](uint32_t g) -> uint32_t {
+					const auto value = state.builder.AllocateId();
+					state.builder.AddFunction(spv::OpFunctionCall, sig.result_type, value,
+					                          class_funcs[g],
+					                          std::span<const uint32_t>(forward_args));
+					return value;
+				};
+				const auto valid_group =
+				    Binary(state, spv::OpULessThan, TypeBool(state), group,
+				           ConstantU32(state, static_cast<uint32_t>(class_funcs.size())));
+				if (sig.has_result) {
+					const auto result = EmitValueOrDefaultIfCondition(
+					    state, valid_group, sig.result_type, sig.default_zero, [&]() {
+						    if (class_funcs.size() == 1u) return call_group(0u);
+						    return EmitIndexSwitch(state, group, class_funcs.size(),
+						                           sig.result_type, call_group);
+					    });
+					state.builder.AddFunction(spv::OpReturnValue, result);
+				} else {
+					EmitIfCondition(state, valid_group, [&]() {
+						if (class_funcs.size() == 1u) {
+							(void)call_group(0u);
+						} else {
+							EmitIndexSwitch(state, group, class_funcs.size(), 0u,
+							                [&](uint32_t g) { (void)call_group(g); });
+						}
+					});
+					state.builder.AddFunction(spv::OpReturn);
+				}
+				state.builder.AddFunction(spv::OpFunctionEnd);
+				RecordEmitContributor(state, "indirect-buffer", mem.resource, candidates, 0u,
+				                      state.builder.FunctionWordCount() - words_before);
+				continue;
+			}
 			const auto valid = Binary(state, spv::OpULessThan, TypeBool(state), params[0],
 			                          ConstantU32(state, candidates));
 			const auto emit_dispatch = [&]() -> uint32_t {
