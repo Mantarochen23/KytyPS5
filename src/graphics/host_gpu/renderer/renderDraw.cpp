@@ -1186,6 +1186,33 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 		Common::FrameCost::Add(Common::FrameCost::Counter::DrawsSkipped);
 		return;
 	}
+	// The records of an indirect draw are often written by a compute pass (GPU culling). When that
+	// pass was skipped (--async-compute-wait-ms, skipTaint.h) the records are stale: counts of
+	// garbage can launch millions of mesh groups or vertices, and the GPU times out and resets.
+	// Dispatches already skip on tainted input; an indirect draw reading tainted records is
+	// skipped the same way. It writes nothing that is tracked, so nothing new is tainted.
+	if (emit.indirect.address != 0 && emit.indirect.count != 0 && Config::AsyncComputeWaitMs() != 0 &&
+	    !m_skip_taint.Empty()) {
+		const uint64_t record = draw.indexed ? sizeof(vk::DrawIndexedIndirectCommand)
+		                                     : sizeof(vk::DrawIndirectCommand);
+		const uint64_t size =
+		    static_cast<uint64_t>(emit.indirect.count - 1) * emit.indirect.stride + record;
+		const auto now = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+		                                           std::chrono::steady_clock::now().time_since_epoch())
+		                                           .count());
+		if (m_skip_taint.ReadsTainted({{emit.indirect.address, size, true, false}}, now)) {
+			static std::atomic<uint32_t> log_count {0};
+			if (log_count.fetch_add(1, std::memory_order_relaxed) < 64) {
+				const auto* first = state.vertex_info[0].stage.module;
+				LOGF("[skip] indirect draw (%s) hash=0x%016" PRIx64 " reads records a skipped "
+				     "dispatch was to write; skipped (tainted ranges=%zu)\n",
+				     first != nullptr && first->mesh_task ? "mesh task" : "vertex",
+				     first != nullptr ? first->info.shader_hash : uint64_t {0}, m_skip_taint.Size());
+			}
+			Common::FrameCost::Add(Common::FrameCost::Counter::DrawsSkipped);
+			return;
+		}
+	}
 	const auto  vertex_stages = state.VertexStages();
 	const bool  mesh_active   = state.vertex_info[0].stage.module->info.stage == ShaderType::Mesh;
 	const bool  mesh_task     = state.vertex_info[0].stage.module->mesh_task;
