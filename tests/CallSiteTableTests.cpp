@@ -24,6 +24,8 @@ constexpr uint64_t PageSize = 4096;
 struct Memory {
   std::map<uint64_t, std::vector<uint32_t>> pages;
   uint32_t reads = 0;
+  uint64_t fail_from = 0;  // Reads that touch [fail_from, fail_to) fail.
+  uint64_t fail_to = 0;
 
   void Write(uint64_t address, uint32_t value) {
     auto &page = pages[address / PageSize];
@@ -33,6 +35,7 @@ struct Memory {
   static bool Read(void *user, uint64_t address, std::span<uint32_t> values) {
     auto &self = *static_cast<Memory *>(user);
     ++self.reads;
+    if (address < self.fail_to && address + values.size() * 4 > self.fail_from) return false;
     for (size_t i = 0; i < values.size(); ++i) {
       const auto at = address + i * 4;
       const auto found = self.pages.find(at / PageSize);
@@ -232,6 +235,56 @@ void TestEviction() {
   Check(tiny.Live() == 0 && tiny.Bytes() == 0, "clear empties");
 }
 
+// Two call sites of one program share one memo entry (the program memo kept one result for both).
+// Each must see its own unread words after its own hit, whatever the other did in between.
+void TestSharedEntryKeepsOwnWords() {
+  Fixture f;
+  auto *entry = f.Record(f.key);
+  auto other = f.key;
+  other.packet += 0x40;
+  bool dropped = false;
+  f.table.Store(other, &f.owner, f.memo.Generation(), f.memo.ShareCurrent(), nullptr, dropped);
+  CallSiteStats stats;
+  CallSiteTable::Record *record = nullptr;
+  f.inputs.user_data[4] = 500;
+  f.inputs.user_data[5] = 501;
+  Check(f.Lookup(f.key, stats, record) == CallSiteOutcome::Hit, "first site hits");
+  Check(record->entry.get() == entry, "the entry is shared");
+  Check(record->entry->resources.user_data[4] == 500 && record->entry->resources.user_data[5] == 501,
+        "first site sees its words");
+  f.inputs.user_data[4] = 600;
+  f.inputs.user_data[5] = 601;
+  Check(f.Lookup(other, stats, record) == CallSiteOutcome::Hit, "second site hits");
+  Check(record->entry->resources.user_data[4] == 600 && record->entry->resources.user_data[5] == 601,
+        "second site sees its words, not the first site's");
+  // Words the walk reads never move with a refresh: a third caller with the recorded words still hits.
+  f.inputs.user_data[4] = 5;
+  f.inputs.user_data[5] = 6;
+  Check(f.Lookup(f.key, stats, record) == CallSiteOutcome::Hit, "the read words stayed as recorded");
+}
+
+// A range that cannot be read now is a miss (never a hit), and the next lookup after the read works
+// again must hash the large range from a clean state.
+void TestUnreadableRange() {
+  Fixture f;
+  f.Record(f.key);
+  CallSiteStats stats;
+  CallSiteTable::Record *record = nullptr;
+  f.memory.fail_from = Large + LargeSize - 4;  // Fails in the last piece of the large range.
+  f.memory.fail_to = Large + LargeSize;
+  Check(f.Lookup(f.key, stats, record) == CallSiteOutcome::Ranges, "a failed read in the last piece misses");
+  Check(record == nullptr, "no record is handed out");
+  f.memory.fail_from = f.memory.fail_to = 0;
+  Check(f.Lookup(f.key, stats, record) == CallSiteOutcome::Hit, "readable again, the same bytes hit");
+  f.memory.fail_from = Small;
+  f.memory.fail_to = Small + 4;
+  Check(f.Lookup(f.key, stats, record) == CallSiteOutcome::Ranges, "a failed read of a small range misses");
+  f.memory.fail_from = f.memory.fail_to = 0;
+  for (int i = 0; i < 3; ++i) {
+    Check(f.Lookup(f.key, stats, record) == CallSiteOutcome::Hit, "repeated hits reuse the hash state");
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -240,6 +293,8 @@ int main() {
   TestChangedBytes();
   TestStampsSkipReads();
   TestEviction();
+  TestSharedEntryKeepsOwnWords();
+  TestUnreadableRange();
   std::puts("CallSiteTableTests: ok");
   return 0;
 }

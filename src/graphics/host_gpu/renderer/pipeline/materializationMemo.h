@@ -11,7 +11,14 @@
 #include <span>
 #include <vector>
 
+struct XXH3_state_s;
+
 namespace Libs::Graphics {
+
+// Frees the streaming hash state of a memo (xxhash is included by the .cpp only).
+struct HashStateDeleter {
+	void operator()(XXH3_state_s* state) const;
+};
 
 // One page of watched guest memory at the generation it had when a memo entry was recorded.
 struct PageStamp {
@@ -203,6 +210,8 @@ private:
 	uint64_t                            m_tick     = 0;
 	uint64_t                            m_serials  = 0;
 	uint64_t                            m_generation = 0;
+	// Streaming state for ranges hashed in pieces; made once, so a hit allocates nothing.
+	std::unique_ptr<XXH3_state_s, HashStateDeleter> m_hash_state;
 	ReadStamps*                         m_stamps   = nullptr;
 };
 

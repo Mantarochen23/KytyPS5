@@ -53,6 +53,10 @@ WalkReadHashes::State WalkReadHashes::Find(uint64_t address, uint64_t size, uint
 	return found->second.unstable ? State::Unstable : State::Stable;
 }
 
+void HashStateDeleter::operator()(XXH3_state_s* state) const {
+	XXH3_freeState(state);
+}
+
 void MemoizedMaterialization::Configure(uint32_t entries, ReadStamps* stamps) {
 	m_capacity = std::max(entries, 1u);
 	m_stamps   = stamps;
@@ -145,20 +149,17 @@ bool MemoizedMaterialization::HashRange(const ShaderRecompiler::IR::SrtRuntime& 
 	// A large table is read and hashed in pieces that stay in the cache; the streamed hash equals
 	// the one-shot hash of the same bytes.
 	m_scratch.resize(static_cast<size_t>(Chunk / sizeof(uint32_t)));
-	XXH3_state_t* state = XXH3_createState();
+	if (m_hash_state == nullptr) m_hash_state.reset(XXH3_createState());
+	XXH3_state_t* state = m_hash_state.get();
 	if (state == nullptr) return false;
 	XXH3_64bits_reset(state);
 	for (uint64_t done = 0; done < size; done += Chunk) {
 		const auto piece = std::min(Chunk, size - done);
 		const std::span<uint32_t> words(m_scratch.data(), static_cast<size_t>(piece / sizeof(uint32_t)));
-		if (!runtime.read_specialization_memory(runtime.userdata, address + done, words)) {
-			XXH3_freeState(state);
-			return false;
-		}
+		if (!runtime.read_specialization_memory(runtime.userdata, address + done, words)) return false;
 		XXH3_64bits_update(state, words.data(), static_cast<size_t>(piece));
 	}
 	hash = XXH3_64bits_digest(state);
-	XXH3_freeState(state);
 	return true;
 }
 
@@ -200,8 +201,10 @@ bool MemoizedMaterialization::ValidateReads(Entry&                              
 				return false;
 			}
 			same = hash == read.hash;
-			++stats.ranges_large;
-			stats.bytes_large += read.size;
+			if (read.size != 0u) {
+				++stats.ranges_large;
+				stats.bytes_large += read.size;
+			}
 		}
 		++stats.ranges_compared;
 		stats.bytes_compared += read.size;
