@@ -4,6 +4,7 @@
 #include "common/emulatorConfig.h"
 #include "common/faultReport.h"
 #include "common/file.h"
+#include "common/frameCost.h"
 #include "common/hostException.h"
 #include "common/logging/log.h"
 #include "common/memAccount.h"
@@ -710,6 +711,186 @@ TEST(MemAccount, LimitGuardDropsThenStopsOnlyWhileOver) {
 	EXPECT_EQ(guard.Step(13'000, 90), Action::None);
 	EXPECT_EQ(guard.Step(14'000, 150), Action::DropCaches);
 	EXPECT_EQ(guard.Step(20'000, 100), Action::None);
+}
+
+TEST(FrameCost, RenderThreadAndReasonScopesNestAndRestore) {
+	using namespace Common::FrameCost;
+	EXPECT_FALSE(IsRenderThread());
+	EXPECT_EQ(CurrentWaitReason(), WaitReason::Other);
+	EXPECT_EQ(CurrentSubmitReason(), SubmitReason::Other);
+
+	MarkRenderThread(true);
+	EXPECT_TRUE(IsRenderThread());
+	{
+		ScopedWaitReason   outer_wait(WaitReason::Readback);
+		ScopedSubmitReason outer_submit(SubmitReason::Slice);
+		EXPECT_EQ(CurrentWaitReason(), WaitReason::Readback);
+		EXPECT_EQ(CurrentSubmitReason(), SubmitReason::Slice);
+		{
+			ScopedWaitReason   inner_wait(WaitReason::Unmap);
+			ScopedSubmitReason inner_submit(SubmitReason::Sync);
+			EXPECT_EQ(CurrentWaitReason(), WaitReason::Unmap);
+			EXPECT_EQ(CurrentSubmitReason(), SubmitReason::Sync);
+		}
+		EXPECT_EQ(CurrentWaitReason(), WaitReason::Readback);
+		EXPECT_EQ(CurrentSubmitReason(), SubmitReason::Slice);
+	}
+	EXPECT_EQ(CurrentWaitReason(), WaitReason::Other);
+	EXPECT_EQ(CurrentSubmitReason(), SubmitReason::Other);
+
+	bool bg_render = true;
+	auto bg_wait   = WaitReason::Readback;
+	auto bg_submit = SubmitReason::Flip;
+	std::thread([&] {
+		bg_render = IsRenderThread();
+		bg_wait   = CurrentWaitReason();
+		bg_submit = CurrentSubmitReason();
+	}).join();
+	EXPECT_FALSE(bg_render);
+	EXPECT_EQ(bg_wait, WaitReason::Other);
+	EXPECT_EQ(bg_submit, SubmitReason::Other);
+
+	MarkRenderThread(false);
+	EXPECT_FALSE(IsRenderThread());
+}
+
+TEST(FrameCost, StepClockSamplesOnZeroAndRetriesWhenSkipped) {
+	using Common::FrameCost::StepClock;
+	uint32_t countdown = 2;
+	uint64_t bucket    = 0;
+
+	{
+		StepClock c(countdown);
+		EXPECT_FALSE(c.Active());
+		c.AddTo(bucket);
+		EXPECT_EQ(bucket, 0u);
+		EXPECT_EQ(countdown, 1u);
+	}
+	{
+		StepClock c(countdown);
+		EXPECT_FALSE(c.Active());
+		EXPECT_EQ(countdown, 0u);
+	}
+	// Skipped call: Active() is true, but Complete() is not called, so countdown stays 0.
+	{
+		StepClock c(countdown);
+		EXPECT_TRUE(c.Active());
+		EXPECT_EQ(countdown, 0u);
+	}
+	// Next call executes and completes: countdown resets to period - 1.
+	{
+		StepClock c(countdown);
+		EXPECT_TRUE(c.Active());
+		c.AddTo(bucket);
+		c.Complete(8);
+		EXPECT_FALSE(c.Active());
+		EXPECT_EQ(countdown, 7u);
+	}
+}
+
+TEST(FrameCost, FormatWindowSeparatesBackgroundGpuWaitsAndReportsArchFields) {
+	using namespace Common::FrameCost;
+	std::array<uint64_t, CounterCount> delta {};
+	const auto set = [&](Counter c, uint64_t v) { delta[static_cast<size_t>(c)] = v; };
+
+	set(Counter::Frames, 2);
+	set(Counter::Draws, 200);
+	set(Counter::Dispatches, 400);
+	// 2 frames in 0.1 s => 50 ms/frame total.
+	// Render thread: 10 ms/frame fence wait (6 ms readback + 4 ms unmap) + 2 ms/frame prio wait
+	// => wait_gpu = 12.000 ms/frame, other = 38.000 ms/frame.
+	// Background thread: 200 ms/frame wait_gpu_bg must NOT shrink other or inflate wait_gpu!
+	set(Counter::GpuFenceWaitNs, 20'000'000);
+	set(Counter::GpuPriorityOpWaitNs, 4'000'000);
+	set(Counter::GpuFenceWaitBgNs, 400'000'000);
+	set(Counter::WaitReadbackCalls, 6);
+	set(Counter::WaitReadbackNs, 12'000'000);
+	set(Counter::WaitUnmapCalls, 2);
+	set(Counter::WaitUnmapNs, 8'000'000);
+	set(Counter::WaitPriorityOpCalls, 4);
+	set(Counter::SubmitsTotal, 10);
+	set(Counter::SubmitSlice, 6);
+	set(Counter::SubmitFlip, 2);
+	set(Counter::SubmitSync, 2);
+	set(Counter::DrawsDirect, 100);
+	set(Counter::DrawsIndirectGpuPackets, 4);
+	set(Counter::DrawsIndirectGpuSubdraws, 40);
+	set(Counter::DrawsIndirectCpuPackets, 2);
+	set(Counter::DrawsIndirectCpuSubdraws, 96);
+	set(Counter::DrawsCoalesced, 12);
+	set(Counter::DrawsSkipped, 8);
+	set(Counter::DispatchesDirect, 50);
+	set(Counter::DispatchesIndirect, 340);
+	set(Counter::DispatchesIndirectThreadDim, 10);
+	set(Counter::DispatchesGuard, 340);
+	set(Counter::BvhDispatches, 16);
+	set(Counter::BarriersAllCommands, 1200);
+	set(Counter::DrawStepSamples, 4);
+	set(Counter::DrawStepProgramsNs, 4000);
+	set(Counter::DrawStepTargetsNs, 2000);
+	set(Counter::DrawStepPipelineNs, 1200);
+	set(Counter::DrawStepBindNs, 8000);
+	set(Counter::DrawStepCommitNs, 6000);
+	set(Counter::DrawStepRecordNs, 2800);
+	set(Counter::DispatchStepSamples, 5);
+	set(Counter::DispatchStepProgramNs, 5000);
+	set(Counter::DispatchStepPipelineNs, 1500);
+	set(Counter::DispatchStepBindNs, 10000);
+	set(Counter::DispatchStepGuardNs, 7500);
+	set(Counter::DispatchStepCommitNs, 6000);
+	set(Counter::DispatchStepRecordNs, 9000);
+
+	const auto lines = FormatWindow(delta, 0.1);
+	EXPECT_NE(lines.summary.find("wait_gpu=12.000"), std::string::npos) << lines.summary;
+	EXPECT_NE(lines.summary.find("other=38.000 total=50.000"), std::string::npos) << lines.summary;
+	EXPECT_NE(lines.arch.find("[frame] arch wait_gpu_bg=200.000"), std::string::npos) << lines.arch;
+	EXPECT_NE(lines.arch.find("wait_ms(rb=6.000 stream=0.000 unmap=4.000"), std::string::npos)
+	    << lines.arch;
+	EXPECT_NE(lines.arch.find("prio=2.000 other=0.000)"), std::string::npos) << lines.arch;
+	EXPECT_NE(lines.arch.find("wait_n(rb=3.00 stream=0.00 unmap=1.00"), std::string::npos)
+	    << lines.arch;
+	EXPECT_NE(lines.arch.find("submits=5.00(slice=3.00 flip=1.00 susp=0.00 sync=1.00"),
+	          std::string::npos)
+	    << lines.arch;
+	EXPECT_NE(lines.arch.find("calls_draw(dir=50.00 ind_gpu=2.00/20.00 ind_cpu=1.00/48.00 "
+	                          "ind_zero=0.00 coal=6.00 quad_ex=0.00 skip=4.00)"),
+	          std::string::npos)
+	    << lines.arch;
+	EXPECT_NE(lines.arch.find("calls_disp(dir=25.00 ind=170.00 ind_tdim=5.00 guard=170.00 "
+	                          "oa_ex=0.00 skip=0.00 bvh=8.00)"),
+	          std::string::npos)
+	    << lines.arch;
+	EXPECT_NE(lines.arch.find("barriers_all=600.00"), std::string::npos) << lines.arch;
+	EXPECT_NE(lines.arch.find("draw_ns(n=4 prog=1000 rt=500 pipe=300 bind=2000 commit=1500 rec=700)"),
+	          std::string::npos)
+	    << lines.arch;
+	EXPECT_NE(lines.arch.find("disp_ns(n=5 prog=1000 pipe=300 bind=2000 guard=1500 commit=1200 rec=1800)"),
+	          std::string::npos)
+	    << lines.arch;
+}
+
+TEST(FrameCost, RecordSubmitAndRenderWaitReasonAccumulateCounters) {
+	using namespace Common::FrameCost;
+	const auto before = SnapshotCounters();
+	{
+		ScopedWaitReason   wait_reason(WaitReason::StreamWrap);
+		ScopedSubmitReason submit_reason(SubmitReason::Flip);
+		RecordRenderWaitReason(12345);
+		RecordSubmit();
+	}
+	const auto after = SnapshotCounters();
+	EXPECT_EQ(after[static_cast<size_t>(Counter::WaitStreamCalls)] -
+	              before[static_cast<size_t>(Counter::WaitStreamCalls)],
+	          1u);
+	EXPECT_EQ(after[static_cast<size_t>(Counter::WaitStreamNs)] -
+	              before[static_cast<size_t>(Counter::WaitStreamNs)],
+	          12345u);
+	EXPECT_EQ(after[static_cast<size_t>(Counter::SubmitsTotal)] -
+	              before[static_cast<size_t>(Counter::SubmitsTotal)],
+	          1u);
+	EXPECT_EQ(after[static_cast<size_t>(Counter::SubmitFlip)] -
+	              before[static_cast<size_t>(Counter::SubmitFlip)],
+	          1u);
 }
 
 } // namespace
