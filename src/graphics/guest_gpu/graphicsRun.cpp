@@ -529,6 +529,7 @@ void GuestGpu::ThreadRun(void* data) {
 	EXIT_IF(gpu == nullptr);
 	KYTY_PROFILER_THREAD("Thread_Gpu");
 	Common::FaultReport::SetThreadTag("render", "gpu-render");
+	Common::FrameCost::MarkRenderThread(true);
 	g_gpu_state = gpu;
 	if (const auto processor = Common::Thread::ReserveCoreForCurrentThread(); processor >= 0) {
 		Log::WriteToConsoleAndLog(fmt::format(
@@ -643,6 +644,7 @@ void GuestGpu::ThreadRun(void* data) {
 		if (should_stop) {
 			gpu->m_gfx_cp->BufferWait();
 			g_gpu_state = nullptr;
+			Common::FrameCost::MarkRenderThread(false);
 			return;
 		}
 		if (run_prefetch) {
@@ -735,6 +737,8 @@ bool GuestGpu::Process(Submission& submission) {
 			    cp.Process(submission.execution, submission.commands) == Pm4ProcessResult::Complete;
 			cp.SetSubmitter(nullptr);
 			if (submission.execution.MadeProgress()) {
+				Common::FrameCost::ScopedSubmitReason submit_reason(
+				    Common::FrameCost::SubmitReason::Slice);
 				cp.BufferFlush();
 			}
 			break;
@@ -744,7 +748,11 @@ bool GuestGpu::Process(Submission& submission) {
 		case SubmissionType::SuspendPoint:
 			// Age caches at the frame boundary, not once per command list.
 			m_renderer.RunGarbageCollector();
-			cp.BufferFlush();
+			{
+				Common::FrameCost::ScopedSubmitReason submit_reason(
+				    Common::FrameCost::SubmitReason::Suspend);
+				cp.BufferFlush();
+			}
 			cp.Reset();
 			// Like completion labels, the point has executed once the CP has submitted every
 			// packet before it, without waiting for the host GPU.
@@ -1188,6 +1196,8 @@ void CommandProcessor::CountDraw() {
 		return;
 	}
 	if (m_draws == m_flush_draws) {
+		Common::FrameCost::ScopedSubmitReason submit_reason(
+		    Common::FrameCost::SubmitReason::FlushDraws);
 		GetScheduler().Flush();
 		m_draws = 0;
 	}
@@ -1196,6 +1206,7 @@ void CommandProcessor::CountDraw() {
 
 void CommandProcessor::DrawIndex(DrawIndexArgs args) {
 	CountDraw();
+	Common::FrameCost::Add(Common::FrameCost::Counter::DrawsDirect);
 	args.index_type_and_size = m_index_type_and_size;
 	if (args.instance_count == 0) {
 		args.instance_count = NumInstances();
@@ -1272,6 +1283,7 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 	                            ? max_count_or_count
 	                            : std::min(uint32_t {*count_addr}, max_count_or_count);
 	if (draw_count == 0) {
+		Common::FrameCost::Add(Common::FrameCost::Counter::DrawsIndirectZero);
 		return;
 	}
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::IndirectDraws, draw_count);
@@ -1286,6 +1298,9 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 	DrawIndirectArgs records {args_addr, draw_count, stride_in_bytes};
 	if (IndirectDrawOffsets(registers, records.offsets)) {
 		if (!indexed && executor.DrawAuto(CurrentBuffer(), {.indirect = records})) {
+			Common::FrameCost::Add(Common::FrameCost::Counter::DrawsIndirectGpuPackets);
+			Common::FrameCost::Add(Common::FrameCost::Counter::DrawsIndirectGpuSubdraws,
+			                       draw_count);
 			return;
 		}
 		if (indexed && m_index_buffer_size != 0 &&
@@ -1293,10 +1308,15 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 		                                         .index_addr          = IndexAddress(0),
 		                                         .index_type_and_size = m_index_type_and_size,
 		                                         .indirect            = records})) {
+			Common::FrameCost::Add(Common::FrameCost::Counter::DrawsIndirectGpuPackets);
+			Common::FrameCost::Add(Common::FrameCost::Counter::DrawsIndirectGpuSubdraws,
+			                       draw_count);
 			return;
 		}
 	}
 
+	Common::FrameCost::Add(Common::FrameCost::Counter::DrawsIndirectCpuPackets);
+	Common::FrameCost::Add(Common::FrameCost::Counter::DrawsIndirectCpuSubdraws, draw_count);
 	const uint32_t max_indices = m_index_buffer_size != 0 ? m_index_buffer_size : UINT32_MAX;
 	for (uint32_t i = 0; i < draw_count; i++) {
 		const auto addr = args_addr + static_cast<uint64_t>(i) * stride_in_bytes;
@@ -1327,6 +1347,9 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 void CommandProcessor::DispatchDirect(uint32_t thread_group_x, uint32_t thread_group_y,
                                       uint32_t thread_group_z, uint32_t mode,
                                       const uint32_t* packet) {
+	if (t_dispatch_origin == nullptr) {
+		Common::FrameCost::Add(Common::FrameCost::Counter::DispatchesDirect);
+	}
 	DispatchOrigin origin {};
 	origin.packet    = packet;
 	origin.submitter = m_submitter;
@@ -1353,6 +1376,7 @@ void CommandProcessor::ProcessPssr(const Pssr::Request& request) {
 void CommandProcessor::DispatchIndirect(uint64_t args_addr, uint32_t mode, const uint32_t* packet) {
 	EXIT_NOT_IMPLEMENTED(args_addr == 0 || (args_addr & 3u) != 0);
 	if ((mode & Pm4::COMPUTE_DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS) != 0) {
+		Common::FrameCost::Add(Common::FrameCost::Counter::DispatchesIndirectThreadDim);
 		// The thread counts are read here, on the command processor, from guest memory (a GPU
 		// written range is downloaded first). The dispatch keeps the argument address: its report
 		// says `source=indirect-threads`, and a skipped producer of the counts skips it.
@@ -1370,6 +1394,7 @@ void CommandProcessor::DispatchIndirect(uint64_t args_addr, uint32_t mode, const
 		DispatchDirect(args.x, args.y, args.z, mode, packet);
 		return;
 	}
+	Common::FrameCost::Add(Common::FrameCost::Counter::DispatchesIndirect);
 	DispatchOrigin origin {};
 	origin.packet    = packet;
 	origin.submitter = m_submitter;
@@ -1387,6 +1412,7 @@ void CommandProcessor::DispatchIndirect(uint64_t args_addr, uint32_t mode, const
 
 void CommandProcessor::DrawIndexAuto(DrawAutoArgs args) {
 	CountDraw();
+	Common::FrameCost::Add(Common::FrameCost::Counter::DrawsDirect);
 	if (args.instance_count == 0) {
 		args.instance_count = NumInstances();
 	}
@@ -1394,7 +1420,11 @@ void CommandProcessor::DrawIndexAuto(DrawAutoArgs args) {
 }
 
 void CommandProcessor::WaitFlipDone(const uint64_t* label) {
-	BufferFlush();
+	{
+		Common::FrameCost::ScopedSubmitReason submit_reason(
+		    Common::FrameCost::SubmitReason::Flip);
+		BufferFlush();
+	}
 
 	m_renderer.GetVideoOut().WaitFlipDone(label);
 }
@@ -1458,7 +1488,11 @@ void CommandProcessor::ReleaseMem(uint32_t data_sel, uint32_t interrupt_selector
 		case 3: data = Sync::ReadReferenceClock(); [[fallthrough]];
 		case 2: write_label(&data, sizeof(data)); break;
 		case 5: {
-			GetScheduler().Finish();
+			{
+				Common::FrameCost::ScopedWaitReason wait_reason(
+				    Common::FrameCost::WaitReason::Gds);
+				GetScheduler().Finish();
+			}
 			const auto gds = static_cast<uint32_t>(data);
 			Sync::ReadGds(*m_renderer.GetBufferCache().GetGdsBuffer(),
 			              static_cast<uint32_t*>(address), gds & 0xffffu, gds >> 16u);
@@ -1480,6 +1514,8 @@ void CommandProcessor::WriteBackImages() {
 	// GPU-written images are copied back without holding any signal: a held signal exposes the host
 	// GPU's speed. Guest accesses to them wait for the copies.
 	if (m_renderer.GetTextureCache().WriteBackImages()) {
+		Common::FrameCost::ScopedSubmitReason submit_reason(
+		    Common::FrameCost::SubmitReason::WriteBack);
 		GetScheduler().Flush();
 	}
 }
@@ -1572,6 +1608,7 @@ void CommandProcessor::Flip(int handle, int index, int flip_mode, int64_t flip_a
 	auto  request = Sync::PrepareVideoOutFlip(command, handle, index, flip_mode, flip_arg);
 	GetScheduler().DeferPriorityOperation(
 	    [&renderer = m_renderer, request] { renderer.GetVideoOut().CompleteFlip(request); });
+	Common::FrameCost::ScopedSubmitReason submit_reason(Common::FrameCost::SubmitReason::Flip);
 	GetScheduler().Flush();
 }
 
@@ -1580,6 +1617,7 @@ void CommandProcessor::PrepareCpuFlip(uint64_t request_id) {
 	m_renderer.GetVideoOut().PrepareFlip(request_id, command);
 	GetScheduler().DeferPriorityOperation(
 	    [this, request_id] { m_renderer.GetVideoOut().CompleteFlip(request_id); });
+	Common::FrameCost::ScopedSubmitReason submit_reason(Common::FrameCost::SubmitReason::Flip);
 	GetScheduler().Flush();
 }
 
