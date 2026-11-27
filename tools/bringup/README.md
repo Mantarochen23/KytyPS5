@@ -1,182 +1,228 @@
-# bringup branch: working notes
+# Bring-up run and triage
 
-Fork of KytyPS5 for bring-up work on Linux with AMD RDNA4 / RADV.
-This file describes the run and triage tools and how the branch is organised.
+## What this is
 
-## Branches
+This fork brings one program up on Linux with an AMD RDNA4 GPU and RADV. It is unfinished.
+A run usually stops in a new place. The point of a run is to learn where and why.
 
-| Branch | What |
-|---|---|
-| `main` | upstream `KytyPS5/KytyPS5` main, untouched. Update with `git fetch origin && git merge --ff-only origin/main`. |
-| `bringup` | integration branch = `main` + the commits below, in order. Rebase onto `main` after an upstream update. |
-| `perf/amd-linux` | older note-only branch, not used by this work. |
+`run.sh` starts one run in a closed sandbox and writes a log.
+`triage.py` turns that log into a short summary.
+Send the summary, not the log and not the program files.
 
-Commits on `bringup` are kept one topic each, so a single one can be offered upstream:
+## Build on Linux
 
-1. `bringup: import community bring-up patch` - a community patch posted on the upstream tracker, unchanged.
-   Contains two shortcuts that hide errors rather than fix them: an oversized storage buffer is
-   clamped to `maxStorageBufferRange - 256`, and an unknown sampler descriptor reuses the last
-   resolved one. Both print nothing useful today; treat pictures as suspect until they are replaced.
-2. `build: enable C++ exceptions` - Linux build fix for (1).
-3. `shader: decode and translate V_CMP_NLE_F16` - upstreamable as is.
-4. `debug: --keep-going` and `tools/bringup` - this folder, the failure ledger, host backtrace.
-
-Tag `first-loading-screen-2026-11-26` = the build that first showed the loading screen.
-
-## Build (Bosie)
+Use a build with symbols. `Release` strips them and a backtrace becomes bare addresses.
 
     cmake -S . -B _Build/linux-debug -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
       -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DKYTY_BUILD_LAUNCHER=OFF
     cmake --build _Build/linux-debug --target kyty_emulator --parallel 12
 
-Use `RelWithDebInfo` for work: the `Release` configuration links with `--strip-all`, so its
-backtraces and profiles are bare addresses. `run.sh` defaults to `_Build/linux-debug`.
+Test binaries are not built by default. Build one by name, for example:
 
-## Run
+    cmake --build _Build/linux-debug --target common_tests --parallel 12
+    cmake --build _Build/linux-debug --target shader_corpus_tool --parallel 12
+    python3 -m unittest discover -s tools/bringup/tests
 
-    tools/bringup/run.sh <label>            # 180 s, sandboxed, --keep-going, no controller
-    KYTY_SECONDS=600 KYTY_PAD=host tools/bringup/run.sh play
+`run.sh` uses `_Build/linux-debug` unless `KYTY_BUILD` says otherwise.
 
-Each run gets a folder `../runs/<utc>-<label>/`: `run.txt` (commit, options, exit code),
-`kyty.log`, `guest-printf.log`, `triage.txt`, `triage.json`, `ShaderFailures/`.
-The script refuses to start while another sandboxed run holds the GPU.
+## One run
 
-## Debug facilities
+    tools/bringup/run.sh <label>
+    KYTY_SECONDS=600 KYTY_PAD=host tools/bringup/run.sh <label> -- --loop-guard 0
 
-- `--keep-going`: a shader that fails anywhere between decode and module creation (any `EXIT`,
-  `EXIT_IF`, `EXIT_NOT_IMPLEMENTED` on that path, or a thrown error) is recorded and every draw or
-  dispatch using it is skipped. Log line `!!! SHADER SKIP (keep-going) shader=.. stage=.. at
-  file:line: reason`; later uses are counted in `!!! SHADER SKIP USES` lines (powers of two).
-  Ledger: `_ShaderFailures/failures.jsonl` plus the shader binary `<stage>_<hash>.bin` (game
-  data: never leaves the machine).
-  Mechanism: `common/recoverable.h` (`RecoverableScope`), used in `PipelineCache::GetProgram`.
-  It can be put around other subsystems the same way, but only where a half-done operation can be
-  thrown away.
-- Fatal errors outside such a scope print `--- Host backtrace ---` (resolve with
-  `addr2line -Cfe kyty_emulator <offset>`); `KYTY_FATAL_ABORT=1` leaves a core dump.
-- GPU hang / `VK_ERROR_DEVICE_LOST` triage: `VK_EXT_device_fault` and `VK_AMD_buffer_marker` are
-  enabled automatically when supported. Every submit records draw/dispatch breadcrumbs with shader
-  hashes (plus `VK_EXT_debug_utils` command labels when `RADV_DEBUG` or `--graphics-debug-dump` is
-  active). On `VK_ERROR_DEVICE_LOST` (`vkQueueSubmit`, `vkQueuePresentKHR`, `vkAcquireNextImageKHR`,
-  `vkWaitSemaphores`, `vkGetSemaphoreCounterValue`, or `waitIdle`), the emulator queries
-  `VK_EXT_device_fault` and prints `=== GPU DEVICE LOST TRIAGE ===` with fault addresses/vendor
-  codes, GPU marker progress, recent/in-flight submits, suspect ops, shader hashes, and a
-  `bisect_hint` line. `RADV_DEBUG=hang tools/bringup/run.sh <label>` also preserves RADV's
-  `radv_dumps_*` folder in `<run>/radv/`.
-- `--skip-shaders <hashes|@file>` / `KYTY_SKIP_SHADERS=<comma-separated hex hashes>`: skip draws
-  and dispatches matching any listed shader hash (with or without `--keep-going`) to bisect a
-  hanging shader in a few runs. Skipped uses are logged as `!!! SHADER SKIP (skip-shaders)` and
-  summarized by `triage.py`.
-- Existing upstream switches worth knowing: `--shader-log-direction File`, `--graphics-debug-dump`
-  (dumps every shader and IR), `--vulkan-validation`, `--gpu-assisted-validation`,
-  `--command-buffer-dump`, `--rd` (RenderDoc), `--profile` (Tracy), `--perf-overlay`.
+The first argument is a short label. Anything after `--` goes to the emulator.
+The run stops after 180 seconds by default.
+The sandbox has no network but loopback, no host user folders, and no controller unless asked for.
+It uses the Wayland socket and the GPU nodes. It binds the state and run folders as writable.
+If another sandboxed run holds the GPU, `run.sh` refuses to start.
+Machine-local settings are read from `<repo>/../bringup-local.env` when that file exists.
+
+Every variable is optional except `KYTY_GAME`:
+
+| Variable | What it does |
+|---|---|
+| `KYTY_GAME` | Folder with the program to run. Required. |
+| `KYTY_BUILD` | Build folder. Default `<repo>/_Build/linux-debug`. |
+| `KYTY_RUNS` | Parent folder for run folders. Default `<repo>/../runs`. |
+| `KYTY_STATE` | Persistent state: stores, saves, shader failures. Default `<repo>/../state`. |
+| `KYTY_SECONDS` | Stop after this many seconds. Default 180. `0` runs until the program exits. |
+| `KYTY_PAD` | `host` passes controllers in. Default `none`; a drifting stick can write thousands of log lines a second. |
+| `KYTY_PAD_VENDORS` | USB vendor ids allowed through when `KYTY_PAD=host`. |
+| `KYTY_KEEP_GOING` | `0` turns off `--keep-going`; the first shader failure is then fatal. Default `1`. |
+| `KYTY_FATAL_ABORT` | `1` aborts on a fatal error so a core is kept. Large. |
+| `KYTY_AUDIO` | `none` disables sound. Default `host`, which passes the sound server socket in. |
+| `KYTY_AUTO_CROSS` | Press a button for 0.15 s every 2 s for this many seconds from the first pad read. |
+| `KYTY_PROFILE_AT` | Start `perf` at this second, or at `stall` when frames stop. |
+| `KYTY_PROFILE_SECONDS` | Length of that profile. Default 20. |
+| `KYTY_SHADER_CACHE` | `0` turns off `--shader-cache`. Default `1`, so later runs start from stored shaders. |
+| `KYTY_TRACE` | `0` turns off `--trace-calls`. Default `1`. |
+| `KYTY_UMR` | `1` dumps GPU rings and waves when frames stop. Needs root access. |
+| `KYTY_SKIP_SHADERS` | Comma-separated shader hashes to skip, for bisecting a hang. |
+| `RADV_DEBUG` | Driver flags. With `hang`, driver dump folders are kept in the run folder. |
+| `KYTY_FORCE` | `1` starts even if another sandboxed run is live. |
+| `XDG_RUNTIME_DIR` | Runtime folder that holds the Wayland socket. |
+| `WAYLAND_DISPLAY` | Wayland socket name. |
+
+Each run lands in `<KYTY_RUNS>/<UTC>-<label>/`:
+
+- `run.txt`: label, times, commit, options, emulator hash, kernel and driver versions, exit code.
+  Exit code 124 means the time limit stopped it. 65 means a fatal error.
+- `kyty.log`: the full log, with `@@T <seconds>` markers added once per second.
+- `triage.txt` and `triage.json`: the summary described below.
+- `ShaderFailures/`: a copy of the accumulated failure ledger, when it exists.
+- `kernel-gpu.txt` and `gpu-devcoredump.txt`: kernel messages, when GPU timeouts were seen.
+- `radv/`, `perf.*`, `umr-*.txt`: only when those options were used.
+
+## Debug options
+
+By default `run.sh` adds `--printf-direction Console`, `--keep-going`, `--trace-calls` and
+`--shader-cache`. `KYTY_KEEP_GOING=0`, `KYTY_TRACE=0` and `KYTY_SHADER_CACHE=0` remove them.
+All the options below exist in `kyty_emulator --help`. They are off unless stated.
+
+- `--auto-cross <seconds>`: press a button at intervals for unattended runs.
+- `--trace-calls[=<lib[,lib]>]`: log library calls, or every call with arguments for named libraries.
+- `--keep-going`: skip draws and dispatches whose shader fails, record them, keep running.
+- `--skip-shaders <hashes|@file>`: skip draws and dispatches for listed hashes; repeatable.
+- `--gpu-fault-query`: query the driver for fault details after a device loss.
+- `--bda-table-validate`: check every page-table write against live buffers.
+- `--hang-dump-wait <seconds>`: wait this long for the driver hang dump after a loss. Default 60.
+- `--buffer-probe <hashes>`: compare guest buffer bytes with the host copy before each dispatch.
+- `--loop-guard <n>`: after n loop exits an invocation leaves its loops and the loop is logged.
+  Default: compute shaders only, n = 1048576. `0` is off.
+- `--guest-fault-park`: park, instead of ending the run, a guest thread with an unresolved fault.
+- `--guest-fault-report-only`: write guest code bytes around such a fault into the run folder.
+- `--guest-clock-hold-on-stall <ms>`: hold the guest clock during a shader stall. Default 0.
+- `--dump-registered-shaders <dir>`: copy distinct shaders and their metadata out through a bounded queue.
+- `--async-compute-wait-ms <n>`: cap how long a dispatch waits for its shader. `0` waits for ever.
+- `--shader-cache`: keep shaders and pipelines between runs.
+- `--shader-cache-keep`: keep usable records from a mismatched store.
+- `--shader-cache-retry-failed`: retry shaders that were cached as failures.
+- `--no-async-shader-compile`: build shaders on the render thread instead of workers.
+- `--vulkan-validation`: turn on Vulkan validation layers.
+- `--gpu-assisted-validation`: bounds-check shader accesses on the GPU. Very slow; implies validation.
+- `--shader-validation`: turn on shader validation.
+- `--command-buffer-dump`: dump command buffers; `--command-buffer-dump-folder <path>` sets the folder.
+- `--graphics-debug-dump`: dump graphics debug data, including shaders and IR.
+- `--shader-log-direction <value>`: `Silent`, `Console` or `File`; `--shader-log-folder <path>` sets the folder.
+- `--printf-direction <value>`: `Silent`, `Console` or `File` for guest prints.
+- `--printf-output-file <path>`: where guest prints go when the direction is `File`.
+- `--profile`: start the Tracy profiler.
+- `--rd`: open a RenderDoc capture.
+- `--perf-overlay`: show the on-screen performance panel.
+- `--spirv-debug-printf`: enable debug prints from emitted modules.
+- `--spirv-compact`: run conservative cleanup after module emission.
+- `--async-pump-budget-ms <ms>`: render-thread time per step spent applying finished jobs. Default 2.
+- `--async-workers <n>`: shader worker threads. Default 0, meaning cores minus four, at least two.
+- `--async-speculative-modules <0|1|2>`: build modules for unrequested translations. Default 1.
+- `--render-stall-report-s <n>`: report what the render thread does after n seconds without a frame. Default 5.
+- `--async-ir-budget-mb <n>`: cap memory held by translations nobody has used. Default 2048.
+- `--async-lookahead <0|1>`: read compute user data ahead of the dispatch. Default 1.
+- `--warmup-budget-s <n>`: start the program after n seconds of store loading. Default 0.
+- `--shader-key-index`: persist a hash to key index in the store. Default off.
+- `--disable-port <names>`: turn off named ported fixes, or all of them.
+- `--mem-limit-gb <n>`: print the memory table and drop caches above n GB; stop if still over after 10 s.
+- `--heap-tune <n>`: cap allocator arenas, trim freed memory and use mapped blocks for large ones.
+- `--driver-cache-cap-mb <n>`: ignore driver cache files larger than n MB.
+- `--fault-storm-faults <n>`: stop watching a page after n faults in the window. `0` is off.
+- `--fault-storm-frames <n>`: window for the fault storm rule. Default 8.
+- `--fault-storm-hold <n>`: frames a marked page stays unwatched. Default 60.
+- `--max-spirv-words <n>`: refuse modules larger than n words. Default 2000000.
+- `--materialize-memo-entries <n>`: remembered resource plans per shader. Default 1.
+- `--materialize-memo-stamps <n>`: watch pages read by a remembered plan. `0` is off.
+
+## Log markers
+
+`@@T` lines carry the seconds since the start. Every other line below comes from the code.
+Read them in the log or in the triage sections that quote them.
+
+- `[frame]`: five-second window of per-frame averages. `frames` shows progress; `wait_gpu`,
+  `wait_guest` and `materialize` show where time goes. The `arch` line splits waits and call counts.
+  `WARNING module-misses` means lookups fail after the store load.
+- `[fault]`: five-second rates for write watches. Read `handler` and `lock-wait` as cost, and
+  `top 64K blocks` as the hot pages. A high handler cost means the watch path is the problem.
+- `[mem]`: process RSS, swap, peak and the sum counted by each owner. `unaccounted` is the part no
+  owner explains. `--mem-limit-gb` prints the table, then stops if the total stays high.
+- `[pipeline-create]`: driver pipeline builds. Read `max` and the `>=10s` bucket for slow builds;
+  `cache-hit` shows how many needed no driver build.
+- `[store]`: store load, per-miss lines, `lookups`/`hit`/`distinct-miss`, and `written`/`failed`.
+  Many distinct misses mean stored work is not being reused.
+- `[dispatch]`: a compute dispatch that was limited or refused. It gives the hash, arguments, group
+  counts and action. The `origin` and submitter lines show where the command came from.
+- `[loop-guard]`: an invocation used up its loop-exit budget. It names the shader, the loop and the
+  number of invocations that tripped it.
+- `[stall]`: no frame for a while. It names the render phase, shader and pending jobs, and says how
+  many guest threads are parked. The verdict's longest stall comes from here.
+- `[wait]`: a command queue is idle, running, suspended on a shader, or waiting on guest memory.
+  The memory form gives the address, compared value and poll count.
+- `[build]`: one shader build with translate, plan, emit, module, pipeline and wait times, module
+  size and `repeat=#`. `WARNING` names a module that grew too large.
+- `[park]`: a guest thread faulted again and was parked; the short line counts parked threads.
+- `[shader-reg]`: the registration ledger at exit. It lists registered and used shaders per stage and
+  the minimum lead time before first use.
+- `[prefetch]`: registration and prefetch counts, lookahead modules built against used, and skipped
+  dispatches. Low use means prefetch work was wasted.
+- `[buffer-probe]`: bytes that differ between guest memory and the copy the GPU reads. The summary
+  counts probed dispatches and mismatches.
+- `[module-index] BUG`: a module in a program was not found in the store. Expect repeated translations.
+- `[async]`: a budget was exceeded and unrequested translations were dropped.
+- `[warmup]`: how long store loading took and when the program was allowed to start.
+- `[bda-table-validate]`: a page-table invariant failed. It is fatal when the option is on.
+- `[bda-miss]`: an address was not found among live buffers.
+- `[clock-hold]`: the guest clock was held or restarted during a shader stall.
+- `[sync-build]`: the render thread built or linked a shader stage, with the reason it could not wait.
+- `[skip]`: a dispatch was skipped because its shader was late or its inputs tainted.
+- `[fault-code]`: guest code bytes around a fault were written, or could not be written.
+- `[fpenv]`: floating-point control state does not match what the caller expected.
+- `[fp-return]`: a library call returned a non-finite number.
+- `[ampr]`: an operation on an audio buffer, with its lifetime and history.
+- `[dispatch-src]`: where a dispatch came from in the guest library.
+- `[Vulkan]`: driver or validation messages.
+- `[Trophy]` and `[Splash]`: overlay, sound and image problems.
+- `[UDS]`: events posted through the user service.
+- `[PS5]`: one line of detected program configuration.
+- `[exit]`: what the process held when it ended and what was torn down.
+- `[file]`, `[dir ]`, `[ok]`, `[fail]`: folder listings and open results in call traces.
 
 ## Triage summary
 
-`run.sh` writes `triage.txt` and `triage.json` from one streaming pass over `kyty.log` (the real log is
-~2 GB, so the script reads bytes line by line and decodes as latin-1; nothing is buffered per line):
+`run.sh` runs this after every run. To run it again by hand:
 
     python3 tools/bringup/triage.py <run>/kyty.log --json <run>/triage.json > <run>/triage.txt
-    python3 -m unittest discover -s tools/bringup/tests
 
-`triage.txt` starts with a numbered `VERDICT`. It leads with the frame timeline after the loading phase:
-the first frame gap >= 20 s ends loading, and every frame presented after it is listed with its time and
-the gap before it. The rest of the verdict is the longest stall and what it waited on, the largest frame
-gap, the slowest shader, repeated translations, store distinct misses and the longest memory wait. Then
-comes a `FINDINGS` block with one section per subject:
+It reads the log once, line by line, so a large log is not held in memory.
+`triage.txt` starts with a numbered `VERDICT`. It leads with the frame timeline after loading,
+then the longest stall, largest frame gap, slowest shader, repeated translations, store misses and
+longest memory wait.
 
-- `TIMELINE`: frames per 10 s, last frame, every gap >= 3 s (start, length), the first gap >= 20 s and the
-  frames after it.
-- `STALLS`: for each no-frame gap, the render-thread phase sequence with seconds and the shader it waited
-  on per phase.
-- `QUEUES`: per queue, the longest single-shader suspension and which shader; every memory wait >= 5 s with
-  address, compare, wanted/seen values, polls and time.
-- `SHADERS`: translation outcomes per stage, the 20 slowest by summed phase `elapsed_ms` with their slowest
-  phase, shaders translated more than once, and render-thread build totals/worst from `Async STALL:`.
-  A "translated N times" entry counts real builds only (`outcome=emitted*`); `served from store` lines are
-  reported as outcomes but are not translations.
-- `ASYNC`: peak queued/waiting, min and median jobs/s while queued is non-zero, worst pump, final stages.
-- `BUILD RATE`: one row per 60 s window with modules finished (CS `translation end` emitted), the median
-  interval between them and the peak workers busy from `Async:`. A `serial build` is flagged when the median
-  interval is over 1 s with at most one worker busy for five consecutive windows. With `[build]` lines it
-  also totals translate/emit/module/pipeline ms and lists the ten largest builds by total. These lines are
-  optional; their absence leaves only the summary.
-- `PARKED`: each `[park] thread .. parked for good` line as thread id, pc as module+offset and time, plus the
-  `[park] N guest threads parked` summaries.
-- `HOLES`: dispatch skips and failed stages grouped by failure text with digits normalised, with the count
-  of holes and of distinct shaders in each group.
-- `STORE`: cache load numbers, the last `[store]` line, `lookups` total/hit/distinct-miss (plus the
-  miss-key/miss-absent split), and `[store] miss #..` lines grouped by the field that differed.
-- `REJECTIONS`: failure classes as before, plus the count of `!!! SHADER SKIP` lines.
-- `LEDGER`: registered/used per stage and minimum lead time from `[shader-reg]`.
-- `RUN-ENDER`: the fatal block, unchanged, last.
+`FINDINGS` then has one section per subject:
 
-A section with no source lines prints `no data`, not zeros. The same numbers are in `triage.json` under
-`verdict` and `findings`. Times are the `@@T` seconds in the run. Parsing is defensive: a line that cannot
-be parsed is skipped (counted as `parse_errors` in the JSON), and each section is isolated so a failure
-prints `section failed: <error>` in that section while the others still appear; the exit code stays 0.
-`tools/bringup/tests/` holds hand-written snippets per section, the absent case, the section-isolation and
-garbage-line cases, and a 2,000-line masked excerpt used as a regression run.
+- `TIMELINE`: frames per ten seconds, gaps, the first gap over 20 seconds and the frames after it.
+- `STALLS`: for each no-frame gap, the render phases with their times and shaders.
+- `QUEUES`: longest shader suspension per queue and memory waits of five seconds or more.
+- `SHADERS`: outcomes per stage, the 20 slowest, shaders built more than once, and render-thread build totals.
+- `ASYNC`: peak queued and waiting jobs, jobs per second, worst pump and final job stages.
+- `BUILD RATE`: one row per minute with modules finished, median interval and peak busy workers.
+  Five or more serial windows are flagged. With `[build]` lines it also totals phase time.
+- `PARKED`: threads parked at a program counter and the parked-thread summaries.
+- `FAULT COST`: fault rates, lock waits by caller and the hottest blocks.
+- `HOLES`: skipped dispatches and failed stages grouped by failure text, with shader counts.
+- `STORE`: store load lines, last store line, lookups, and misses grouped by the field that differed.
+- `REJECTIONS`: shader failure classes ranked by shaders and uses, plus skipped-shader counts.
+- `LEDGER`: registered and used per stage, and minimum lead time.
+- `FRAME COST`: every `[frame]` line with its time.
 
-## The loop
+After that come the summary lines: log size, shaders seen, new shaders per ten seconds, flip waits,
+failure classes, other `!!!` lines, traced calls, unresolved stubs, device-lost triage and driver
+hang dumps. `[RUN-ENDER]` prints the fatal block, or says there is none.
 
-1. `tools/bringup/run.sh <label>`.
-2. Read `triage.txt`: the `VERDICT` first, then `FINDINGS` for the numbers behind it (frame gaps,
-   stalls, queues, shader timing, async pipeline, store, ledger) and the failure classes (one class =
-   one fix), ordered by shaders affected; the run-ender if the run died; new shaders per 10 s (still
-   climbing = more classes to come).
-3. Fix a class: prove the cause first (for an instruction, `llvm-mc --disassemble -triple=amdgcn
-   -mcpu=gfx1013`), add a case to `tests/ShaderRecompilerComputeTests.cpp`, one commit.
-4. Run again with the same state folder (warm pipeline cache) and compare `triage.json`.
+A section with no lines says `no data`. A line that cannot be parsed is skipped and counted as a
+parse error. Each section is isolated, so one bad section prints `section failed: ...` and the rest
+still appear. The same numbers are in `triage.json`.
 
-Known gap: the GPU test harness needs `robustStorageBufferAccessSizeAlignment == 1`, which RADV
-does not report, so the shader test cases cannot run on Bosie yet.
+## What to attach to an issue
 
-## Offline shader corpus
+Attach `triage.txt` and `run.txt`. They carry the verdict, the failure classes, the options and the
+exit code. That is enough to compare runs.
 
-Add `--dump-registered-shaders <dir>` to one emulator run to copy every distinct registration into
-`<dir>/<stage>_<hash>.bin` and append its metadata to `<dir>/index.jsonl`. The option is off by
-default. Registration only hands immutable copies to a bounded queue: a full or contended queue is
-counted as dropped in the shutdown ledger instead of stalling the registering thread.
-
-Build and translate the dump without starting the program:
-
-    cmake --build _Build/linux-debug --target shader_corpus_tool --parallel 12
-    _Build/linux-debug/shader_corpus_tool --dir <dump> --out <report> --jobs 12
-
-Optional filters are `--only <stage>`, `--limit <n>`, and `--timeout-ms <n>` (20 seconds by
-default). `--emit-spirv` also writes emitted modules under `<report>/spirv/`. Each shader runs in a
-separate child process; the parent bounds concurrency and kills only the timed-out child, so one
-crash or timeout cannot end the corpus run.
-
-`results.jsonl` is sorted by hash and contains the phase/pass timings, CFG size, wave size, SPIR-V
-size, and one of `emitted`, `needs-runtime:<input>`, `rejected:<class>`, `crashed`, or `timeout`.
-`summary.md` groups outcomes by stage, ranks rejection shapes with examples, lists the 30 slowest
-translations and their slowest passes, totals pass time, and counts compute shaders which need no
-runtime input. Graphics registrations normally need later pipeline state; fused stages also need
-their paired bytecode. Compute registrations include their creation-time stage registers, but a
-shader whose resource plan reads user-data values remains runtime-dependent.
-
-### First-use records and fidelity
-
-With the same `--dump-registered-shaders <dir>` option the run also writes, at the first use of each
-(stage, hash) whose resource plan exists, one line in `<dir>/use.jsonl` and one blob
-`<dir>/use_<stage>_<hash>.bin`: the user-data words, the raw stage input struct, the push window,
-fused back code, and every guest memory range the walker read while materializing (bounded to 16 MiB
-and 65,536 ranges per record; `memory_truncated` says so). The queue is bounded in count (128) and
-bytes (256 MiB), never blocks the render thread, and the shutdown ledger prints
-`use dump: written= dropped= queue_high_water= skipped:<reason>=<n>`. Programs with GPU-selected
-calls and stages whose input struct is not trivially copyable are counted as skipped.
-
-The tool attaches a record to its registration by (stage, hash) and replays it for compute and pixel
-shaders: it restores the stage struct (a size mismatch is `needs-runtime:input_layout`), serves the
-recorded memory to the walker, materializes, and emits SPIR-V (`source` is `use` in `results.jsonl`).
-Without a record the stage state is not known, so a resource tracking failure is reported as
-`needs-runtime:use_record` with the full text in `shape`, never as `rejected`; decode, CFG and
-unsupported-instruction failures do not depend on the inputs and stay `rejected`. The summary ranks
-the failure shapes with the hash masked. Image heap kinds are not replayed (`notes` flags such a
-shader).
-
-Fidelity: `--compare-log <run log>` reads the emulator's `translation end ... outcome=` lines and adds
-per stage how many shaders were emitted in both, only live, only in the tool and in neither, and the
-share of live-emitted shaders the tool also emitted.
+Never attach program files, logs, dumps, stored modules or shader hashes. Ask for a named number or
+a short line from the summary instead.
