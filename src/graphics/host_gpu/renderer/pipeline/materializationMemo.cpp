@@ -3,6 +3,7 @@
 #include <xxhash.h>
 
 #include <algorithm>
+#include <cstring>
 #include <utility>
 
 namespace Libs::Graphics {
@@ -52,6 +53,10 @@ WalkReadHashes::State WalkReadHashes::Find(uint64_t address, uint64_t size, uint
 	return found->second.unstable ? State::Unstable : State::Stable;
 }
 
+void HashStateDeleter::operator()(XXH3_state_s* state) const {
+	XXH3_freeState(state);
+}
+
 void MemoizedMaterialization::Configure(uint32_t entries, ReadStamps* stamps) {
 	m_capacity = std::max(entries, 1u);
 	m_stamps   = stamps;
@@ -61,40 +66,60 @@ void MemoizedMaterialization::Configure(uint32_t entries, ReadStamps* stamps) {
 void MemoizedMaterialization::Clear() {
 	m_entries.clear();
 	current = 0;
+	++m_generation;
+}
+
+std::shared_ptr<MemoizedMaterialization::Entry> MemoizedMaterialization::ShareCurrent() const {
+	if (current == 0) return {};
+	for (const auto& entry: m_entries) {
+		if (entry->serial == current) return entry;
+	}
+	return {};
+}
+
+uint64_t MemoizedMaterialization::ApproximateBytes(const Entry& entry_ref) {
+	const auto* entry = &entry_ref;
+	uint64_t bytes = sizeof(Entry);
+	bytes += (entry->user_data.capacity() + entry->workgroup_counts.capacity()) * sizeof(uint32_t);
+	bytes += entry->reads.capacity() * sizeof(Read) + entry->bytes.capacity();
+	bytes += entry->pages.capacity() * sizeof(PageStamp);
+	for (const auto& heap: entry->heap) {
+		bytes += sizeof(heap) + heap.kinds.capacity() * sizeof(ShaderRecompiler::IR::DescriptorValue);
+	}
+	const auto& r = entry->resources;
+	bytes += (r.buffers.capacity() + r.images.capacity() + r.samplers.capacity()) *
+	         sizeof(ShaderRecompiler::IR::DescriptorValue);
+	bytes += (r.flattened_srt.capacity() + r.user_data.capacity()) * sizeof(uint32_t);
+	bytes += r.specialization_reads.capacity() * sizeof(std::pair<uint64_t, uint64_t>);
+	const auto& s = entry->specialization;
+	bytes += s.buffers.capacity() * sizeof(s.buffers[0]) + s.images.capacity() * sizeof(s.images[0]) +
+	         s.samplers.capacity() * sizeof(s.samplers[0]);
+	return bytes;
 }
 
 uint64_t MemoizedMaterialization::ApproximateBytes() const {
 	uint64_t bytes = 0;
-	for (const auto& entry: m_entries) {
-		bytes += sizeof(Entry);
-		bytes += (entry->user_data.capacity() + entry->workgroup_counts.capacity()) * sizeof(uint32_t);
-		bytes += entry->reads.capacity() * sizeof(Read);
-		bytes += entry->pages.capacity() * sizeof(PageStamp);
-		for (const auto& heap: entry->heap) {
-			bytes += sizeof(heap) + heap.kinds.capacity() * sizeof(ShaderRecompiler::IR::DescriptorValue);
-		}
-		const auto& r = entry->resources;
-		bytes += (r.buffers.capacity() + r.images.capacity() + r.samplers.capacity()) *
-		         sizeof(ShaderRecompiler::IR::DescriptorValue);
-		bytes += (r.flattened_srt.capacity() + r.user_data.capacity()) * sizeof(uint32_t);
-		bytes += r.specialization_reads.capacity() * sizeof(std::pair<uint64_t, uint64_t>);
-		const auto& s = entry->specialization;
-		bytes += s.buffers.capacity() * sizeof(s.buffers[0]) + s.images.capacity() * sizeof(s.images[0]) +
-		         s.samplers.capacity() * sizeof(s.samplers[0]);
-	}
+	for (const auto& entry: m_entries) bytes += ApproximateBytes(*entry);
 	return bytes;
 }
 
 bool MemoizedMaterialization::KeyMatches(const Entry&                                  entry,
                                          const ShaderRecompiler::IR::SrtRuntime& runtime,
-                                         MemoOutcome&                            why) const {
+                                         MemoOutcome& why, size_t user_data_words) const {
+	const auto user_data_equal = [&] {
+		if (user_data_words == AllUserData) return std::ranges::equal(entry.user_data, runtime.user_data);
+		return entry.user_data.size() == runtime.user_data.size() &&
+		       user_data_words <= entry.user_data.size() &&
+		       std::equal(entry.user_data.begin(), entry.user_data.begin() + user_data_words,
+		                  runtime.user_data.begin());
+	};
 	if (entry.shader_base != runtime.shader_base) {
 		why = MemoOutcome::ShaderBase;
 	} else if (entry.indirect_args_address != runtime.indirect_args_address) {
 		why = MemoOutcome::IndirectArgs;
 	} else if (entry.legacy_hash != runtime.legacy_hash) {
 		why = MemoOutcome::LegacyHash;
-	} else if (!std::ranges::equal(entry.user_data, runtime.user_data)) {
+	} else if (!user_data_equal()) {
 		why = MemoOutcome::UserData;
 	} else if (!std::ranges::equal(entry.workgroup_counts, runtime.workgroup_counts)) {
 		why = MemoOutcome::WorkgroupCounts;
@@ -114,9 +139,27 @@ bool MemoizedMaterialization::HashRange(const ShaderRecompiler::IR::SrtRuntime& 
 	    size / sizeof(uint32_t) > m_scratch.max_size()) {
 		return false;
 	}
-	m_scratch.resize(static_cast<size_t>(size / sizeof(uint32_t)));
-	if (!runtime.read_specialization_memory(runtime.userdata, address, m_scratch)) return false;
-	hash = XXH3_64bits(m_scratch.data(), static_cast<size_t>(size));
+	constexpr uint64_t Chunk = 32u << 10u;
+	if (size <= Chunk) {
+		m_scratch.resize(static_cast<size_t>(size / sizeof(uint32_t)));
+		if (!runtime.read_specialization_memory(runtime.userdata, address, m_scratch)) return false;
+		hash = XXH3_64bits(m_scratch.data(), static_cast<size_t>(size));
+		return true;
+	}
+	// A large table is read and hashed in pieces that stay in the cache; the streamed hash equals
+	// the one-shot hash of the same bytes.
+	m_scratch.resize(static_cast<size_t>(Chunk / sizeof(uint32_t)));
+	if (m_hash_state == nullptr) m_hash_state.reset(XXH3_createState());
+	XXH3_state_t* state = m_hash_state.get();
+	if (state == nullptr) return false;
+	XXH3_64bits_reset(state);
+	for (uint64_t done = 0; done < size; done += Chunk) {
+		const auto piece = std::min(Chunk, size - done);
+		const std::span<uint32_t> words(m_scratch.data(), static_cast<size_t>(piece / sizeof(uint32_t)));
+		if (!runtime.read_specialization_memory(runtime.userdata, address + done, words)) return false;
+		XXH3_64bits_update(state, words.data(), static_cast<size_t>(piece));
+	}
+	hash = XXH3_64bits_digest(state);
 	return true;
 }
 
@@ -140,14 +183,32 @@ bool MemoizedMaterialization::ValidateReads(Entry&                              
 			retracked = m_stamps->Track(read.address, read.size, fresh) &&
 			            fresh.size() == read.page_count;
 		}
-		uint64_t hash = 0;
-		if (!HashRange(runtime, read.address, read.size, hash)) {
-			why = MemoOutcome::Unreadable;
-			return false;
+		bool same = false;
+		if (read.has_bytes) {
+			// Small: the bytes themselves decide, no hash.
+			m_scratch.resize(static_cast<size_t>(read.size / sizeof(uint32_t)));
+			if (!runtime.read_specialization_memory(runtime.userdata, read.address, m_scratch)) {
+				why = MemoOutcome::Unreadable;
+				return false;
+			}
+			same = std::memcmp(m_scratch.data(), entry.bytes.data() + read.byte_offset,
+			                   static_cast<size_t>(read.size)) == 0;
+			++stats.ranges_small;
+		} else {
+			uint64_t hash = 0;
+			if (!HashRange(runtime, read.address, read.size, hash)) {
+				why = MemoOutcome::Unreadable;
+				return false;
+			}
+			same = hash == read.hash;
+			if (read.size != 0u) {
+				++stats.ranges_large;
+				stats.bytes_large += read.size;
+			}
 		}
 		++stats.ranges_compared;
 		stats.bytes_compared += read.size;
-		if (hash != read.hash) {
+		if (!same) {
 			why = MemoOutcome::RangeChanged;
 			return false;
 		}
@@ -170,6 +231,21 @@ bool MemoizedMaterialization::ReplayHeap(const Entry&                           
 			return false;
 		}
 	}
+	return true;
+}
+
+bool MemoizedMaterialization::Revalidate(Entry& entry, const ShaderRecompiler::IR::SrtRuntime& runtime,
+                                         size_t user_data_words, MemoOutcome& outcome,
+                                         MemoLookupStats& stats) {
+	outcome = MemoOutcome::Hit;
+	if (!KeyMatches(entry, runtime, outcome, user_data_words)) return false;
+	++stats.entries_tried;
+	if (!ValidateReads(entry, runtime, outcome, stats)) return false;
+	if (!ReplayHeap(entry, runtime)) {
+		outcome = MemoOutcome::HeapChanged;
+		return false;
+	}
+	entry.used = ++m_tick;
 	return true;
 }
 
@@ -231,7 +307,7 @@ MemoizedMaterialization::Entry* MemoizedMaterialization::Store(
 	std::ranges::sort(ranges);
 	ranges.erase(std::ranges::unique(ranges).begin(), ranges.end());
 
-	auto fresh                   = std::make_unique<Entry>();
+	auto fresh                   = std::make_shared<Entry>();
 	fresh->user_data.assign(runtime.user_data.begin(), runtime.user_data.end());
 	fresh->workgroup_counts.assign(runtime.workgroup_counts.begin(), runtime.workgroup_counts.end());
 	fresh->shader_base           = runtime.shader_base;
@@ -248,6 +324,13 @@ MemoizedMaterialization::Entry* MemoizedMaterialization::Store(
 			                               : 0u;
 		}
 		if (!HashRange(runtime, address, size, read.hash)) return nullptr;
+		if (size != 0u && size <= SmallRangeBytes) {
+			// HashRange left the bytes in the scratch buffer.
+			read.has_bytes   = true;
+			read.byte_offset = static_cast<uint32_t>(fresh->bytes.size());
+			const auto* data = reinterpret_cast<const uint8_t*>(m_scratch.data());
+			fresh->bytes.insert(fresh->bytes.end(), data, data + size);
+		}
 		if (walk != nullptr) {
 			// The range is armed now. If it holds other bytes than the walk read, a write landed
 			// in between and the snapshot describes the older bytes: keep no entry for it.

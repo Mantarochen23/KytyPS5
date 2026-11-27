@@ -16,6 +16,7 @@
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/guest_gpu/pm4.h"
 #include "graphics/host_gpu/renderer/debug.h"
+#include "graphics/host_gpu/renderer/pipeline/callSiteTable.h"
 #include "graphics/host_gpu/renderer/pipeline/renderActivity.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
@@ -1103,8 +1104,11 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 		if (!g_cp_op_keeps_draw_window[opcode]) {
 			m_renderer.GetBufferCache().EndDrawWindow();
 		}
+		// The shader lookups this packet makes are keyed by where it is (see CallSiteTable).
+		g_current_call_site = reinterpret_cast<uint64_t>(packet);
 		const auto packet_dw =
 		    handler(*this, packet_header & ~1u, packet + 1, remaining_dw, total_dw) + 1;
+		g_current_call_site = 0;
 		EXIT_IF(packet_dw > remaining_dw);
 		if (execution.m_suspended) {
 			return;

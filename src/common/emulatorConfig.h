@@ -228,6 +228,8 @@ struct ConfigOptions {
 	// target that was not seen redrawn is skipped while its shaders build, like a draw into a
 	// redrawn one, instead of building them on the render thread. 0 = never.
 	uint32_t                 defer_new_targets_on_stall_ms = 0;
+	// --enable-port: names from common/ports.h that are off by default and turned on.
+	std::vector<std::string> enabled_ports;
 };
 
 void Load(const ConfigOptions& cfg);

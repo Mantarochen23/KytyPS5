@@ -62,6 +62,24 @@ enum class Counter : uint8_t {
 	MemoRangesTracked,
 	MemoRangesUntracked,
 	MemoWalkChanged,
+	// Per-call-site lookup (port callsite-lookup): one call per shader lookup that had a call site.
+	CallSiteHits,
+	CallSiteMisses, // every lookup that did not hit, whatever the reason
+	CallSiteMissNew,
+	CallSiteMissStale,
+	CallSiteMissRegisters,
+	CallSiteMissRanges,
+	CallSiteMissHeap,
+	CallSiteMissNoModule, // the record held, but no module is built for its specialization yet
+	CallSiteStored,
+	CallSiteEvicted,
+	CallSiteRangesSmall,
+	CallSiteRangesLarge,
+	CallSiteRangesStamped,
+	CallSiteBytesCompared,
+	CallSiteBytesLarge,
+	CallSiteHitNs,
+	CallSiteMissNs,
 	// Render-thread vs. off-thread GPU wait split and reason breakdown.
 	GpuFenceWaitBgNs,
 	GpuPriorityOpWaitNs,
