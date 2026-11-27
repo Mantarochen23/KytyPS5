@@ -80,22 +80,25 @@ struct RequestState {
 
 // Whether a prefetch translates a compute shader now. The scan of a submitted command buffer sees a
 // dispatch that is about to run, so it always does. A registration only says the shader exists: it
-// knows no user data, a title registers thousands of shaders that it never dispatches, and each
-// finished translation holds its IR until a dispatch asks for it or the IR budget drops it. So a
-// registration translates only when the lookahead had the user data (never the case for the
-// registration itself) or when the cache already has a program of that hash, from the store or an
-// earlier translation under another key, which says the shader is one the program does use.
-// Otherwise the registration stays in the shader map and the dispatch translates it.
+// carries no user data and guesses default dispatch flags (async_compute=false,
+// dispatch_thread_dimensions=false). Translating a registration solely because another ProgramKey
+// of the same hash exists in the cache produces a translation under a mismatched key that no
+// dispatch ever claims. So a registration translates only when user data are known (lookahead);
+// otherwise it stays registered until a real dispatch or command-stream scan names the true key.
 [[nodiscard]] constexpr bool TranslateAhead(bool from_registration, bool user_data_known,
-                                            bool cache_has_hash) {
-	return !from_registration || user_data_known || cache_has_hash;
+                                            bool /*cache_has_hash*/) {
+	return !from_registration || user_data_known;
 }
 
+// How long a finished translation may wait unclaimed in the translation table before it is retired
+// loudly and its IR freed. Waiting entries are passive (no worker claims them without a matching
+// draw or dispatch), so an unbounded wait keeps orphaned translations alive for the entire run.
+// 0 = no time limit.
+inline constexpr uint64_t DefaultWaitingTtlMs = 30'000;
+
 // The memory the finished translations that no draw has asked for yet may hold, as the sum of their
-// estimated IR sizes. A translation is kept while its shader is registered, so a draw that comes
-// back after a minute or an hour still finds it; only when the translations hold more than this
-// are the least recently requested ones dropped, and a request for a dropped stage translates it
-// again. 0 = no limit.
+// estimated IR sizes. Only when the translations still hold more than this are the least recently
+// requested ones dropped, and a request for a dropped stage translates it again. 0 = no limit.
 inline constexpr uint64_t DefaultIrBudgetBytes = uint64_t {2048} << 20;
 
 // When a translation was last wanted: the later of its finish and the last request for it.
@@ -149,6 +152,75 @@ Dropped TakeOverBudget(Table& table, uint64_t now, uint64_t budget_bytes, Out& d
 	result.kept_bytes = total;
 	return result;
 }
+
+// Moves entries of `table` whose last request is at least `ttl_ms` old into `dropped` so unclaimed
+// waiting translations cannot linger indefinitely. Nothing is retired when `ttl_ms` is 0.
+template <typename Table, typename Out>
+Dropped TakeExpired(Table& table, uint64_t now, uint64_t ttl_ms, Out& dropped) {
+	Dropped  result;
+	uint64_t kept_bytes = 0;
+	for (auto it = table.begin(); it != table.end();) {
+		const auto last = LastRequested(it->second);
+		const auto age  = now >= last ? now - last : uint64_t {0};
+		if (ttl_ms != 0 && age >= ttl_ms) {
+			result.bytes += it->second.bytes;
+			result.count++;
+			result.newest_age_ms =
+			    result.count == 1 ? age : std::min(result.newest_age_ms, age);
+			dropped.push_back(std::move(it->second));
+			it = table.erase(it);
+		} else {
+			kept_bytes += it->second.bytes;
+			++it;
+		}
+	}
+	result.kept       = table.size();
+	result.kept_bytes = kept_bytes;
+	return result;
+}
+
+// A draw into a target the game was not seen to redraw waits for its shaders (see the decision in
+// pipelineCache.cpp). "Redrawn" counts frames, so while no frame is recorded the count stands
+// still and no target first drawn in that time can ever qualify: every such draw then builds on
+// the render thread, one after another, and the frame it belongs to cannot finish. A title that
+// loads a scene behind one long frame (a few hundred new shaders) does not get out of it, and a
+// title with a hang watchdog aborts. The tracker tells how long the current frame has lasted, so
+// that such draws may be skipped like redrawn ones once it has lasted `stall_ms`
+// (--defer-new-targets-on-stall-ms; 0 = never).
+struct FrameStallTracker {
+	enum class Change : uint8_t { None, Started, Ended };
+
+	uint64_t frame    = ~uint64_t {0};
+	uint64_t since_ms = 0;
+	bool     stalled  = false;
+	// Draws let through while stalled: in the current (or last) stall, and in all.
+	uint64_t deferred       = 0;
+	uint64_t deferred_total = 0;
+
+	// Called for a draw that would otherwise wait for its shaders. True when it may be skipped.
+	// `change` reports the edges, for the log line.
+	bool Update(uint64_t frame_now, uint64_t now_ms, uint32_t stall_ms, Change* change) {
+		Change edge = Change::None;
+		if (frame_now != frame) {
+			if (stalled) edge = Change::Ended;
+			frame    = frame_now;
+			since_ms = now_ms;
+			stalled  = false;
+		}
+		const bool want = stall_ms != 0 && now_ms >= since_ms && now_ms - since_ms >= stall_ms;
+		if (want && !stalled) {
+			stalled  = true;
+			deferred = 0;
+			edge     = Change::Started;
+		}
+		if (stalled) {
+			deferred++;
+			deferred_total++;
+		}
+		if (change != nullptr) *change = edge;
+		return stalled;
+	}
+};
 
 } // namespace Libs::Graphics::AsyncPlan
 

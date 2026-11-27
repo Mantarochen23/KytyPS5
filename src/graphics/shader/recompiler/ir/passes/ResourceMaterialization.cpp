@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <fmt/format.h>
 #include <functional>
+#include <map>
 #include <numeric>
 #include <tuple>
 #include <unordered_set>
@@ -742,6 +743,54 @@ struct CanonicalLayout {
 	std::vector<Permutation> permutations;
 };
 
+struct DescriptorValueHash {
+	size_t operator()(const DescriptorValue& v) const noexcept {
+		return static_cast<size_t>(
+		    XXH3_64bits(v.dwords.data(),
+		                std::min<size_t>(v.dword_count, v.dwords.size()) * sizeof(uint32_t)));
+	}
+};
+
+void SetRuntimeTableKey(ResourceSnapshot::IndirectBufferTable& table) {
+	auto& candidates = *table.candidates;
+	if (candidates.key != std::array<uint64_t, 2> {}) return;
+	XXH3_state_t hash_state;
+	XXH3_128bits_reset(&hash_state);
+	for (size_t i = 0; i < candidates.entries.size(); ++i) {
+		const auto& entry = candidates.entries[i];
+		ShaderBufferResource descriptor;
+		if (DecodeBufferDescriptor(entry, descriptor) && descriptor.Base48() != 0 &&
+		    descriptor.NumRecords() != 0) {
+			candidates.has_live_range = true;
+		}
+		XXH3_128bits_update(&hash_state, entry.dwords.data(), entry.dwords.size() * sizeof(uint32_t));
+		XXH3_128bits_update(&hash_state, &entry.dword_count, sizeof(entry.dword_count));
+		const auto cls = i < candidates.class_index.size() ? candidates.class_index[i] : 0u;
+		XXH3_128bits_update(&hash_state, &cls, sizeof(cls));
+	}
+	const auto key = XXH3_128bits_digest(&hash_state);
+	candidates.key = {key.low64, key.high64};
+}
+
+std::array<uint32_t, 4> BufferClassKeyOf(const DescriptorValue& value, const BufferResource& base) {
+	ShaderBufferResource descriptor;
+	if (!DecodeBufferDescriptor(value, descriptor) || descriptor.Type() != 0u) {
+		descriptor = {};
+	}
+	auto       packed_stride = descriptor.PackedStride();
+	const auto stride        = packed_stride & 0x3fffu;
+	const bool swizzle       = stride != 0u && ((packed_stride >> 14u) & 1u) != 0u;
+	if (stride == 0u) {
+		packed_stride &= ~((1u << 14u) | (3u << 16u));
+	} else if (!swizzle) {
+		packed_stride &= ~(3u << 16u);
+	}
+	const auto format = base.formatted ? descriptor.Format() : Prospero::BufferFormat::kInvalid;
+	const auto dst_sel = base.formatted ? descriptor.DstSelXYZW() : DstSel(4, 5, 6, 7);
+	const bool zero_stride_oob = descriptor.OutOfBounds() == 0u && stride == 0u;
+	return {packed_stride, static_cast<uint32_t>(format), dst_sel, zero_stride_oob ? 1u : 0u};
+}
+
 template <typename Specialization, typename Normalize>
 bool MaterializeIndirectDescriptor(const ResourcePlan& program, uint32_t source_index,
                                    uint32_t resource_index, uint32_t dword_count,
@@ -765,21 +814,66 @@ bool MaterializeIndirectDescriptor(const ResourcePlan& program, uint32_t source_
 	auto& byte_offsets = program.material_keys;
 	const auto children_begin = descriptors.size();
 	const auto root_resource = specializations[resource_index];
-	struct DescriptorValueHash {
-		size_t operator()(const DescriptorValue& v) const noexcept {
-			return static_cast<size_t>(
-			    XXH3_64bits(v.dwords.data(), std::min<size_t>(v.dword_count, v.dwords.size()) * sizeof(uint32_t)));
-		}
-	};
 	std::unordered_map<DescriptorValue, uint32_t, DescriptorValueHash> interned;
+	bool                                                               runtime_table_mode = false;
+	ResourceSnapshot::IndirectBufferTable                              runtime_table;
+	runtime_table.root_resource = resource_index;
+	std::map<std::array<uint32_t, 4>, uint32_t>                        runtime_classes;
+	const auto intern_runtime_class = [&](const DescriptorValue& candidate) -> uint32_t {
+		if constexpr (std::is_same_v<Specialization, ResourceSpecialization::Buffer>) {
+			const auto ckey = BufferClassKeyOf(candidate, program.info.buffers[resource_index]);
+			if (const auto found = runtime_classes.find(ckey); found != runtime_classes.end()) {
+				return found->second;
+			}
+			if (descriptors.size() - children_begin + 1u >= MaxIndirectBufferCandidates) {
+				return UINT32_MAX;
+			}
+			const auto cls_ord = static_cast<uint32_t>(descriptors.size() - children_begin + 1u);
+			descriptors.push_back(candidate);
+			auto child          = root_resource;
+			child.indirect_root = resource_index;
+			specializations.push_back(child);
+			runtime_classes.emplace(ckey, cls_ord);
+			return cls_ord;
+		}
+		return 0u;
+	};
 	const auto intern_candidate = [&](const DescriptorValue& candidate) -> uint32_t {
 		if (candidate == descriptors[resource_index]) return 0u;
 		if (const auto found = interned.find(candidate); found != interned.end()) {
 			return found->second;
 		}
 		if constexpr (std::is_same_v<Specialization, ResourceSpecialization::Buffer>) {
-			if (descriptors.size() - children_begin + 1u >= MaxIndirectBufferCandidates) {
-				return UINT32_MAX;
+			const bool can_runtime_table = !program.info.buffers[resource_index].scalar;
+			if (!runtime_table_mode &&
+			    descriptors.size() - children_begin + 1u >= MaxIndirectBufferCandidates) {
+				if (!can_runtime_table) {
+					return UINT32_MAX;
+				}
+				// Promote to a runtime-indexed BDA table: keep all existing ordinals (1..K) intact
+				// while collapsing specialization children down to one exemplar per buffer class.
+				runtime_table_mode = true;
+				runtime_table.candidates->entries.assign(
+				    descriptors.begin() + static_cast<std::ptrdiff_t>(children_begin),
+				    descriptors.end());
+				descriptors.resize(children_begin);
+				specializations.resize(children_begin);
+				runtime_table.candidates->class_index.reserve(
+				    runtime_table.candidates->entries.size() + 1u);
+				for (const auto& existing: runtime_table.candidates->entries) {
+					const auto cls = intern_runtime_class(existing);
+					if (cls == UINT32_MAX) return UINT32_MAX;
+					runtime_table.candidates->class_index.push_back(cls);
+				}
+			}
+			if (runtime_table_mode) {
+				const auto cls = intern_runtime_class(candidate);
+				if (cls == UINT32_MAX) return UINT32_MAX;
+				runtime_table.candidates->entries.push_back(candidate);
+				runtime_table.candidates->class_index.push_back(cls);
+				const auto ordinal = static_cast<uint32_t>(runtime_table.candidates->entries.size());
+				interned.emplace(candidate, ordinal);
+				return ordinal;
 			}
 		}
 		const auto ordinal = static_cast<uint32_t>(descriptors.size() - children_begin + 1u);
@@ -956,20 +1050,19 @@ bool MaterializeIndirectDescriptor(const ResourcePlan& program, uint32_t source_
 				if (!ReadScalarTable(table_base, table_size, 0u, runtime, heap_words))
 					return read_failed("image heap read", 0u, 0u, table_base, 0u, heap_words.size() * sizeof(uint32_t));
 			}
-			// Large flat tables are read once instead of one guest-memory call per row.
+			// Large flat tables are read once instead of one guest-memory call per row. Build the
+			// geometry key before that read: a current host change stamp can replay the prior scan
+			// without touching the table bytes at all.
+			const bool bulk_candidate = !image_heap && pointer == nullptr && count > 16u &&
+			                            table_size >= 4u && table_size <= (uint64_t {64} << 20u);
 			bool bulk_table = false;
-			if (!image_heap && pointer == nullptr && count > 16u && table_size >= 4u &&
-			    table_size <= (uint64_t {64} << 20u)) {
-				heap_words.resize(table_size / 4u);
-				bulk_table = ReadScalarTable(table_base, table_size, 0u, runtime, heap_words);
-			}
 			const auto mapping_offset = snapshot.flattened_srt.size();
 			// The scan of an unchanged table gives the same candidates and mapping again: every
 			// input (the table geometry, the root descriptor and the bytes) is part of the key.
 			ScanCacheEntry  cache_key;
 			ScanCacheEntry* cache_slot = nullptr;
 			const bool      cache_eligible =
-			    allow_scan_cache && bulk_table && descriptors.size() == children_begin;
+			    allow_scan_cache && bulk_candidate && descriptors.size() == children_begin;
 			bool cache_hit = false;
 			if (cache_eligible) {
 				cache_key.source_index     = source_index;
@@ -983,14 +1076,27 @@ bool MaterializeIndirectDescriptor(const ResourcePlan& program, uint32_t source_
 				cache_key.read_dwords      = read_dwords;
 				cache_key.root             = descriptors[resource_index].dwords;
 				cache_key.root_dword_count = descriptors[resource_index].dword_count;
-				cache_key.content_hash =
-				    XXH3_64bits(heap_words.data(), heap_words.size() * sizeof(uint32_t));
 				for (auto& entry: program.scan_cache) {
 					if (entry.SameInputs(cache_key)) {
 						cache_slot = &entry;
-						cache_hit  = entry.content_hash == cache_key.content_hash;
+						cache_hit  = entry.content_stamp != nullptr && entry.content_stamp->Unchanged();
+						if (cache_hit && runtime.skipped_reads != nullptr) *runtime.skipped_reads = true;
 						break;
 					}
+				}
+				if (!cache_hit && runtime.memory_changes != nullptr) {
+					// Arm before reading, so a concurrent write makes the replacement stamp stale.
+					cache_key.content_stamp = runtime.memory_changes->Track(table_base, table_size);
+				}
+			}
+			if (bulk_candidate && !cache_hit) {
+				heap_words.resize(table_size / 4u);
+				bulk_table = ReadScalarTable(table_base, table_size, 0u, runtime, heap_words);
+				if (cache_eligible && bulk_table && cache_key.content_stamp == nullptr) {
+					cache_key.content_hash =
+					    XXH3_64bits(heap_words.data(), heap_words.size() * sizeof(uint32_t));
+					cache_hit = cache_slot != nullptr &&
+					            cache_slot->content_hash == cache_key.content_hash;
 				}
 			}
 			if (cache_hit) {
@@ -1009,6 +1115,10 @@ bool MaterializeIndirectDescriptor(const ResourcePlan& program, uint32_t source_
 				snapshot.flattened_srt.insert(snapshot.flattened_srt.end(),
 				                              cache_slot->mapping.begin(),
 				                              cache_slot->mapping.end());
+				if (cache_slot->runtime_candidates != nullptr) {
+					runtime_table_mode = true;
+					runtime_table.candidates = cache_slot->runtime_candidates;
+				}
 			} else {
 				snapshot.flattened_srt.resize(mapping_offset + 2u, 0u);
 			}
@@ -1052,8 +1162,9 @@ bool MaterializeIndirectDescriptor(const ResourcePlan& program, uint32_t source_
 						                            indirect.table_maximum ? "key" : "probe");
 					const auto ordinal = intern_candidate(candidate);
 					if (ordinal == UINT32_MAX) {
-						return failed("buffer candidate bound",
-						              fmt::format("distinct_candidates>{} limit={}",
+						return failed(runtime_table_mode ? "buffer class bound" : "buffer candidate bound",
+						              fmt::format("distinct_{}>{} limit={}",
+						                          runtime_table_mode ? "classes" : "candidates",
 						                          MaxIndirectBufferCandidates, MaxIndirectBufferCandidates));
 					}
 					if (ordinal == 0u) continue;
@@ -1061,6 +1172,9 @@ bool MaterializeIndirectDescriptor(const ResourcePlan& program, uint32_t source_
 					snapshot.flattened_srt.resize(mapping_offset + 2u + mapping_word, 0u);
 					snapshot.flattened_srt[mapping_offset + 1u + mapping_word] = ordinal;
 				}
+			}
+			if (!cache_hit && runtime_table_mode) {
+				Common::FrameCost::Add(Common::FrameCost::Counter::TableEnumerations);
 			}
 			if (cache_eligible && !cache_hit) {
 				if (cache_slot == nullptr) {
@@ -1078,6 +1192,9 @@ bool MaterializeIndirectDescriptor(const ResourcePlan& program, uint32_t source_
 				cache_key.mapping.assign(snapshot.flattened_srt.begin() +
 				                             static_cast<std::ptrdiff_t>(mapping_offset),
 				                         snapshot.flattened_srt.end());
+				if (runtime_table_mode) {
+					cache_key.runtime_candidates = runtime_table.candidates;
+				}
 				*cache_slot = std::move(cache_key);
 			}
 
@@ -1086,10 +1203,23 @@ bool MaterializeIndirectDescriptor(const ResourcePlan& program, uint32_t source_
 			} else {
 				snapshot.flattened_srt[mapping_offset] =
 				    static_cast<uint32_t>(snapshot.flattened_srt.size() - mapping_offset - 1u);
-				auto& root = specializations[resource_index];
-				root.indirect_root = resource_index;
-				root.indirect_mapping_offset = static_cast<uint32_t>(mapping_offset);
+				auto& root                      = specializations[resource_index];
+				root.indirect_root              = resource_index;
 				root.indirect_search_iterations = 0u;
+				if (runtime_table_mode) {
+					const uint32_t header[3] = {
+					    0u, 0u,
+					    static_cast<uint32_t>(runtime_table.candidates->entries.size() + 1u)};
+					snapshot.flattened_srt.insert(
+					    snapshot.flattened_srt.begin() + static_cast<std::ptrdiff_t>(mapping_offset),
+					    std::begin(header), std::end(header));
+					runtime_table.header_word = static_cast<uint32_t>(mapping_offset);
+					snapshot.indirect_buffer_tables.push_back(std::move(runtime_table));
+					root.indirect_mapping_offset =
+					    IndirectBufferRuntimeTable | static_cast<uint32_t>(mapping_offset);
+				} else {
+					root.indirect_mapping_offset = static_cast<uint32_t>(mapping_offset);
+				}
 			}
 			return true;
 		}
@@ -1169,8 +1299,9 @@ bool MaterializeIndirectDescriptor(const ResourcePlan& program, uint32_t source_
 		} else {
 			ordinal = intern_candidate(candidate);
 			if (ordinal == UINT32_MAX) {
-				return failed("buffer candidate bound",
-				              fmt::format("distinct_candidates>{} limit={}",
+				return failed(runtime_table_mode ? "buffer class bound" : "buffer candidate bound",
+				              fmt::format("distinct_{}>{} limit={}",
+				                          runtime_table_mode ? "classes" : "candidates",
 				                          MaxIndirectBufferCandidates, MaxIndirectBufferCandidates));
 			}
 		}
@@ -1183,8 +1314,20 @@ bool MaterializeIndirectDescriptor(const ResourcePlan& program, uint32_t source_
 	} else {
 		auto& root                      = specializations[resource_index];
 		root.indirect_root              = resource_index;
-		root.indirect_mapping_offset = static_cast<uint32_t>(mapping_offset);
 		root.indirect_search_iterations = std::bit_width(key_count);
+		if (runtime_table_mode) {
+			const uint32_t header[3] = {
+			    0u, 0u, static_cast<uint32_t>(runtime_table.candidates->entries.size() + 1u)};
+			snapshot.flattened_srt.insert(
+			    snapshot.flattened_srt.begin() + static_cast<std::ptrdiff_t>(mapping_offset),
+			    std::begin(header), std::end(header));
+			runtime_table.header_word = static_cast<uint32_t>(mapping_offset);
+			snapshot.indirect_buffer_tables.push_back(std::move(runtime_table));
+			root.indirect_mapping_offset =
+			    IndirectBufferRuntimeTable | static_cast<uint32_t>(mapping_offset);
+		} else {
+			root.indirect_mapping_offset = static_cast<uint32_t>(mapping_offset);
+		}
 	}
 	return true;
 }
@@ -1274,7 +1417,8 @@ bool RemapOrdinals(std::vector<uint32_t>& flat, uint32_t offset, uint32_t iterat
 template <typename Spec, typename Key>
 bool SortCanonicalChildren(std::vector<Spec>& specs, std::vector<DescriptorValue>& descriptors,
                            size_t plan_count, uint32_t kind, std::vector<uint32_t>& flat,
-                           CanonicalLayout& layout, Key&& key) {
+                           CanonicalLayout& layout, Key&& key,
+                           std::vector<ResourceSnapshot::IndirectBufferTable>* runtime_tables = nullptr) {
 	for (uint32_t root = 0; root < plan_count; ++root) {
 		if (specs[root].indirect_root != root) continue;
 		auto begin = static_cast<uint32_t>(plan_count);
@@ -1294,9 +1438,27 @@ bool SortCanonicalChildren(std::vector<Spec>& specs, std::vector<DescriptorValue
 			new_of_old[order[position] + 1u] = position + 1u;
 		bool heap = false;
 		if constexpr (std::is_same_v<Spec, ResourceSpecialization::Image>) heap = specs[root].heap;
-		if (!RemapOrdinals(flat, specs[root].indirect_mapping_offset,
-		                   specs[root].indirect_search_iterations, heap, new_of_old))
+		if (IsIndirectBufferRuntimeTable(specs[root].indirect_mapping_offset)) {
+			// Runtime-table roots store buffer ordinals in flattened_srt and class ordinals in
+			// snapshot.indirect_buffer_tables; remap the class ordinals instead of flattened_srt.
+			if (runtime_tables == nullptr) {
+				return SpecializationFail("canonical order: missing runtime buffer table");
+			}
+			for (auto& table: *runtime_tables) {
+				if (table.root_resource != root) continue;
+				if (table.candidates->canonicalized) continue;
+				for (auto& cls: table.candidates->class_index) {
+					if (cls >= new_of_old.size()) {
+						return SpecializationFail("canonical order: runtime class ordinal out of range");
+					}
+					cls = new_of_old[cls];
+				}
+				table.candidates->canonicalized = true;
+			}
+		} else if (!RemapOrdinals(flat, specs[root].indirect_mapping_offset,
+		                          specs[root].indirect_search_iterations, heap, new_of_old)) {
 			return SpecializationFail("canonical order: indirect mapping out of range");
+		}
 		std::vector<Spec>            moved_specs(order.size());
 		std::vector<DescriptorValue> moved_descriptors(order.size());
 		for (uint32_t position = 0; position < order.size(); ++position) {
@@ -1368,9 +1530,12 @@ uint64_t LegacySpecializationHash(const ResourceSpecialization&               ca
 			const auto root = entries[index].indirect_root;
 			if (root >= entries.size() || source[root].indirect_root != root) continue;
 			if (entries[index].indirect_mapping_offset == source[root].indirect_mapping_offset &&
-			    (index == root || source[root].indirect_mapping_offset != 0u))
+			    (index == root || source[root].indirect_mapping_offset != 0u)) {
+				const auto raw   = source[root].indirect_mapping_offset;
+				const auto flags = raw & IndirectBufferRuntimeTable;
 				entries[index].indirect_mapping_offset =
-				    LegacyMappingOffset(layout, source[root].indirect_mapping_offset);
+				    flags | LegacyMappingOffset(layout, raw & ~IndirectBufferRuntimeTable);
+			}
 		}
 	};
 	unshift(legacy.buffers, canonical.buffers);
@@ -1389,11 +1554,13 @@ void UseMappingHeader(const ResourcePlan& program, ResourceSpecialization& speci
 	const auto convert = [&](auto& entries, size_t plan_count) {
 		for (uint32_t root = 0; root < plan_count; ++root, ++slot) {
 			if (root >= entries.size() || entries[root].indirect_root != root) continue;
-			const auto offset = entries[root].indirect_mapping_offset;
+			const auto raw    = entries[root].indirect_mapping_offset;
+			const auto flags  = raw & IndirectBufferRuntimeTable;
+			const auto offset = raw & ~IndirectBufferRuntimeTable;
 			flat[slot]        = offset;
-			const auto moved  = IndirectMappingHeader | slot;
+			const auto moved  = IndirectMappingHeader | flags | slot;
 			for (uint32_t index = static_cast<uint32_t>(plan_count); index < entries.size(); ++index)
-				if (entries[index].indirect_root == root && entries[index].indirect_mapping_offset == offset)
+				if (entries[index].indirect_root == root && entries[index].indirect_mapping_offset == raw)
 					entries[index].indirect_mapping_offset = moved;
 			entries[root].indirect_mapping_offset = moved;
 			// A heap root maps slots and searches nothing (its iterations stay 0).
@@ -2187,6 +2354,7 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 		    kind, resource, source, candidates));
 	};
 	bool validate_buffer_keys = false;
+	snapshot.indirect_buffer_tables.clear();
 	snapshot.buffers.resize(program.info.buffers.size());
 	specialization.buffers.assign(program.info.buffers.size(), {});
 	for (uint32_t i = 0; i < snapshot.buffers.size(); ++i) {
@@ -2246,9 +2414,11 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 			                  buffer.zero_stride_oob, buffer.scalar_empty);
 		};
 		if (!SortCanonicalChildren(specialization.buffers, snapshot.buffers, program.info.buffers.size(),
-		                           0u, snapshot.flattened_srt, canonical, buffer_key))
+		                           0u, snapshot.flattened_srt, canonical, buffer_key,
+		                           &snapshot.indirect_buffer_tables))
 			return false;
 	}
+	for (auto& table: snapshot.indirect_buffer_tables) SetRuntimeTableKey(table);
 	if (validate_buffer_keys) {
 		// Only the resolved destinations can write. Check after all indirect children exist.
 		for (uint32_t i = 0; i < snapshot.buffers.size(); ++i) {
@@ -2256,6 +2426,14 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 			const auto& resource = program.info.buffers[root];
 			if (resource.written && BufferWriteOverlaps(resource, snapshot.buffers[i], reads))
 				return SpecializationFail("buffer write overlaps its descriptor selection");
+		}
+		for (const auto& table: snapshot.indirect_buffer_tables) {
+			const auto& resource = program.info.buffers[table.root_resource];
+			if (!resource.written) continue;
+			for (const auto& entry: table.candidates->entries) {
+				if (BufferWriteOverlaps(resource, entry, reads))
+					return SpecializationFail("buffer write overlaps its descriptor selection");
+			}
 		}
 	}
 	snapshot.images.resize(program.info.images.size());

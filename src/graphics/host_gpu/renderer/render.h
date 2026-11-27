@@ -4,9 +4,12 @@
 #include "common/abi.h"
 #include "common/assert.h"
 #include "common/common.h"
+#include "graphics/guest_gpu/hardwareContext.h"
+#include "graphics/host_gpu/renderer/barrierTracker.h"
 #include "graphics/host_gpu/renderer/dispatchGuard.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
+#include "graphics/host_gpu/renderer/pipeline/skipCatchUp.h"
 #include "graphics/host_gpu/renderer/pipeline/skipTaint.h"
 #include "graphics/host_gpu/renderer/renderTarget.h"
 #include "graphics/host_gpu/renderer/upscaler/upscaler.h"
@@ -14,6 +17,7 @@
 
 #include <array>
 #include <memory>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -39,10 +43,12 @@ enum class DrawOffsetSource : uint8_t {
 };
 
 // Nonzero address: the GPU reads count Vulkan indirect draw records, stride bytes apart.
+// Nonzero count_address: count is maxDrawCount and the GPU reads the draw count from count_address.
 struct DrawIndirectArgs {
-	uint64_t              address = 0;
-	uint32_t              count   = 0;
-	uint32_t              stride  = 0;
+	uint64_t              address       = 0;
+	uint64_t              count_address = 0;
+	uint32_t              count         = 0;
+	uint32_t              stride        = 0;
 	ShaderIndirectOffsets offsets;
 };
 
@@ -104,7 +110,18 @@ public:
 	void BeginRendering(const RenderState& state) const;
 	void EndRendering() const;
 
-	[[nodiscard]] vk::CommandBuffer Handle() const noexcept { return m_buffer; }
+	// For commands that may access any memory (copies, draws, barriers, emulator passes). With the
+	// barrier-tracker port, guest dispatches recorded before it are ordered first.
+	[[nodiscard]] vk::CommandBuffer Handle() const;
+	// For commands that access no memory when they execute: binding pipelines, descriptors and
+	// vertex/index buffers, push constants, dynamic state.
+	[[nodiscard]] vk::CommandBuffer StateHandle() const noexcept { return m_buffer; }
+	// For one guest dispatch, recorded next with the returned handle. `writes`: the dispatch may
+	// write memory through any path. Ends the render pass (a dispatch is outside one) and records the
+	// barrier it needs against earlier commands.
+	[[nodiscard]] vk::CommandBuffer DispatchHandle(bool writes) const;
+	// Orders guest dispatches recorded so far before everything recorded next.
+	void OrderDispatches() const;
 	[[nodiscard]] GraphicContext&   GetGraphics() const noexcept { return m_graphics; }
 	[[nodiscard]] RenderContext&    GetContext() const noexcept { return m_context; }
 	[[nodiscard]] HW::Context&      GetRegisters() const noexcept { return *m_registers; }
@@ -121,12 +138,15 @@ private:
 
 	void Begin();
 	void End() const;
+	void RecordBarrier(BarrierTracker::Barrier barrier) const;
 
 	RenderContext&      m_context;
 	GraphicContext&     m_graphics;
 	vk::CommandBuffer   m_buffer = nullptr;
 	mutable RenderState m_render_state;
 	mutable bool        m_rendering   = false;
+	// Kept across submissions: barriers order commands in submission order on the queue.
+	mutable BarrierTracker m_barriers;
 	HW::Context*        m_registers   = nullptr;
 	HW::UserConfig*     m_user_config = nullptr;
 	HW::Shader*         m_shaders     = nullptr;
@@ -154,7 +174,7 @@ public:
 	void ProcessPssr(CommandBuffer& buffer, const Pssr::Request& request);
 	// The dispatch that just returned false (shader work pending) is being skipped: what it would
 	// have written is tainted (--async-compute-wait-ms, skipTaint.h).
-	void TaintSkippedDispatch();
+	void TaintSkippedDispatch(bool record_wait_hole = true);
 
 	void PrepareBindings(const ShaderStageRuntime& runtime, PreparedBindings& prepared);
 	void                           FindBuffers(std::span<PreparedBindings* const> stages);
@@ -170,6 +190,22 @@ private:
 	// False, with nothing drawn, when the draw's indirect records need CPU counts.
 	bool DrawIndex(CommandBuffer& buffer, const DrawIndexArgs& args);
 	bool DrawAuto(CommandBuffer& buffer, const DrawAutoArgs& args);
+
+	struct CapturedDispatch {
+		HW::ComputeShaderInfo cs_regs {};
+		uint32_t              groups[3]     = {0, 0, 0};
+		uint32_t              mode          = 0;
+		bool                  async_compute = false;
+		uint64_t              indirect_args = 0;
+		bool                  is_indirect   = false;
+	};
+
+	bool DispatchDirectLocked(CommandBuffer& buffer, uint32_t thread_group_x,
+	                          uint32_t thread_group_y, uint32_t thread_group_z, uint32_t mode,
+	                          bool async_compute, bool allow_async, uint64_t indirect_args);
+	bool DispatchIndirectLocked(CommandBuffer& buffer, uint64_t args_addr, uint32_t mode,
+	                            bool async_compute, bool allow_async);
+	void DrainSkippedDispatchesLocked(CommandBuffer& buffer);
 
 	struct GraphicsBindings {
 		std::array<PreparedBindings, 3> vertex;
@@ -227,15 +263,20 @@ private:
 	// The current draw's targets; PrepareDrawRenderState resolves them again for each draw.
 	DrawTargets                           m_targets;
 	PreparedBindings                     m_compute_bindings;
+	std::vector<RuntimeBufferTableCacheEntry> m_runtime_buffer_tables;
+	uint64_t                                  m_runtime_buffer_table_tick = 0;
 	std::vector<ImageId>                  m_bound_images;
 	std::vector<vk::DescriptorImageInfo>  m_descriptor_images;
 	std::vector<vk::WriteDescriptorSet>   m_descriptor_writes;
 	vk::DescriptorSetLayout               m_pssr_descriptor_layout = nullptr;
 	vk::PipelineLayout                    m_pssr_pipeline_layout   = nullptr;
 	vk::Pipeline                          m_pssr_pipeline          = nullptr;
-	// Outputs of skipped dispatches, and the buffer use of the dispatch that last returned pending.
-	SkipTaint                             m_skip_taint;
-	std::vector<SkipTaint::Use>           m_pending_uses;
+	// Outputs of skipped dispatches, and the buffer use / state of the dispatch that last returned pending.
+	SkipTaint                                  m_skip_taint;
+	std::vector<SkipTaint::Use>                m_pending_uses;
+	std::optional<CapturedDispatch>            m_pending_dispatch;
+	SkipCatchUp::Queue<CapturedDispatch>       m_skip_catchup;
+	bool                                       m_replaying_catchup = false;
 	// Created by the first guarded indirect dispatch.
 	std::unique_ptr<DispatchArgsGuard>    m_dispatch_guard;
 	std::vector<UpscalerContext>          m_upscaler_contexts;

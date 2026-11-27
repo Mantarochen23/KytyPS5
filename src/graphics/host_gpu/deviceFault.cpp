@@ -2,6 +2,7 @@
 
 #include "common/assert.h"
 #include "common/emulatorConfig.h"
+#include "common/frameCost.h"
 #include "common/hangDump.h"
 #include "common/logging/log.h"
 #include "graphics/host_gpu/graphicContext.h"
@@ -137,6 +138,12 @@ private:
 [[nodiscard]] bool RadvDebugEnabled() {
 	const char* env = std::getenv("RADV_DEBUG");
 	return env != nullptr && env[0] != '\0';
+}
+
+// The driver's hang debugging (RADV_DEBUG=hang, also inside a list) reads our markers.
+[[nodiscard]] bool RadvHangDebugEnabled() {
+	const char* env = std::getenv("RADV_DEBUG");
+	return env != nullptr && std::strstr(env, "hang") != nullptr;
 }
 
 void FormatOpStages(FixedStderrSink& out, const OpBreadcrumb& op) {
@@ -337,6 +344,25 @@ void GpuBreadcrumbTracker::FaultWorkerLoop() {
 
 void GpuBreadcrumbTracker::Init(GraphicContext& graphics) {
 	std::lock_guard lock(m_mutex);
+	{
+		const char* reason = nullptr;
+		if (Config::GpuDebugEnabled()) {
+			reason = "--gpu-debug";
+		} else if (RadvHangDebugEnabled()) {
+			reason = "RADV_DEBUG contains hang";
+		} else if (Config::GpuFaultQueryEnabled()) {
+			reason = "--gpu-fault-query";
+		} else if (Config::GraphicsDebugDumpEnabled()) {
+			reason = "--graphics-debug-dump";
+		} else if (Config::GuestFaultReportOnlyEnabled()) {
+			reason = "--guest-fault-report-only";
+		}
+		m_active.store(reason != nullptr, std::memory_order_relaxed);
+		Log::WriteToConsoleAndLog(fmt::format(
+		    "[gpu] breadcrumbs and driver markers per draw and dispatch: {}\n",
+		    reason != nullptr ? fmt::format("on ({})", reason)
+		                      : std::string("off (--gpu-debug turns them on for device-lost reports)")));
+	}
 	m_emit_debug_labels =
 	    graphics.debug_utils_ext_enabled &&
 	    VULKAN_HPP_DEFAULT_DISPATCHER.vkCmdInsertDebugUtilsLabelEXT != nullptr &&
@@ -436,6 +462,9 @@ void GpuBreadcrumbTracker::Shutdown(GraphicContext& graphics) {
 
 void GpuBreadcrumbTracker::BeginSubmit(GraphicContext& graphics, vk::CommandBuffer cmd,
                                        uint64_t frame_num) {
+	if (!Active()) {
+		return;
+	}
 	uint32_t   seq           = 0;
 	vk::Buffer marker_buffer = nullptr;
 	{
@@ -470,7 +499,12 @@ void GpuBreadcrumbTracker::BeginSubmit(GraphicContext& graphics, vk::CommandBuff
 }
 
 uint32_t GpuBreadcrumbTracker::BeginOp(GraphicContext& graphics, vk::CommandBuffer cmd,
-                                       OpBreadcrumb op) {
+                                       const OpBreadcrumb& op_in) {
+	if (!Active()) {
+		return 0;
+	}
+	Common::FrameCost::Add(Common::FrameCost::Counter::BreadcrumbOps);
+	OpBreadcrumb op = op_in;
 	uint32_t   submit_seq    = 0;
 	vk::Buffer marker_buffer = nullptr;
 	bool       emit_label    = false;
@@ -534,6 +568,9 @@ void GpuBreadcrumbTracker::EndOp(GraphicContext& graphics, vk::CommandBuffer cmd
 }
 
 void GpuBreadcrumbTracker::EndSubmitRecording(GraphicContext& graphics, vk::CommandBuffer cmd) {
+	if (!Active()) {
+		return;
+	}
 	uint32_t   seq           = 0;
 	vk::Buffer marker_buffer = nullptr;
 	{

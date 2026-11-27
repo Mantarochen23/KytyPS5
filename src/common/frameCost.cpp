@@ -1,5 +1,6 @@
 #include "common/frameCost.h"
 
+#include "common/emulatorConfig.h"
 #include "common/logging/log.h"
 
 #include <algorithm>
@@ -27,6 +28,7 @@ Clock::time_point                  g_window_start {};
 thread_local ScopedTimer*          g_active_timer   = nullptr;
 thread_local bool                  g_render_thread  = false;
 thread_local WaitReason            g_wait_reason    = WaitReason::Other;
+thread_local ReadbackSite          g_readback_site  = ReadbackSite::Other;
 thread_local SubmitReason          g_submit_reason  = SubmitReason::Other;
 
 ThreadCounters& Local() {
@@ -84,14 +86,70 @@ WaitReason CurrentWaitReason() noexcept {
 	return g_wait_reason;
 }
 
+ScopedReadbackSite::ScopedReadbackSite(ReadbackSite site) noexcept: m_previous(g_readback_site) {
+	g_readback_site = site;
+}
+
+ScopedReadbackSite::~ScopedReadbackSite() {
+	g_readback_site = m_previous;
+}
+
+ReadbackSite CurrentReadbackSite() noexcept {
+	return g_readback_site;
+}
+
 void RecordRenderWaitReason(uint64_t elapsed_ns) noexcept {
 	Counter calls = Counter::WaitOtherCalls;
 	Counter ns    = Counter::WaitOtherNs;
 	switch (g_wait_reason) {
-		case WaitReason::Readback:
+		case WaitReason::Readback: {
 			calls = Counter::WaitReadbackCalls;
 			ns    = Counter::WaitReadbackNs;
+			Counter site_calls = Counter::WaitRbOtherCalls;
+			Counter site_ns    = Counter::WaitRbOtherNs;
+			switch (g_readback_site) {
+				case ReadbackSite::ThreadDim:
+					site_calls = Counter::WaitRbThreadDimCalls;
+					site_ns    = Counter::WaitRbThreadDimNs;
+					break;
+				case ReadbackSite::Lds:
+					site_calls = Counter::WaitRbLdsCalls;
+					site_ns    = Counter::WaitRbLdsNs;
+					break;
+				case ReadbackSite::Scalar:
+					site_calls = Counter::WaitRbScalarCalls;
+					site_ns    = Counter::WaitRbScalarNs;
+					break;
+				case ReadbackSite::Heap:
+					site_calls = Counter::WaitRbHeapCalls;
+					site_ns    = Counter::WaitRbHeapNs;
+					break;
+				case ReadbackSite::VertexAttrib:
+					site_calls = Counter::WaitRbVertexAttribCalls;
+					site_ns    = Counter::WaitRbVertexAttribNs;
+					break;
+				case ReadbackSite::ColorMeta:
+					site_calls = Counter::WaitRbColorMetaCalls;
+					site_ns    = Counter::WaitRbColorMetaNs;
+					break;
+				case ReadbackSite::ReadFault:
+					site_calls = Counter::WaitRbReadFaultCalls;
+					site_ns    = Counter::WaitRbReadFaultNs;
+					break;
+				case ReadbackSite::WriteFault:
+					site_calls = Counter::WaitRbWriteFaultCalls;
+					site_ns    = Counter::WaitRbWriteFaultNs;
+					break;
+				case ReadbackSite::Invalidate:
+					site_calls = Counter::WaitRbInvalidateCalls;
+					site_ns    = Counter::WaitRbInvalidateNs;
+					break;
+				case ReadbackSite::Other: break;
+			}
+			Add(site_calls);
+			Add(site_ns, elapsed_ns);
 			break;
+		}
 		case WaitReason::StreamWrap:
 			calls = Counter::WaitStreamCalls;
 			ns    = Counter::WaitStreamNs;
@@ -153,27 +211,6 @@ void RecordSubmit() noexcept {
 	}
 }
 
-ScopedTimer::ScopedTimer(Counter duration) noexcept
-    : m_duration(duration), m_start(Clock::now()), m_parent(g_active_timer) {
-	g_active_timer = this;
-}
-
-ScopedTimer::~ScopedTimer() {
-	(void)Stop();
-}
-
-uint64_t ScopedTimer::Stop() noexcept {
-	if (m_start == Clock::time_point {}) return 0;
-	const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - m_start);
-	m_start            = {};
-	const auto elapsed_ns = static_cast<uint64_t>(elapsed.count());
-	if (g_active_timer == this) g_active_timer = m_parent;
-	if (m_parent != nullptr) m_parent->m_child_ns += elapsed_ns;
-	const auto exclusive_ns = elapsed_ns - std::min(elapsed_ns, m_child_ns);
-	Add(m_duration, exclusive_ns);
-	return exclusive_ns;
-}
-
 std::array<uint64_t, CounterCount> SnapshotCounters() {
 	std::array<uint64_t, CounterCount> result {};
 	std::scoped_lock lock {g_threads_mutex};
@@ -223,7 +260,11 @@ ReportLines FormatWindow(const std::array<uint64_t, CounterCount>& delta, double
 	    "memo_miss_heap_changed={:.2f} memo_stored={:.2f} memo_not_stored={:.2f} "
 	    "memo_evicted={:.2f} memo_heap_plan_calls={:.2f} memo_ranges_stamped={:.2f} "
 	    "memo_ranges_compared={:.2f} memo_bytes_compared={:.0f} memo_ranges_tracked={:.2f} "
-	    "memo_ranges_untracked={:.2f} memo_walk_changed={:.2f}\n",
+	    "memo_ranges_untracked={:.2f} memo_walk_changed={:.2f} "
+	    "callsite_hits={:.2f} callsite_miss(new={:.2f} stale={:.2f} regs={:.2f} ranges={:.2f} "
+	    "heap={:.2f} no_module={:.2f}) callsite_stored={:.2f} callsite_evicted={:.2f} "
+	    "callsite_ranges(small={:.2f} large={:.2f} stamped={:.2f}) callsite_bytes(compared={:.0f} "
+	    "large={:.0f}) ns/call callsite_hit={:.0f} callsite_miss={:.0f}\n",
 	    elapsed_seconds, frames, Mean(delta, Counter::Draws, frames),
 	    Mean(delta, Counter::Dispatches, frames),
 	    Mean(delta, Counter::ImageHeapRebindCalls, frames),
@@ -265,7 +306,21 @@ ReportLines FormatWindow(const std::array<uint64_t, CounterCount>& delta, double
 	    Mean(delta, Counter::MemoBytesCompared, frames),
 	    Mean(delta, Counter::MemoRangesTracked, frames),
 	    Mean(delta, Counter::MemoRangesUntracked, frames),
-	    Mean(delta, Counter::MemoWalkChanged, frames));
+	    Mean(delta, Counter::MemoWalkChanged, frames),
+	    Mean(delta, Counter::CallSiteHits, frames), Mean(delta, Counter::CallSiteMissNew, frames),
+	    Mean(delta, Counter::CallSiteMissStale, frames),
+	    Mean(delta, Counter::CallSiteMissRegisters, frames),
+	    Mean(delta, Counter::CallSiteMissRanges, frames),
+	    Mean(delta, Counter::CallSiteMissHeap, frames),
+	    Mean(delta, Counter::CallSiteMissNoModule, frames),
+	    Mean(delta, Counter::CallSiteStored, frames), Mean(delta, Counter::CallSiteEvicted, frames),
+	    Mean(delta, Counter::CallSiteRangesSmall, frames),
+	    Mean(delta, Counter::CallSiteRangesLarge, frames),
+	    Mean(delta, Counter::CallSiteRangesStamped, frames),
+	    Mean(delta, Counter::CallSiteBytesCompared, frames),
+	    Mean(delta, Counter::CallSiteBytesLarge, frames),
+	    NanosecondsPerCall(delta, Counter::CallSiteHitNs, Counter::CallSiteHits),
+	    NanosecondsPerCall(delta, Counter::CallSiteMissNs, Counter::CallSiteMisses));
 
 	lines.arch = fmt::format(
 	    "[frame] arch wait_gpu_bg={:.3f} "
@@ -279,9 +334,15 @@ ReportLines FormatWindow(const std::array<uint64_t, CounterCount>& delta, double
 	    "coal={:.2f} quad_ex={:.2f} skip={:.2f}) "
 	    "calls_disp(dir={:.2f} ind={:.2f} ind_tdim={:.2f} guard={:.2f} oa_ex={:.2f} "
 	    "skip={:.2f} bvh={:.2f}) "
-	    "barriers_all={:.2f} "
+	    "barriers_all={:.2f} barriers(global={:.2f} buffer={:.2f} image={:.2f}) "
+	    "pass_breaks={:.2f} barriers_dropped={:.2f} "
 	    "draw_ns(n={} prog={:.0f} rt={:.0f} pipe={:.0f} bind={:.0f} commit={:.0f} rec={:.0f}) "
-	    "disp_ns(n={} prog={:.0f} pipe={:.0f} bind={:.0f} guard={:.0f} commit={:.0f} rec={:.0f})\n",
+	    "disp_ns(n={} prog={:.0f} pipe={:.0f} bind={:.0f} guard={:.0f} commit={:.0f} rec={:.0f}) "
+	    "rb_site(tdim={:.2f}/{:.3f} lds={:.2f}/{:.3f} scalar={:.2f}/{:.3f} heap={:.2f}/{:.3f} "
+	    "vattr={:.2f}/{:.3f} meta={:.2f}/{:.3f} rfault={:.2f}/{:.3f} wfault={:.2f}/{:.3f} "
+	    "inv={:.2f}/{:.3f} other={:.2f}/{:.3f}) "
+	    "rb_path(inplace={:.2f} detached={:.2f} sync={:.2f} batch_ex={:.2f} gpu_tdim={:.2f} "
+	    "gpu_icount={:.2f})\n",
 	    wait_gpu_bg_ms, Milliseconds(delta, Counter::WaitReadbackNs, frames),
 	    Milliseconds(delta, Counter::WaitStreamNs, frames),
 	    Milliseconds(delta, Counter::WaitUnmapNs, frames),
@@ -319,6 +380,9 @@ ReportLines FormatWindow(const std::array<uint64_t, CounterCount>& delta, double
 	    Mean(delta, Counter::DispatchesSkipped, frames),
 	    Mean(delta, Counter::BvhDispatches, frames),
 	    Mean(delta, Counter::BarriersAllCommands, frames),
+	    Mean(delta, Counter::BarriersGlobal, frames), Mean(delta, Counter::BarriersBuffer, frames),
+	    Mean(delta, Counter::BarriersImage, frames), Mean(delta, Counter::PassBreaks, frames),
+	    Mean(delta, Counter::BarriersDropped, frames),
 	    delta[static_cast<size_t>(Counter::DrawStepSamples)],
 	    NanosecondsPerCall(delta, Counter::DrawStepProgramsNs, Counter::DrawStepSamples),
 	    NanosecondsPerCall(delta, Counter::DrawStepTargetsNs, Counter::DrawStepSamples),
@@ -332,8 +396,133 @@ ReportLines FormatWindow(const std::array<uint64_t, CounterCount>& delta, double
 	    NanosecondsPerCall(delta, Counter::DispatchStepBindNs, Counter::DispatchStepSamples),
 	    NanosecondsPerCall(delta, Counter::DispatchStepGuardNs, Counter::DispatchStepSamples),
 	    NanosecondsPerCall(delta, Counter::DispatchStepCommitNs, Counter::DispatchStepSamples),
-	    NanosecondsPerCall(delta, Counter::DispatchStepRecordNs, Counter::DispatchStepSamples));
+	    NanosecondsPerCall(delta, Counter::DispatchStepRecordNs, Counter::DispatchStepSamples),
+	    Mean(delta, Counter::WaitRbThreadDimCalls, frames),
+	    Milliseconds(delta, Counter::WaitRbThreadDimNs, frames),
+	    Mean(delta, Counter::WaitRbLdsCalls, frames),
+	    Milliseconds(delta, Counter::WaitRbLdsNs, frames),
+	    Mean(delta, Counter::WaitRbScalarCalls, frames),
+	    Milliseconds(delta, Counter::WaitRbScalarNs, frames),
+	    Mean(delta, Counter::WaitRbHeapCalls, frames),
+	    Milliseconds(delta, Counter::WaitRbHeapNs, frames),
+	    Mean(delta, Counter::WaitRbVertexAttribCalls, frames),
+	    Milliseconds(delta, Counter::WaitRbVertexAttribNs, frames),
+	    Mean(delta, Counter::WaitRbColorMetaCalls, frames),
+	    Milliseconds(delta, Counter::WaitRbColorMetaNs, frames),
+	    Mean(delta, Counter::WaitRbReadFaultCalls, frames),
+	    Milliseconds(delta, Counter::WaitRbReadFaultNs, frames),
+	    Mean(delta, Counter::WaitRbWriteFaultCalls, frames),
+	    Milliseconds(delta, Counter::WaitRbWriteFaultNs, frames),
+	    Mean(delta, Counter::WaitRbInvalidateCalls, frames),
+	    Milliseconds(delta, Counter::WaitRbInvalidateNs, frames),
+	    Mean(delta, Counter::WaitRbOtherCalls, frames),
+	    Milliseconds(delta, Counter::WaitRbOtherNs, frames),
+	    Mean(delta, Counter::ReadbackInPlace, frames),
+	    Mean(delta, Counter::ReadbackDetached, frames),
+	    Mean(delta, Counter::ReadbackSync, frames),
+	    Mean(delta, Counter::ReadbackBatchExtra, frames),
+	    Mean(delta, Counter::DispatchIndirectThreadDimGpu, frames),
+	    Mean(delta, Counter::DrawIndirectCountGpu, frames));
+	lines.cuts = fmt::format(
+	    "[frame] cuts breadcrumb_ops={:.2f} gpu_invalidate={:.2f} gpu_invalidate_skipped={:.2f} "
+	    "gpu_invalidate_gen_bumps={:.2f} guard_gpu={:.2f} guard_cpu={:.2f} guard_skipped={:.2f} "
+	    "prefetch_scans={:.2f} prefetch_skipped={:.2f} pump={:.2f} pump_skipped={:.2f} "
+	    "table_candidates={:.2f} table_dispatches={:.2f} table_rebuilds={:.2f} "
+	    "table_enumerations={:.2f} table_marks={:.2f} table_mark_ranges={:.2f} "
+	    "timer_sample={} prefetch_backoff={} table_image_aliased={} "
+	    "table_rebuild(key={} generation={} own_generation={} evicted={} disabled={}) "
+	    "table_marks_skipped={:.2f}\n",
+	    Mean(delta, Counter::BreadcrumbOps, frames),
+	    Mean(delta, Counter::GpuInvalidateCalls, frames),
+	    Mean(delta, Counter::GpuInvalidateSkipped, frames),
+	    Mean(delta, Counter::GpuInvalidateGenBumps, frames),
+	    Mean(delta, Counter::GuardGpuRuns, frames), Mean(delta, Counter::GuardCpuChecks, frames),
+	    Mean(delta, Counter::GuardSkipped, frames), Mean(delta, Counter::PrefetchScans, frames),
+	    Mean(delta, Counter::PrefetchSkipped, frames), Mean(delta, Counter::PumpAsyncCalls, frames),
+	    Mean(delta, Counter::PumpAsyncSkipped, frames), Mean(delta, Counter::TableCandidates, frames),
+	    Mean(delta, Counter::TableDispatches, frames), Mean(delta, Counter::TableRebuilds, frames),
+	    Mean(delta, Counter::TableEnumerations, frames), Mean(delta, Counter::TableMarks, frames),
+	    Mean(delta, Counter::TableMarkRanges, frames),
+	    Config::FrameTimerSample(),
+	    Config::PrefetchBackoffExponent(),
+	    delta[static_cast<size_t>(Counter::TableImageAliased)],
+	    delta[static_cast<size_t>(Counter::TableRebuildKey)],
+	    delta[static_cast<size_t>(Counter::TableRebuildGeneration)],
+	    delta[static_cast<size_t>(Counter::TableRebuildGenerationOwn)],
+	    delta[static_cast<size_t>(Counter::TableRebuildEvicted)],
+	    delta[static_cast<size_t>(Counter::TableRebuildDisabled)],
+	    Mean(delta, Counter::TableMarksSkipped, frames));
+	const auto total = [&](Counter counter) { return delta[static_cast<size_t>(counter)]; };
+	lines.heap = fmt::format(
+	    "[frame] heap rebinds={:.2f} fast={:.2f} miss_pending={} miss_descriptor_gen={} "
+	    "miss_cache_gen={} miss_heap_gen={} self_bump={} cache_self_bump={} layout_quiet={} repoint_calls={} "
+	    "repoint_slots={} heap_gen_bumps cpu_dirty={} maybe_dirty={} buffer_modified={} "
+	    "layout_leave={} untrack_head={} untrack_tail={} unregister={} unmap={} "
+	    "cache_gen_bumps register={} unregister={} stencil={} gpu_invalidate={} "
+	    "cpu_invalidate={} clear_meta={} touch_meta={} other={}\n",
+	    Mean(delta, Counter::ImageHeapRebindCalls, frames),
+	    Mean(delta, Counter::ImageHeapRebindFastCalls, frames), total(Counter::HeapMissPending),
+	    total(Counter::HeapMissDescriptorGen), total(Counter::HeapMissCacheGen),
+	    total(Counter::HeapMissHeapGen), total(Counter::HeapSelfBump), total(Counter::CacheSelfBump),
+	    total(Counter::HeapLayoutQuiet), total(Counter::HeapRepointCalls),
+	    total(Counter::HeapRepointSlots), total(Counter::HeapBumpCpuDirty),
+	    total(Counter::HeapBumpMaybeDirty), total(Counter::HeapBumpBufferModified),
+	    total(Counter::HeapBumpLayoutLeave), total(Counter::HeapBumpUntrackHead),
+	    total(Counter::HeapBumpUntrackTail), total(Counter::HeapBumpUnregister),
+	    total(Counter::HeapBumpUnmap), total(Counter::CacheBumpRegister),
+	    total(Counter::CacheBumpUnregister), total(Counter::CacheBumpStencil),
+	    total(Counter::CacheBumpGpuInvalidate), total(Counter::CacheBumpCpuInvalidate),
+	    total(Counter::CacheBumpClearMeta), total(Counter::CacheBumpTouchMeta),
+	    total(Counter::CacheBumpOther));
 	return lines;
+}
+
+namespace {
+// Timers of waits are exact; the per-call timers are sampled.
+constexpr bool IsWait(Counter counter) {
+	return counter == Counter::GpuFenceWaitNs || counter == Counter::GpuFenceWaitBgNs ||
+	       counter == Counter::GpuPriorityOpWaitNs || counter == Counter::GuestMemoryWaitNs ||
+	       counter == Counter::IdleNs;
+}
+thread_local uint32_t g_timer_sequence = 0;
+} // namespace
+
+ScopedTimer::ScopedTimer(Counter duration) noexcept
+    : m_duration(duration), m_parent(g_active_timer) {
+	if (IsWait(duration)) {
+		m_measured = true;
+		m_weight   = 1;
+	} else if (m_parent != nullptr) {
+		m_measured = m_parent->m_measured;
+		m_weight   = m_parent->m_weight;
+	} else {
+		const auto sample = Config::FrameTimerSample();
+		m_measured        = sample <= 1u || (++g_timer_sequence % sample) == 0u;
+		m_weight          = sample;
+	}
+	if (m_measured) {
+		m_start = Clock::now();
+	}
+	g_active_timer = this;
+}
+
+ScopedTimer::~ScopedTimer() {
+	(void)Stop();
+}
+
+// Returns the exclusive elapsed nanoseconds of this call (not multiplied by the sampling weight),
+// or 0 when this call was not sampled. Waits are always measured, so their callers get the real value.
+uint64_t ScopedTimer::Stop() noexcept {
+	if (m_done) return 0;
+	m_done = true;
+	if (g_active_timer == this) g_active_timer = m_parent;
+	if (!m_measured) return 0;
+	const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - m_start);
+	const auto elapsed_ns = static_cast<uint64_t>(elapsed.count());
+	if (m_parent != nullptr && m_parent->m_measured) m_parent->m_child_ns += elapsed_ns;
+	const auto exclusive_ns = elapsed_ns - std::min(elapsed_ns, m_child_ns);
+	Add(m_duration, exclusive_ns * m_weight);
+	return exclusive_ns;
 }
 
 namespace {
@@ -366,6 +555,8 @@ void FramePresented() noexcept {
 		const auto lines = FormatWindow(delta, elapsed_seconds);
 		Log::WriteToConsoleAndLog(lines.summary);
 		Log::WriteToConsoleAndLog(lines.arch);
+		Log::WriteToConsoleAndLog(lines.cuts);
+		Log::WriteToConsoleAndLog(lines.heap);
 	}
 	if (g_store_loaded.load(std::memory_order_relaxed) && !g_bad_warned) {
 		const auto hits   = delta[static_cast<size_t>(Counter::FindModuleHits)];

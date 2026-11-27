@@ -551,6 +551,16 @@ add_executable(dispatch_limits_tests EXCLUDE_FROM_ALL
 )
 target_include_directories(dispatch_limits_tests PRIVATE ${inc_headers})
 
+add_executable(barrier_tracker_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/BarrierTrackerTests.cpp"
+)
+target_include_directories(barrier_tracker_tests PRIVATE ${inc_headers})
+
+add_executable(prefetch_backoff_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/PrefetchBackoffTests.cpp"
+)
+target_include_directories(prefetch_backoff_tests PRIVATE ${inc_headers})
+
 add_executable(wait_diagnostics_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/WaitDiagnosticsTests.cpp"
 )
@@ -610,6 +620,14 @@ add_executable(materialization_memo_tests EXCLUDE_FROM_ALL
 )
 target_link_libraries(materialization_memo_tests fmt::fmt xbyak::xbyak xxhash)
 target_include_directories(materialization_memo_tests PRIVATE ${inc_headers})
+
+add_executable(callsite_table_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/CallSiteTableTests.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/pipeline/callSiteTable.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/pipeline/materializationMemo.cpp"
+)
+target_link_libraries(callsite_table_tests fmt::fmt xbyak::xbyak xxhash)
+target_include_directories(callsite_table_tests PRIVATE ${inc_headers})
 
 add_executable(resource_tracking_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/ResourceTrackingTests.cpp"

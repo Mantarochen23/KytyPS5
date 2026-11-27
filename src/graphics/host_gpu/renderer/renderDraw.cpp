@@ -7,6 +7,7 @@
 #include "common/emulatorConfig.h"
 #include "common/file.h"
 #include "common/logging/log.h"
+#include "common/ports.h"
 #include "common/profiler.h"
 #include "common/stringUtils.h"
 #include "common/threads.h"
@@ -18,6 +19,7 @@
 #include "graphics/host_gpu/renderer/colorRenderTarget.h"
 #include "graphics/host_gpu/renderer/debug.h"
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
+#include "graphics/host_gpu/renderer/pipeline/frameHoles.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
 #include "graphics/host_gpu/renderer/render.h"
@@ -804,6 +806,20 @@ static void AcquireVertexBuffers(CommandBuffer& buffer, const ShaderVertexInputI
 	}
 }
 
+static std::vector<uint64_t> CollectDrawTargetAddresses(const HW::Context& context) {
+	std::vector<uint64_t> addrs;
+	const uint32_t        mask = context.GetRenderTargetMask();
+	for (uint32_t slot = 0; slot < RENDER_COLOR_ATTACHMENTS_MAX; ++slot) {
+		if (render_target_mask_slot(mask, slot) == 0u) continue;
+		const auto addr = context.GetRenderTarget(slot).base.addr;
+		if (addr != 0) addrs.push_back(addr);
+	}
+	const auto& depth = context.GetDepthRenderTarget();
+	const auto  zaddr = depth.z_write_base_addr != 0 ? depth.z_write_base_addr : depth.z_read_base_addr;
+	if (zaddr != 0) addrs.push_back(zaddr);
+	return addrs;
+}
+
 static bool GetDrawTopology(const HW::UserConfig& ucfg, vk::PrimitiveTopology& topology) {
 
 	topology = vk::PrimitiveTopology::ePointList;
@@ -995,6 +1011,8 @@ bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCal
 
 	if (targets.color_count == 0 && !targets.depth.image_id && !state.ps_active) {
 		LogFramebufferSkip(draw.Name(), targets.depth, buffer, draw.index_count, 0);
+		FrameHoles::NoteDrawSkip(FrameHoles::DrawSkipReason::NoTargets,
+		                         CollectDrawTargetAddresses(buffer.GetRegisters()));
 		return false;
 	}
 	if (g_draw_sample != nullptr) g_draw_sample->clock.AddTo(g_draw_sample->targets_ns);
@@ -1241,11 +1259,23 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 		mesh_indices = indices->BufferDeviceAddress() + offset + (index_source.address & 3u);
 	}
 	std::pair<Buffer*, uint64_t> args_buffer {};
+	std::pair<Buffer*, uint64_t> count_buffer {};
 	if (emit.indirect.address != 0) {
 		const auto size = static_cast<uint64_t>(emit.indirect.count - 1) * emit.indirect.stride +
 		                  (draw.indexed ? sizeof(vk::DrawIndexedIndirectCommand)
 		                                : sizeof(vk::DrawIndirectCommand));
-		args_buffer = m_context.GetBufferCache().ObtainBuffer(emit.indirect.address, size, false);
+		auto& buffer_cache = m_context.GetBufferCache();
+		if (emit.indirect.count_address != 0) {
+			// Discover both ranges first so acquiring the second cannot merge and invalidate the first.
+			const auto args_id  = buffer_cache.FindBuffer(emit.indirect.address, size);
+			const auto count_id = buffer_cache.FindBuffer(emit.indirect.count_address, sizeof(uint32_t));
+			args_buffer  = buffer_cache.ObtainBuffer(emit.indirect.address, size, false, false, args_id);
+			count_buffer = buffer_cache.ObtainBuffer(emit.indirect.count_address, sizeof(uint32_t),
+			                                         false, false, count_id);
+			EXIT_IF((count_buffer.second & 3u) != 0);
+		} else {
+			args_buffer = buffer_cache.ObtainBuffer(emit.indirect.address, size, false);
+		}
 		EXIT_IF((args_buffer.second & 3u) != 0);
 	}
 	if (g_draw_sample != nullptr) g_draw_sample->clock.AddTo(g_draw_sample->bind_ns);
@@ -1336,46 +1366,49 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 	buffer.BeginRendering(rendering);
 	vk_buffer.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline.pipeline);
 
-	OpBreadcrumb draw_op {};
-	if (mesh_task) {
-		draw_op.kind  = BreadcrumbOpKind::DrawMeshIndirect;
-		draw_op.dim_x = emit.indirect.count;
-		draw_op.dim_y = 1;
-		draw_op.dim_z = 1;
-	} else if (mesh_active) {
-		draw_op.kind  = BreadcrumbOpKind::DrawMesh;
-		draw_op.dim_x = mesh_groups;
-		draw_op.dim_y = draw.instance_count;
-		draw_op.dim_z = 1;
-	} else if (args_buffer.first == nullptr) {
-		draw_op.kind  = draw.indexed ? BreadcrumbOpKind::DrawIndexed : BreadcrumbOpKind::Draw;
-		draw_op.dim_x = draw.index_count;
-		draw_op.dim_y = draw.instance_count;
-		draw_op.dim_z = 1;
-	} else {
-		draw_op.kind = draw.indexed ? BreadcrumbOpKind::DrawIndexedIndirect
-		                            : BreadcrumbOpKind::DrawIndirect;
-		draw_op.dim_x = draw.index_count;
-		draw_op.dim_y = emit.indirect.count;
-		draw_op.dim_z = emit.indirect.stride;
-	}
-	for (const auto& stage: vertex_stages) {
-		if (stage.stage.module != nullptr && draw_op.stage_count < draw_op.stages.size()) {
-			draw_op.stages[draw_op.stage_count++] = {stage.stage.module->info.stage,
-			                                         stage.stage.module->info.shader_hash,
-			                                         stage.stage.module->id,
-			                                         stage.stage.module->info.info.uses_dma};
+	auto& graphics  = m_context.GetGraphics();
+	uint32_t marker_id = 0;
+	if (graphics.breadcrumbs.Active()) {
+		OpBreadcrumb draw_op {};
+		if (mesh_task) {
+			draw_op.kind  = BreadcrumbOpKind::DrawMeshIndirect;
+			draw_op.dim_x = emit.indirect.count;
+			draw_op.dim_y = 1;
+			draw_op.dim_z = 1;
+		} else if (mesh_active) {
+			draw_op.kind  = BreadcrumbOpKind::DrawMesh;
+			draw_op.dim_x = mesh_groups;
+			draw_op.dim_y = draw.instance_count;
+			draw_op.dim_z = 1;
+		} else if (args_buffer.first == nullptr) {
+			draw_op.kind  = draw.indexed ? BreadcrumbOpKind::DrawIndexed : BreadcrumbOpKind::Draw;
+			draw_op.dim_x = draw.index_count;
+			draw_op.dim_y = draw.instance_count;
+			draw_op.dim_z = 1;
+		} else {
+			draw_op.kind = draw.indexed ? BreadcrumbOpKind::DrawIndexedIndirect
+			                            : BreadcrumbOpKind::DrawIndirect;
+			draw_op.dim_x = draw.index_count;
+			draw_op.dim_y = emit.indirect.count;
+			draw_op.dim_z = emit.indirect.stride;
 		}
+		for (const auto& stage: vertex_stages) {
+			if (stage.stage.module != nullptr && draw_op.stage_count < draw_op.stages.size()) {
+				draw_op.stages[draw_op.stage_count++] = {stage.stage.module->info.stage,
+				                                         stage.stage.module->info.shader_hash,
+				                                         stage.stage.module->id,
+				                                         stage.stage.module->info.info.uses_dma};
+			}
+		}
+		if (state.ps_active && state.ps_input_info.stage.module != nullptr &&
+		    draw_op.stage_count < draw_op.stages.size()) {
+			draw_op.stages[draw_op.stage_count++] = {state.ps_input_info.stage.module->info.stage,
+			                                         state.ps_input_info.stage.module->info.shader_hash,
+			                                         state.ps_input_info.stage.module->id,
+			                                         state.ps_input_info.stage.module->info.info.uses_dma};
+		}
+		marker_id = graphics.breadcrumbs.BeginOp(graphics, vk_buffer, draw_op);
 	}
-	if (state.ps_active && state.ps_input_info.stage.module != nullptr &&
-	    draw_op.stage_count < draw_op.stages.size()) {
-		draw_op.stages[draw_op.stage_count++] = {state.ps_input_info.stage.module->info.stage,
-		                                         state.ps_input_info.stage.module->info.shader_hash,
-		                                         state.ps_input_info.stage.module->id,
-		                                         state.ps_input_info.stage.module->info.info.uses_dma};
-	}
-	auto&          graphics  = m_context.GetGraphics();
-	const uint32_t marker_id = graphics.breadcrumbs.BeginOp(graphics, vk_buffer, draw_op);
 
 	auto&         occlusion_queries = m_context.GetOcclusionQueries();
 	const int32_t occlusion_query   = occlusion_queries.Begin(vk_buffer);
@@ -1385,6 +1418,16 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 		vk_buffer.drawMeshTasksEXT(mesh_groups, draw.instance_count, 1);
 	} else if (args_buffer.first == nullptr) {
 		EmitDrawPrimitives(ucfg, vk_buffer, draw, emit);
+	} else if (count_buffer.first != nullptr) {
+		if (draw.indexed) {
+			vk_buffer.drawIndexedIndirectCount(args_buffer.first->Handle(), args_buffer.second,
+			                                   count_buffer.first->Handle(), count_buffer.second,
+			                                   emit.indirect.count, emit.indirect.stride);
+		} else {
+			vk_buffer.drawIndirectCount(args_buffer.first->Handle(), args_buffer.second,
+			                            count_buffer.first->Handle(), count_buffer.second,
+			                            emit.indirect.count, emit.indirect.stride);
+		}
 	} else if (draw.indexed) {
 		vk_buffer.drawIndexedIndirect(args_buffer.first->Handle(), args_buffer.second,
 		                              emit.indirect.count, emit.indirect.stride);
@@ -1394,6 +1437,15 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 	}
 	occlusion_queries.End(vk_buffer, occlusion_query);
 	graphics.breadcrumbs.EndOp(graphics, vk_buffer, marker_id);
+	const bool track_address_writes =
+	    Config::PortEnabled(Config::Port::InPlaceReadback) ||
+	    Config::PortEnabled(Config::Port::DetachedReadback);
+	m_context.GetBufferCache().RecordPendingWrites(
+	    track_address_writes &&
+	    std::any_of(stages.begin(), stages.end(), [](const PreparedBindings* stage) {
+		    const auto& program = stage->runtime->module->info;
+		    return program.has_address_writes || program.info.uses_dma;
+	    }));
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::Draws);
 	Common::FrameCost::Add(Common::FrameCost::Counter::Draws);
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::DrawInstances, draw.instance_count);
@@ -1426,7 +1478,9 @@ static std::optional<DrawEmitInfo> ResolveDrawEmit(const HW::UserConfig&        
 	if (indirect.address != 0) {
 		if (!vs.indirect_draw ||
 		    ucfg.GetPrimType() == Prospero::PrimitiveType::kQuadListLegacy ||
-		    vs.indirect_offsets != indirect.offsets) {
+		    vs.indirect_offsets != indirect.offsets ||
+		    (indirect.count_address != 0 && vs.stage.module != nullptr &&
+		     vs.stage.module->info.stage == ShaderType::Mesh)) {
 			return std::nullopt;
 		}
 		return DrawEmitInfo {.indirect = indirect};
@@ -1450,6 +1504,9 @@ bool RenderExecutor::DrawIndex(CommandBuffer& buffer, const DrawIndexArgs& args)
 	Common::FrameCost::ScopedTimer lock_wait(Common::FrameCost::Counter::LockWaitNs);
 	Common::LockGuard              lock(m_context.GetMutex());
 	lock_wait.Stop();
+	if (!m_skip_catchup.Empty()) {
+		DrainSkippedDispatchesLocked(buffer);
+	}
 	if (args.index_count == 0 || (args.instance_count == 0 && args.indirect.address == 0)) {
 		Common::FrameCost::Add(Common::FrameCost::Counter::DrawsSkipped);
 		return true;
@@ -1464,6 +1521,8 @@ bool RenderExecutor::DrawIndex(CommandBuffer& buffer, const DrawIndexArgs& args)
 
 	if (!DrawHasValidVertexShader(sh_ctx)) {
 		Common::FrameCost::Add(Common::FrameCost::Counter::DrawsSkipped);
+		FrameHoles::NoteDrawSkip(FrameHoles::DrawSkipReason::NullShader,
+		                         CollectDrawTargetAddresses(buffer.GetRegisters()));
 		return true;
 	}
 
@@ -1492,6 +1551,8 @@ bool RenderExecutor::DrawIndex(CommandBuffer& buffer, const DrawIndexArgs& args)
 	                       .indirect_draw    = args.indirect.address != 0};
 	if (!GetDrawTopology(ucfg, state.topology)) {
 		Common::FrameCost::Add(Common::FrameCost::Counter::DrawsSkipped);
+		FrameHoles::NoteDrawSkip(FrameHoles::DrawSkipReason::UnsupportedStage,
+		                         CollectDrawTargetAddresses(buffer.GetRegisters()));
 		return true;
 	}
 
@@ -1549,6 +1610,9 @@ bool RenderExecutor::DrawAuto(CommandBuffer& buffer, const DrawAutoArgs& args) {
 	Common::FrameCost::ScopedTimer lock_wait(Common::FrameCost::Counter::LockWaitNs);
 	Common::LockGuard              lock(m_context.GetMutex());
 	lock_wait.Stop();
+	if (!m_skip_catchup.Empty()) {
+		DrainSkippedDispatchesLocked(buffer);
+	}
 	if (args.indirect.address == 0 && (args.vertex_count == 0 || args.instance_count == 0)) {
 		Common::FrameCost::Add(Common::FrameCost::Counter::DrawsSkipped);
 		return true;
@@ -1563,6 +1627,8 @@ bool RenderExecutor::DrawAuto(CommandBuffer& buffer, const DrawAutoArgs& args) {
 
 	if (!DrawHasValidVertexShader(sh_ctx)) {
 		Common::FrameCost::Add(Common::FrameCost::Counter::DrawsSkipped);
+		FrameHoles::NoteDrawSkip(FrameHoles::DrawSkipReason::NullShader,
+		                         CollectDrawTargetAddresses(buffer.GetRegisters()));
 		return true;
 	}
 
@@ -1588,6 +1654,8 @@ bool RenderExecutor::DrawAuto(CommandBuffer& buffer, const DrawAutoArgs& args) {
 	DrawRenderState state {.indirect_offsets = args.indirect.offsets,
 	                       .indirect_draw    = args.indirect.address != 0};
 	if (!GetDrawTopology(ucfg, state.topology)) {
+		FrameHoles::NoteDrawSkip(FrameHoles::DrawSkipReason::UnsupportedStage,
+		                         CollectDrawTargetAddresses(buffer.GetRegisters()));
 		ResetBindings();
 		Common::FrameCost::Add(Common::FrameCost::Counter::DrawsSkipped);
 		return true;
@@ -1609,6 +1677,8 @@ bool RenderExecutor::DrawAuto(CommandBuffer& buffer, const DrawAutoArgs& args) {
 			     state.ps_input_info.input_num, sh_ctx.GetPs().ps_regs.data_addr,
 			     sh_ctx.GetVs().es_regs.data_addr, sh_ctx.GetVs().gs_regs.data_addr);
 		}
+		FrameHoles::NoteDrawSkip(FrameHoles::DrawSkipReason::RectNoExports,
+		                         CollectDrawTargetAddresses(buffer.GetRegisters()));
 		ResetBindings();
 		Common::FrameCost::Add(Common::FrameCost::Counter::DrawsSkipped);
 		return true;

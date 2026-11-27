@@ -13,6 +13,8 @@
 #include "common/stringUtils.h"
 #include "common/threads.h"
 #include "common/virtualMemory.h"
+#include "graphics/host_gpu/renderer/cache/hotReadbackTable.h"
+#include "graphics/host_gpu/renderer/cache/recentGpuWrites.h"
 #include "libs/libs.h"
 
 #include <chrono>
@@ -644,6 +646,40 @@ TEST(Ports, DisablePortParsesNamesAndSelectsTheShaderStore) {
 	Config::SetDisabledPorts({});
 }
 
+TEST(Ports, DefaultOffPortNeedsEnablingAndDisablingStillWins) {
+	Config::SetDisabledPorts({});
+	EXPECT_FALSE(Config::PortEnabled(Config::Port::CallsiteLookup));
+	EXPECT_TRUE(Config::PortEnabled(Config::Port::RuntimeTableCache));
+	Config::SetEnabledPorts({"callsite-lookup"}, {});
+	EXPECT_TRUE(Config::PortEnabled(Config::Port::CallsiteLookup));
+	Config::SetDisabledPorts({"callsite-lookup"});
+	Config::SetEnabledPorts({"callsite-lookup"}, {"callsite-lookup"});
+	EXPECT_FALSE(Config::PortEnabled(Config::Port::CallsiteLookup));
+	Config::SetDisabledPorts({});
+}
+
+TEST(Ports, DefaultOffPortsNeedEnablePort) {
+	Config::SetDisabledPorts({});
+	EXPECT_TRUE(Config::PortEnabled(Config::Port::BarrierTracker));
+	EXPECT_TRUE(Config::PortEnabled(Config::Port::GpuDrawIndirectCount));
+	EXPECT_FALSE(Config::PortEnabled(Config::Port::GpuIndirectThreadDim));
+	EXPECT_FALSE(Config::PortEnabled(Config::Port::InPlaceReadback));
+	EXPECT_FALSE(Config::PortEnabled(Config::Port::DetachedReadback));
+	EXPECT_FALSE(Config::PortEnabled(Config::Port::BatchedReadback));
+	std::vector<std::string> on;
+	ASSERT_TRUE(Config::ParseDisabledPorts("inplace-readback", on));
+	Config::SetDisabledPorts({});
+	Config::SetEnabledPorts(on, {});
+	EXPECT_TRUE(Config::PortEnabled(Config::Port::InPlaceReadback));
+	EXPECT_FALSE(Config::PortEnabled(Config::Port::DetachedReadback));
+	std::vector<std::string> off;
+	ASSERT_TRUE(Config::ParseDisabledPorts("inplace-readback", off));
+	Config::SetDisabledPorts(off);
+	Config::SetEnabledPorts(on, off);
+	EXPECT_FALSE(Config::PortEnabled(Config::Port::InPlaceReadback));
+	Config::SetDisabledPorts({});
+}
+
 namespace {
 
 TEST(MemAccount, ProcStatusFieldsAreKilobytes) {
@@ -892,6 +928,11 @@ TEST(FrameCost, FormatWindowSeparatesBackgroundGpuWaitsAndReportsArchFields) {
 	set(Counter::DispatchesGuard, 340);
 	set(Counter::BvhDispatches, 16);
 	set(Counter::BarriersAllCommands, 1200);
+	set(Counter::BarriersGlobal, 1000);
+	set(Counter::BarriersBuffer, 100);
+	set(Counter::BarriersImage, 60);
+	set(Counter::PassBreaks, 400);
+	set(Counter::BarriersDropped, 2000);
 	set(Counter::DrawStepSamples, 4);
 	set(Counter::DrawStepProgramsNs, 4000);
 	set(Counter::DrawStepTargetsNs, 2000);
@@ -927,7 +968,10 @@ TEST(FrameCost, FormatWindowSeparatesBackgroundGpuWaitsAndReportsArchFields) {
 	                          "oa_ex=0.00 skip=0.00 bvh=8.00)"),
 	          std::string::npos)
 	    << lines.arch;
-	EXPECT_NE(lines.arch.find("barriers_all=600.00"), std::string::npos) << lines.arch;
+	EXPECT_NE(lines.arch.find("barriers_all=600.00 barriers(global=500.00 buffer=50.00 image=30.00) "
+	                          "pass_breaks=200.00 barriers_dropped=1000.00 "),
+	          std::string::npos)
+	    << lines.arch;
 	EXPECT_NE(lines.arch.find("draw_ns(n=4 prog=1000 rt=500 pipe=300 bind=2000 commit=1500 rec=700)"),
 	          std::string::npos)
 	    << lines.arch;
@@ -958,6 +1002,110 @@ TEST(FrameCost, RecordSubmitAndRenderWaitReasonAccumulateCounters) {
 	EXPECT_EQ(after[static_cast<size_t>(Counter::SubmitFlip)] -
 	              before[static_cast<size_t>(Counter::SubmitFlip)],
 	          1u);
+}
+
+TEST(FrameCost, ReadbackSiteScopesAndArchFormattingSplitProducers) {
+	using namespace Common::FrameCost;
+	EXPECT_EQ(CurrentReadbackSite(), ReadbackSite::Other);
+	const auto before = SnapshotCounters();
+	{
+		ScopedWaitReason   wait_reason(WaitReason::Readback);
+		ScopedReadbackSite outer(ReadbackSite::ThreadDim);
+		EXPECT_EQ(CurrentReadbackSite(), ReadbackSite::ThreadDim);
+		RecordRenderWaitReason(2'000'000);
+		{
+			ScopedReadbackSite inner(ReadbackSite::Scalar);
+			EXPECT_EQ(CurrentReadbackSite(), ReadbackSite::Scalar);
+			RecordRenderWaitReason(3'000'000);
+		}
+		EXPECT_EQ(CurrentReadbackSite(), ReadbackSite::ThreadDim);
+		RecordRenderWaitReason(1'000'000);
+	}
+	EXPECT_EQ(CurrentReadbackSite(), ReadbackSite::Other);
+	const auto after = SnapshotCounters();
+	EXPECT_EQ(after[static_cast<size_t>(Counter::WaitRbThreadDimCalls)] -
+	              before[static_cast<size_t>(Counter::WaitRbThreadDimCalls)],
+	          2u);
+	EXPECT_EQ(after[static_cast<size_t>(Counter::WaitRbThreadDimNs)] -
+	              before[static_cast<size_t>(Counter::WaitRbThreadDimNs)],
+	          3'000'000u);
+	EXPECT_EQ(after[static_cast<size_t>(Counter::WaitRbScalarCalls)] -
+	              before[static_cast<size_t>(Counter::WaitRbScalarCalls)],
+	          1u);
+	EXPECT_EQ(after[static_cast<size_t>(Counter::WaitRbScalarNs)] -
+	              before[static_cast<size_t>(Counter::WaitRbScalarNs)],
+	          3'000'000u);
+
+	std::array<uint64_t, CounterCount> delta {};
+	const auto set = [&](Counter c, uint64_t v) { delta[static_cast<size_t>(c)] = v; };
+	set(Counter::Frames, 2);
+	set(Counter::WaitRbThreadDimCalls, 4);
+	set(Counter::WaitRbThreadDimNs, 6'000'000);
+	set(Counter::WaitRbReadFaultCalls, 2);
+	set(Counter::WaitRbReadFaultNs, 2'000'000);
+	set(Counter::ReadbackInPlace, 10);
+	set(Counter::ReadbackDetached, 6);
+	set(Counter::ReadbackSync, 4);
+	set(Counter::ReadbackBatchExtra, 8);
+	set(Counter::DispatchIndirectThreadDimGpu, 12);
+	set(Counter::DrawIndirectCountGpu, 14);
+	const auto lines = FormatWindow(delta, 0.1);
+	EXPECT_NE(lines.arch.find("rb_site(tdim=2.00/3.000 lds=0.00/0.000 scalar=0.00/0.000 "
+	                          "heap=0.00/0.000 vattr=0.00/0.000 meta=0.00/0.000 "
+	                          "rfault=1.00/1.000 wfault=0.00/0.000 inv=0.00/0.000 "
+	                          "other=0.00/0.000)"),
+	          std::string::npos)
+	    << lines.arch;
+	EXPECT_NE(lines.arch.find("rb_path(inplace=5.00 detached=3.00 sync=2.00 batch_ex=4.00 "
+	                          "gpu_tdim=6.00 gpu_icount=7.00)"),
+	          std::string::npos)
+	    << lines.arch;
+}
+
+TEST(ReadbackBatchTables, HotTableEvictsOldestAndExpiresStaleTicks) {
+	using namespace Libs::Graphics;
+	HotReadbackTable table;
+	for (uint64_t i = 0; i < MaxHotReadbackEntries; ++i) {
+		table.Note(0x10000ull + i * 0x4000ull, 0x4000ull, i + 10u);
+	}
+	EXPECT_EQ(table.Size(), MaxHotReadbackEntries);
+	// Refresh oldest entry so the second entry becomes oldest.
+	table.Note(0x10000ull, 0x8000ull, 1000u);
+	table.Note(0x9000000ull, 0x4000ull, 1001u);
+	EXPECT_EQ(table.Size(), MaxHotReadbackEntries);
+	uint64_t tick = 0;
+	EXPECT_TRUE(table.TickOf(0x10000ull, tick));
+	EXPECT_EQ(tick, 1000u);
+	EXPECT_FALSE(table.TickOf(0x14000ull, tick));
+
+	size_t kept = 0;
+	table.ForEachHot(1001u + HotReadbackTicks, [&](uint64_t, uint64_t) { ++kept; });
+	// Only entries at tick >= 1001 survive; tick 1000 is older than HotReadbackTicks.
+	EXPECT_EQ(kept, 1u);
+	EXPECT_EQ(table.Size(), 1u);
+}
+
+TEST(ReadbackBatchTables, RecentWriteRingDedupesNewestAndSplitsFinished) {
+	using namespace Libs::Graphics;
+	RecentGpuWriteRing ring;
+	ring.Note(0x20000ull, 0u, 1u);
+	ring.Note(0x20000ull, RecentWriteMaxBytes + 1u, 1u);
+	EXPECT_EQ(ring.Size(), 0u);
+
+	ring.Note(0x20100ull, 0x80ull, 5u);
+	ring.Note(0x20100ull, 0x80ull, 7u); // same span refreshes tick without adding an entry
+	EXPECT_EQ(ring.Size(), 1u);
+	ring.Note(0x30000ull, 0x100ull, 12u);
+	EXPECT_EQ(ring.Size(), 2u);
+
+	std::vector<std::tuple<uint64_t, uint64_t, bool>> seen;
+	ring.ForEachNewest(10u, [&](uint64_t addr, uint64_t size, bool finished) {
+		seen.emplace_back(addr, size, finished);
+		return true;
+	});
+	ASSERT_EQ(seen.size(), 2u);
+	EXPECT_EQ(seen[0], std::make_tuple(0x30000ull, TRACKER_PAGE_SIZE, false));
+	EXPECT_EQ(seen[1], std::make_tuple(0x20000ull, TRACKER_PAGE_SIZE, true));
 }
 
 } // namespace

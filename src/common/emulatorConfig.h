@@ -212,6 +212,24 @@ struct ConfigOptions {
 	// hit reads none of them; a page written more than this many times is compared by its bytes.
 	// 0 = off (every range is read and hashed on every lookup).
 	uint32_t                 materialize_memo_stamps    = 0;
+	// --gpu-debug: record a breadcrumb (and write driver buffer markers) for every draw and dispatch,
+	// for device-lost reports. Off = none are recorded, unless another diagnostic needs them
+	// (--gpu-fault-query, --graphics-debug-dump, --guest-fault-report-only, RADV_DEBUG with `hang`).
+	bool                     gpu_debug_enabled          = false;
+	// --prefetch-backoff <n>: after four scans of submitted commands that found every compute shader
+	// known already, scan only one submission in 2, 4, ... up to 2^n, until a scan finds news.
+	// 0 = scan every submission.
+	uint32_t                 prefetch_backoff           = 4;
+	// --frame-timer-sample <n>: the frame-cost timers of per-call work (lock wait, image lookup,
+	// materialization, module lookup) read the clock for one call in n and scale the result by n.
+	// 1 = every call.
+	uint32_t                 frame_timer_sample         = 16;
+	// --defer-new-targets-on-stall-ms: once no frame was recorded for this long, a draw into a
+	// target that was not seen redrawn is skipped while its shaders build, like a draw into a
+	// redrawn one, instead of building them on the render thread. 0 = never.
+	uint32_t                 defer_new_targets_on_stall_ms = 0;
+	// --enable-port: names from common/ports.h that are off by default and turned on.
+	std::vector<std::string> enabled_ports;
 };
 
 void Load(const ConfigOptions& cfg);
@@ -338,9 +356,13 @@ uint32_t FaultStormFrames();
 uint32_t FaultStormHold();
 uint32_t HeapTuneArenas();
 uint32_t DriverCacheCapMb();
+bool     GpuDebugEnabled();
+uint32_t PrefetchBackoffExponent();
+uint32_t FrameTimerSample();
 uint32_t MaxSpirvWords();
 uint32_t MaterializeMemoEntries();
 uint32_t MaterializeMemoStamps();
+uint32_t DeferNewTargetsOnStallMs();
 
 } // namespace Config
 

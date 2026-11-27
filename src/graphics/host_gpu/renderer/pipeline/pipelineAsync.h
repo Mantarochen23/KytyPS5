@@ -3,6 +3,7 @@
 
 #include "common/common.h"
 #include "common/uniqueFunction.h"
+#include "graphics/host_gpu/renderer/pipeline/asyncPlan.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderWorkers.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
@@ -60,6 +61,8 @@ struct PipelineCache::Async {
 		// What the translation job spent, to show in the build line of the module made from it.
 		uint64_t translate_us = 0;
 		uint64_t plan_us      = 0;
+		// What asked for this translation ("prefetch", "dispatch", or "draw").
+		const char* origin    = "unknown";
 	};
 
 	// A job a worker has or will run for a program, and what it does.
@@ -113,6 +116,12 @@ struct PipelineCache::Async {
 	std::mutex                                done_mutex;
 	std::condition_variable                   done_cv;
 	std::vector<FinishedJob> done;
+	// True while `done` may hold a job (set under done_mutex when one is added, cleared when the
+	// render thread takes them): lets PumpAsync see that there is nothing to take without the lock.
+	std::atomic<bool>        done_pending {false};
+	// Render thread only: PumpAsync calls that found nothing to apply; the periodic reports are
+	// looked at only every 64th such call.
+	uint32_t                 idle_pumps = 0;
 	// Render thread only: finished jobs taken from `done` that PumpAsync's time budget has not
 	// applied yet.
 	std::deque<FinishedJob> backlog;
@@ -150,8 +159,12 @@ struct PipelineCache::Async {
 		uint64_t pipelines_ready   = 0;
 		uint64_t pipeline_failed   = 0;
 		uint64_t expired           = 0; // translations dropped over the IR budget
+		uint64_t retired           = 0; // waiting translations retired loudly (TTL/redundant/failed)
 	};
 	Counters counters;
+	// Render thread only: retires a single waiting translation for `key` with a named reason and
+	// frees its IR off the render thread.
+	bool RetireWaiting(const ProgramKey& key, const char* reason);
 	uint64_t last_store_report_ms = 0;
 	uint64_t last_account_ms      = 0;
 	// Owned by the PipelineCache: the builds and the skipped dispatches of the status period.
@@ -170,6 +183,9 @@ struct PipelineCache::Async {
 	// it every frame: it was drawn in at least three of the last six. Only then may a draw into it
 	// be skipped while its shaders are built, because the next frame draws it again.
 	bool NoteTargetDraw(uint64_t address);
+	// Render thread only: how long the current frame has lasted, for draws into targets that were
+	// not seen redrawn (--defer-new-targets-on-stall-ms).
+	AsyncPlan::FrameStallTracker frame_stall;
 
 	// Render thread only: what the render thread built itself since the last report, because a
 	// draw or dispatch could not be skipped. These are the freezes async compile leaves.

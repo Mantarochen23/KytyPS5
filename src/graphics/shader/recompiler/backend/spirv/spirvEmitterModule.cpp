@@ -159,6 +159,10 @@ uint32_t TypePhysicalU32Pointer(EmitterState& state) {
 	return TypePointer(state, spv::StorageClassPhysicalStorageBuffer, TypeU32(state));
 }
 
+uint32_t TypePhysicalU64Pointer(EmitterState& state) {
+	return TypePointer(state, spv::StorageClassPhysicalStorageBuffer, TypeU64(state));
+}
+
 uint32_t TypePhysicalU32BufferPointer(EmitterState& state) {
 	return TypePointer(state, spv::StorageClassPhysicalStorageBuffer,
 	                   StorageBufferType(state, state.storage_buffers[2]));
@@ -229,7 +233,11 @@ void DefineDescriptors(EmitterState& state) {
 	auto& counts = bindings.descriptor_counts;
 	auto& buffer_count = counts[static_cast<size_t>(Kind::Buffers)];
 	for (auto& buffer: info.buffers) {
-		buffer.descriptor_index = buffer.live ? buffer_count++ : UINT32_MAX;
+		const bool runtime_table =
+		    buffer.indirect_root != IR::BufferResource::NoIndirectBuffer &&
+		    IR::IsIndirectBufferRuntimeTable(
+		        info.buffers[buffer.indirect_root].indirect_mapping_offset);
+		buffer.descriptor_index = (buffer.live && !runtime_table) ? buffer_count++ : UINT32_MAX;
 	}
 	std::array<const IR::ImageResource*, IR::ImageBindingCount> image_types {};
 	std::array<const IR::ImageResource*, 5>                     atomic_u8_image_types {};
@@ -274,8 +282,13 @@ void DefineDescriptors(EmitterState& state) {
 		bindings.ray_query_dword = bindings.memory_offset_dword;
 		bindings.memory_offset_dword += 2u;
 	}
+	const bool force_shader_data_buffer =
+	    state.input_info.compute != nullptr &&
+	    state.input_info.compute->indirect_thread_dimensions && info.uses_dispatch_threads;
 	bindings.push_data_start_dword =
-	    state.push_data.StartFor(bindings.ShaderDataDwords(), state.program.stage);
+	    force_shader_data_buffer
+	        ? IR::PushData::NoStart
+	        : state.push_data.StartFor(bindings.ShaderDataDwords(), state.program.stage);
 	counts[static_cast<size_t>(Kind::ShaderData)] =
 	    bindings.ShaderDataDwords() != 0 && !bindings.UsesPushData();
 	if (state.program.bindings.UsesPushData() || state.program.stage == ShaderType::Mesh ||

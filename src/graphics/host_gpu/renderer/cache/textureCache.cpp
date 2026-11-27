@@ -249,8 +249,11 @@ void TextureCache::RegisterImage(ImageId id) {
 		m_registered_pages.Add(page, 1);
 	});
 	TouchRegistrationsLocked(data.address, data.size);
-	TouchResolutionGenerationLocked(data.address, data.size);
+	TouchResolutionGenerationLocked(data.address, data.size,
+	                                Common::FrameCost::Counter::CacheBumpRegister);
 	image.registered = true;
+	// A new image over a written table's range must be resolved by that table's next mark.
+	m_buffer_cache.NoteTableRangeChanged(data.address, data.size);
 	image.lru_id     = m_lru_cache.Insert(id, m_gc_tick);
 	m_resolve_cache.Invalidate();
 	m_total_used_memory += image.AccountedSize();
@@ -258,7 +261,7 @@ void TextureCache::RegisterImage(ImageId id) {
 
 void TextureCache::UnregisterImage(ImageId id) {
 	auto& image = m_slot_images[id];
-	image.HeapChanged();
+	image.HeapChanged(Common::FrameCost::Counter::HeapBumpUnregister);
 	UntrackImage(id);
 	ForEachPage(image.info.data.address, image.info.data.size, [this, id](uint64_t page) {
 		auto* bucket = m_image_page_table.Find(page);
@@ -274,7 +277,9 @@ void TextureCache::UnregisterImage(ImageId id) {
 		m_registered_pages.Add(page, -1);
 	});
 	TouchRegistrationsLocked(image.info.data.address, image.info.data.size);
-	TouchResolutionGenerationLocked(image.info.data.address, image.info.data.size);
+	TouchResolutionGenerationLocked(image.info.data.address, image.info.data.size,
+	                                Common::FrameCost::Counter::CacheBumpUnregister);
+	m_buffer_cache.NoteTableRangeChanged(image.info.data.address, image.info.data.size);
 	m_lru_cache.Free(image.lru_id);
 	m_total_used_memory -= image.AccountedSize();
 	image.registered = false;
@@ -298,8 +303,10 @@ bool TextureCache::RegistrationsSinceLocked(uint64_t address, uint64_t size,
 	return changed;
 }
 
-void TextureCache::TouchResolutionGenerationLocked(uint64_t address, uint64_t size) {
+void TextureCache::TouchResolutionGenerationLocked(uint64_t address, uint64_t size,
+                                                   Common::FrameCost::Counter site) {
 	if (!GuestRange {address, size}.Valid()) return;
+	Common::FrameCost::Add(site);
 	const auto generation = m_resolution_generation.fetch_add(1u, std::memory_order_relaxed) + 1u;
 	if (m_resolution_changes.size() >= MaxResolutionChanges) {
 		// Nobody drains the journal (no resident image heap is rebinding): keep memory bounded.
@@ -310,6 +317,28 @@ void TextureCache::TouchResolutionGenerationLocked(uint64_t address, uint64_t si
 	m_resolution_changes.push_back({{address, size}, generation});
 	ForEachPage(address, size,
 	            [this, generation](uint64_t page) { m_resolution_page_table[page] = generation; });
+}
+
+void TextureCache::TouchResolutionGenerationLocked(const RangeSet& ranges,
+                                                   Common::FrameCost::Counter site) {
+	bool valid = false;
+	ranges.ForEach([&](uint64_t address, uint64_t end) {
+		valid |= GuestRange {address, end - address}.Valid();
+	});
+	if (!valid) return;
+	Common::FrameCost::Add(site);
+	const auto generation = m_resolution_generation.fetch_add(1u, std::memory_order_relaxed) + 1u;
+	ranges.ForEach([&](uint64_t address, uint64_t end) {
+		const auto size = end - address;
+		if (!GuestRange {address, size}.Valid()) return;
+		if (m_resolution_changes.size() >= MaxResolutionChanges) {
+			m_resolution_changes.clear();
+			m_resolution_journal_floor = generation;
+		}
+		m_resolution_changes.push_back({{address, size}, generation});
+		ForEachPage(address, size,
+		            [this, generation](uint64_t page) { m_resolution_page_table[page] = generation; });
+	});
 }
 
 uint64_t TextureCache::TakeResolutionChangesSince(uint64_t generation,
@@ -478,7 +507,7 @@ void TextureCache::UntrackImageHead(ImageId id) {
 	const auto address = Common::AlignDown(begin + TRACKER_PAGE_SIZE, TRACKER_PAGE_SIZE);
 	const auto size    = address - begin;
 	image.track_addr   = address;
-	image.HeapChanged();
+	image.HeapChanged(Common::FrameCost::Counter::HeapBumpUntrackHead);
 	if (image.track_addr == image.track_addr_end) {
 		MarkAsMaybeDirty(id, image);
 	}
@@ -496,7 +525,7 @@ void TextureCache::UntrackImageTail(ImageId id) {
 	const auto address   = Common::AlignDown(end, TRACKER_PAGE_SIZE);
 	const auto size      = end - address;
 	image.track_addr_end = address;
-	image.HeapChanged();
+	image.HeapChanged(Common::FrameCost::Counter::HeapBumpUntrackTail);
 	if (image.track_addr == image.track_addr_end) {
 		MarkAsMaybeDirty(id, image);
 	}
@@ -681,6 +710,7 @@ void TextureCache::CopyImage(ImageId destination_id, ImageId source_id) {
 		destination.MarkGpuModified();
 	}
 	destination.ClearBufferModified();
+	m_buffer_cache.NoteTableRangeChanged(destination.info.data.address, destination.info.data.size);
 }
 
 void TextureCache::CopyImageMip(ImageId destination_id, ImageId source_id, uint32_t mip,
@@ -698,6 +728,7 @@ void TextureCache::CopyImageMip(ImageId destination_id, ImageId source_id, uint3
 	destination.CopyMip(source, mip, layer);
 	if (source.IsGpuModified()) {
 		destination.MarkGpuModified();
+		m_buffer_cache.NoteTableRangeChanged(destination.info.data.address, destination.info.data.size);
 	}
 }
 
@@ -1125,6 +1156,9 @@ void TextureCache::InitializeImage(ImageId id) {
 		}
 		UploadImage(image, *source, source_offset);
 		image.ClearBufferModified();
+		// The image now holds the buffer: the next write of a runtime table over it must flag the
+		// image again, which a group that still owns its ranges only does after its epoch moved.
+		m_buffer_cache.NoteTableRangeChanged(image.info.data.address, image.info.data.size);
 	}
 	image.RefreshComplete();
 }
@@ -1251,7 +1285,8 @@ void TextureCache::MaterializeColorClear(ImageId id, const ImageDesc& desc,
 		Common::DebugCounters::ScopedTimer timer(
 		    Common::DebugCounters::Counter::ColorMetadataReadbacks,
 		    Common::DebugCounters::Counter::ColorMetadataReadbackNs);
-		m_buffer_cache.ReadMemory(viewed.address, viewed.size, false);
+		m_buffer_cache.ReadMemory(viewed.address, viewed.size, false,
+		                          Common::FrameCost::ReadbackSite::ColorMeta);
 	}
 	for (uint32_t slice = 0; slice < count; slice++) {
 		const auto address = run(slice);
@@ -1400,7 +1435,8 @@ ImageId TextureCache::AssociateStencil(ImageId depth_id, GuestRange stencil) {
 		record.depth_id             = depth_id;
 		record.stencil_subresources = depth.stencil_subresources;
 		TouchRegistrationsLocked(stencil.address, stencil.size);
-		TouchResolutionGenerationLocked(stencil.address, stencil.size);
+		TouchResolutionGenerationLocked(stencil.address, stencil.size,
+		                                Common::FrameCost::Counter::CacheBumpStencil);
 	}
 
 	return association;
@@ -1736,6 +1772,7 @@ void TextureCache::CommitGpuWrite(Image& image) {
 	image.ClearBufferModified();
 	image.RefreshComplete();
 	image.MarkGpuModified();
+	m_buffer_cache.NoteTableRangeChanged(image.info.data.address, image.info.data.size);
 }
 
 bool TextureCache::ClearImageFromBuffer(CommandBuffer& command, uint64_t address, uint64_t size,
@@ -1986,6 +2023,7 @@ void TextureCache::DownloadImage(Image& image, Buffer& destination, uint64_t des
 }
 
 bool BufferCache::SynchronizeBufferFromImage(Buffer& buffer, uint64_t vaddr, uint64_t size) {
+	NoteWrite(vaddr, size);
 	const auto selected = m_texture_cache.FindImageFromRange(vaddr, size);
 	if (!selected) {
 		return false;
@@ -2029,6 +2067,8 @@ bool BufferCache::SynchronizeBufferFromImage(Buffer& buffer, uint64_t vaddr, uin
 	}
 	ForgetColorMetadataChecks(image.info.data.address, copy_size);
 	m_texture_cache.DownloadImage(image, buffer, buf_offset, copy_size, levels);
+	NoteOpenWritesInRange(image.info.data.address, copy_size);
+	MarkUnsubmittedWrite(image.info.data.address, copy_size);
 	return true;
 }
 
@@ -2104,15 +2144,51 @@ uint64_t TextureCache::WriteBackTick(uint64_t address, uint64_t size) {
 }
 
 void TextureCache::InvalidateMemoryFromGPU(uint64_t address, uint64_t size) {
-	std::scoped_lock lock {m_lock};
-	TouchResolutionGenerationLocked(address, size);
-	ForEachImageInRegion(address, size, [&](ImageId, Image& image) {
-		if (image.info.data.address != address) {
-			return;
-		}
-		image.ClearGpuModified();
-		image.MarkBufferModified();
+	RangeSet ranges;
+	ranges.Add(address, size);
+	InvalidateMemoryFromGPU(ranges);
+}
+
+void TextureCache::InvalidateMemoryFromGPU(const RangeSet& ranges) {
+	Common::FrameCost::Add(Common::FrameCost::Counter::GpuInvalidateCalls);
+	// A GPU write to pages no image covers (nearly all of them) changes no image and no resolution:
+	// take neither the lock nor a new generation, which would make every resident image-heap entry
+	// look changed (the same fast skip as the CPU-write path, upstream PR 1284).
+	bool registered = false;
+	ranges.ForEach([&](uint64_t address, uint64_t end) {
+		if (registered) return;
+		ImagePageTable::PageRange pages {};
+		registered = !ImagePageTable::TryGetPageRange(address, end - address, pages) ||
+		             m_registered_pages.Any(pages.first, pages.last_exclusive);
 	});
+	if (!registered) {
+		Common::FrameCost::Add(Common::FrameCost::Counter::GpuInvalidateSkipped);
+		return;
+	}
+	std::scoped_lock lock {m_lock};
+	RangeSet         changed;
+	std::vector<ImageId> marked;
+	ranges.ForEach([&](uint64_t address, uint64_t end) {
+		bool overlapped = false;
+		ForEachImageInRegion(address, end - address, [&](ImageId id, Image& image) {
+			overlapped = true;
+			if (image.info.data.address != address || std::ranges::find(marked, id) != marked.end()) {
+				return;
+			}
+			marked.push_back(id);
+			image.ClearGpuModified();
+			image.MarkBufferModified();
+		});
+		if (overlapped) changed.Add(address, end - address);
+	});
+	// Registered pages without an overlapping image (a neighbour in the same page) change nothing.
+	if (!changed.Empty()) {
+		Common::FrameCost::Add(Common::FrameCost::Counter::GpuInvalidateGenBumps);
+		TouchResolutionGenerationLocked(changed,
+		                                Common::FrameCost::Counter::CacheBumpGpuInvalidate);
+	} else {
+		Common::FrameCost::Add(Common::FrameCost::Counter::GpuInvalidateSkipped);
+	}
 }
 
 bool TextureCache::CopyToImage(uint64_t address, uint64_t source, uint64_t size) {
@@ -2192,7 +2268,8 @@ void TextureCache::InvalidateMemory(uint64_t address, uint64_t size) {
 	}
 	const FaultStats::SiteScope site(FaultStats::LockSite::Texture);
 	std::scoped_lock lock {m_lock};
-	TouchResolutionGenerationLocked(address, size);
+	TouchResolutionGenerationLocked(address, size,
+	                                Common::FrameCost::Counter::CacheBumpCpuInvalidate);
 	const auto       page_begin = Common::AlignDown(address, TRACKER_PAGE_SIZE);
 	const auto       page_end   = Common::AlignUp(address + size, TRACKER_PAGE_SIZE);
 	Common::SmallVector<ImageId, 8> image_ids;
@@ -2239,7 +2316,8 @@ bool TextureCache::ClearMeta(uint64_t address) {
 		return false;
 	}
 	found->second.clear_mask.set();
-	TouchResolutionGenerationLocked(address, sizeof(uint32_t));
+	TouchResolutionGenerationLocked(address, sizeof(uint32_t),
+	                                Common::FrameCost::Counter::CacheBumpClearMeta);
 	return true;
 }
 
@@ -2250,7 +2328,8 @@ bool TextureCache::TouchMeta(uint64_t address, uint32_t slice, bool is_clear) {
 		return false;
 	}
 	found->second.clear_mask.set(slice, is_clear);
-	TouchResolutionGenerationLocked(address, sizeof(uint32_t));
+	TouchResolutionGenerationLocked(address, sizeof(uint32_t),
+	                                Common::FrameCost::Counter::CacheBumpTouchMeta);
 	return true;
 }
 

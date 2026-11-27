@@ -53,6 +53,39 @@ void TestJudge() {
 	Check(JudgeDispatch(1000, 1, 1, 64, limit, false) == DispatchVerdict::Run, "small stays quiet");
 }
 
+void TestCountsSafeWithoutGuard() {
+	const uint32_t limit = DispatchDefaultMaxGroups;
+	Check(CountsSafeWithoutGuard(480, 270, 1, 65535, 65535, 65535, limit), "a frame pass needs no guard");
+	// Each count is also bounded by the device's own per-dimension limit.
+	Check(!CountsSafeWithoutGuard(1, 70000, 1, 65535, 65535, 65535, limit), "y above the device limit");
+	Check(CountsSafeWithoutGuard(70000, 1, 1, 0xffffffffu, 65535, 65535, limit), "x within a 32-bit limit");
+	Check(!CountsSafeWithoutGuard(0x01000062u, 1, 1, 0xffffffffu, 65535, 65535, limit),
+	      "garbage counts within the device limit still exceed the group limit");
+	Check(!CountsSafeWithoutGuard(4096, 4096, 1, 0xffffffffu, 65535, 65535, limit), "x * y above the limit");
+}
+
+void TestValidationStillHolds() {
+	constexpr uint64_t Slots = 65536;
+	const ValidatedArgs entry {0x1000, 7, 3, 10, 0xabc};
+	Check(ValidationStillHolds(entry, 0x1000, 7, 0xabc, 11, Slots), "same stamp, buffer and address");
+	Check(!ValidationStillHolds(entry, 0x1000, 8, 0xabc, 11, Slots), "a write changed the stamp");
+	Check(!ValidationStillHolds(entry, 0x1000, 0, 0xabc, 11, Slots), "stamp 0 is never trusted");
+	Check(!ValidationStillHolds({0x1000, 0, 3, 10, 0xabc}, 0x1000, 0, 0xabc, 11, Slots),
+	      "an entry made without a stamp is never reused");
+	Check(!ValidationStillHolds(entry, 0x1004, 7, 0xabc, 11, Slots), "another address");
+	Check(!ValidationStillHolds(entry, 0x1000, 7, 0xdef, 11, Slots), "another command buffer");
+	Check(ValidationStillHolds(entry, 0x1000, 7, 0xabc, 10 + Slots / 2, Slots), "half a ring later");
+	Check(!ValidationStillHolds(entry, 0x1000, 7, 0xabc, 10 + Slots, Slots), "the slot was reused");
+	Check(!ValidationStillHolds(entry, 0x1000, 7, 0xabc, 5, Slots), "a ring position from the past");
+	const ValidatedArgs tdim {0x1000, 7, 3, 10, 0xabc, 64, 1, 1, 3};
+	Check(ValidationStillHolds(tdim, 0x1000, 7, 0xabc, 11, Slots, 64, 1, 1, 3),
+	      "thread-dim entry matches same group size and flags");
+	Check(!ValidationStillHolds(tdim, 0x1000, 7, 0xabc, 11, Slots, 32, 1, 1, 3),
+	      "different group size invalidates thread-dim cache");
+	Check(!ValidationStillHolds(tdim, 0x1000, 7, 0xabc, 11, Slots, 64, 1, 1, 1),
+	      "different flags invalidate thread-dim cache");
+}
+
 void TestLimitText() {
 	Check(ParseDispatchGroupLimit(nullptr) == DispatchDefaultMaxGroups, "unset");
 	Check(ParseDispatchGroupLimit("") == DispatchDefaultMaxGroups, "empty");
@@ -175,6 +208,8 @@ void TestFpControl() {
 int main() {
 	TestCounts();
 	TestJudge();
+	TestCountsSafeWithoutGuard();
+	TestValidationStillHolds();
 	TestLimitText();
 	TestCountDword();
 	TestLimiter();

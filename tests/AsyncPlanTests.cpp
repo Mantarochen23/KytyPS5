@@ -199,22 +199,54 @@ void TestActivity() {
 	      "packets are counted");
 }
 
-// A registration translates only when the cache already knows the hash or the lookahead had the
-// user data; the scan of a dispatch about to run always translates. A model of the registration
-// of N shaders of which a program dispatches a few shows what stays in memory.
+// A registration without user data does not guess a ProgramKey and translate ahead, even when
+// another ProgramKey of the same hash exists in the cache (that mismatch leaves an unclaimed
+// waiting translation); lookahead with user data and scanned dispatches always translate.
 void TestRegistrationTranslatesOnlyWhatTheCacheKnows() {
 	using AsyncPlan::TranslateAhead;
 	Check(!TranslateAhead(true, false, false), "a registration of an unknown hash is only kept");
-	Check(TranslateAhead(true, false, true), "a registration of a hash the cache has translates");
+	Check(!TranslateAhead(true, false, true),
+	      "a registration without user data does not translate a mismatched key for a cached hash");
 	Check(TranslateAhead(true, true, false), "a registration with user data translates");
 	Check(TranslateAhead(false, false, false), "a scanned dispatch always translates");
 	Check(TranslateAhead(false, true, true), "a scanned dispatch with data translates");
-	size_t translated = 0;
-	for (int hash = 0; hash < 3854; hash++) {
-		const bool in_store = hash % 100 == 0;
-		translated += TranslateAhead(true, false, in_store) ? 1u : 0u;
-	}
-	Check(translated == 39, "only the registrations of stored hashes are translated ahead");
+}
+
+// Unclaimed waiting translations cannot linger forever: once idle past the TTL they are retired
+// cleanly, while entries recently asked for stay alive and dropped entries re-translate on demand.
+void TestUnclaimedWaitingTranslationsRetire() {
+	constexpr uint64_t MiB = 1048576;
+	std::map<int, Stage::Translation> table;
+	table[0] = {1'000, 1'000, 2 * MiB};   // finished at 1s, never asked again
+	table[1] = {1'000, 25'000, 3 * MiB};  // refreshed at 25s
+	table[2] = {20'000, 20'000, 4 * MiB}; // finished at 20s
+	std::vector<Stage::Translation> retired;
+
+	const auto disabled = AsyncPlan::TakeExpired(table, 100'000, 0, retired);
+	Check(disabled.count == 0 && table.size() == 3 && retired.empty(),
+	      "TTL 0 disables time-based retirement");
+
+	const auto first = AsyncPlan::TakeExpired(table, 35'000, AsyncPlan::DefaultWaitingTtlMs, retired);
+	Check(first.count == 1 && retired.size() == 1 && !table.contains(0),
+	      "entries idle >= TTL retire while fresher ones stay");
+	Check(first.bytes == 2 * MiB && first.kept == 2 && first.kept_bytes == 7 * MiB &&
+	          first.newest_age_ms == 34'000,
+	      "retirement reports retired and remaining totals");
+
+	const auto second =
+	    AsyncPlan::TakeExpired(table, 60'000, AsyncPlan::DefaultWaitingTtlMs, retired);
+	Check(second.count == 2 && table.empty() && second.kept == 0 && second.kept_bytes == 0 &&
+	          second.newest_age_ms == 35'000,
+	      "all unclaimed entries eventually retire to zero waiting");
+
+	// A stage whose waiting translation retired still rebuilds cleanly if a dispatch later arrives.
+	Stage stage;
+	stage.has_program = true;
+	Check(stage.Request(false, 70'000) == Action::PostTranslation,
+	      "a retired translation re-translates on a later dispatch");
+	stage.FinishTranslation(71'000);
+	Check(stage.Request(false, 71'100) == Action::PostModuleJob,
+	      "and builds its module once the new translation arrives");
 }
 
 // The pipeline-create line separates a warm driver cache (calls under 10 ms, cache hits) from a
@@ -238,11 +270,44 @@ void TestCreateStats() {
 	Check(line.find("in-driver now=0 peak=2") != std::string::npos, "concurrency");
 }
 
+// --defer-new-targets-on-stall-ms: draws are let through only once one frame has lasted the limit,
+// and the edges are reported once.
+void TestFrameStallTracker() {
+	using Change = AsyncPlan::FrameStallTracker::Change;
+	AsyncPlan::FrameStallTracker t;
+	Change c = Change::None;
+	// Off: never, however long the frame lasts.
+	Check(!t.Update(5, 1'000, 0, &c) && c == Change::None, "off at the first draw");
+	Check(!t.Update(5, 100'000, 0, &c) && c == Change::None, "off stays off");
+
+	AsyncPlan::FrameStallTracker s;
+	// Frames advance: no stall.
+	Check(!s.Update(1, 0, 2'000, &c) && c == Change::None, "first draw");
+	Check(!s.Update(2, 1'500, 2'000, &c) && c == Change::None, "new frame");
+	Check(!s.Update(2, 3'499, 2'000, &c) && c == Change::None, "just under the limit");
+	// The same frame for 2 s: the stall starts once.
+	Check(s.Update(2, 3'500, 2'000, &c) && c == Change::Started, "stall starts at the limit");
+	Check(s.Update(2, 9'000, 2'000, &c) && c == Change::None, "stall goes on");
+	Check(s.deferred == 2 && s.deferred_total == 2, "draws counted while stalled");
+	// The next frame ends it and resets the clock.
+	Check(!s.Update(3, 9'100, 2'000, &c) && c == Change::Ended, "stall ends with the next frame");
+	Check(s.deferred == 2, "the ended stall keeps its count for the log line");
+	Check(!s.Update(3, 11'000, 2'000, &c) && c == Change::None, "new frame clock");
+	Check(s.Update(3, 11'100, 2'000, &c) && c == Change::Started, "second stall");
+	Check(s.deferred == 1 && s.deferred_total == 3, "second stall counted afresh");
+	// A clock that goes backwards does not count as a stall.
+	AsyncPlan::FrameStallTracker b;
+	Check(!b.Update(1, 5'000, 2'000, &c), "first");
+	Check(!b.Update(1, 1'000, 2'000, &c) && c == Change::None, "backwards clock");
+}
+
 } // namespace
 
 int main() {
+	TestFrameStallTracker();
 	TestCreateStats();
 	TestRegistrationTranslatesOnlyWhatTheCacheKnows();
+	TestUnclaimedWaitingTranslationsRetire();
 	TestColdRequest();
 	TestLoadedFromStore();
 	TestSpeculationEndsAfterOneRound();

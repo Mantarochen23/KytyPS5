@@ -5,7 +5,9 @@
 #include "common/common.h"
 #include "common/emulatorConfig.h"
 #include "common/file.h"
+#include "common/frameCost.h"
 #include "common/logging/log.h"
+#include "common/ports.h"
 #include "common/profiler.h"
 #include "common/stringUtils.h"
 #include "common/threads.h"
@@ -774,55 +776,216 @@ void RenderExecutor::PrepareBindings(const ShaderStageRuntime& runtime,
 
 void RenderExecutor::FindBuffers(std::span<PreparedBindings* const> stages) {
 	KYTY_PROFILER_FUNCTION();
-	auto& cache = m_context.GetBufferCache();
+	auto&      cache    = m_context.GetBufferCache();
+	const auto& graphics = m_context.GetGraphics();
+	const auto  resolve_source = [&](const ShaderRecompiler::IR::BufferResource& metadata,
+	                                 const ShaderRecompiler::IR::DescriptorValue& desc_val,
+	                                 bool allow_unmapped) -> PreparedBindings::BufferSource {
+		const auto descriptor = DecodeNativeDescriptor<ShaderBufferResource>(desc_val);
+		const auto address    = descriptor.Base48();
+		auto       size       = BufferBindingSize(metadata, descriptor);
+		if (address == 0 || size == 0) {
+			return {};
+		}
+		if (descriptor.NumRecords() == UINT32_MAX) {
+			if (metadata.written) {
+				// Sentinel write ranges end before tables captured by any bound stage.
+				for (const auto* reader: stages) {
+					for (const auto [read_address, read_size]:
+					     reader->runtime->resources->specialization_reads) {
+						if (read_size == 0) continue;
+						if (read_address > address) {
+							size = std::min(size, read_address - address);
+						} else if (address - read_address < read_size) {
+							EXIT("scalar resource reads overlap a shader buffer write\n");
+						}
+					}
+				}
+			}
+			const auto limit =
+			    uint64_t {graphics.GetPhysicalDeviceProperties().limits.maxStorageBufferRange} -
+			    (graphics.StorageMinAlignment() - 1);
+			size = Libs::LibKernel::Memory::ClampRangeSize(
+			    address, std::min({size, uint64_t {256} * 1024 * 1024, limit}));
+		} else if (size >= (uint64_t {1} << 30u)) {
+			// Finite descriptors can span sparse PRT holes; oversized pool windows are mapped
+			// in pieces, so they end at their last committed range.
+			size = Libs::LibKernel::Memory::ClampRangeSize(address, size, true);
+		} else if (allow_unmapped) {
+			size = Libs::LibKernel::Memory::ClampRangeSize(address, size, true);
+		}
+		if (size == 0) {
+			return {};
+		}
+		return {.address = address, .size = size, .id = cache.FindBuffer(address, size)};
+	};
 	for (auto* stage: stages) {
 		auto&       prepared = *stage;
 		const auto& program  = prepared.runtime->module->info;
 		const auto& snapshot = *prepared.runtime->resources;
 		const auto& layout   = program.bindings;
 		prepared.buffer_sources.resize(layout.descriptor_counts[static_cast<size_t>(BindingKind::Buffers)]);
-		if (layout.descriptor_counts[static_cast<size_t>(BindingKind::Buffers)] == 0) {
-			continue;
-		}
 		for (uint32_t resource = 0; resource < program.info.buffers.size(); ++resource) {
 			const auto& metadata = program.info.buffers[resource];
 			if (metadata.descriptor_index == UINT32_MAX) continue;
-			auto& source = prepared.buffer_sources[metadata.descriptor_index];
-			const auto descriptor = DecodeNativeDescriptor<ShaderBufferResource>(snapshot.buffers[resource]);
-			const auto address = descriptor.Base48();
-			auto size = BufferBindingSize(metadata, descriptor);
-			if (address == 0 || size == 0) {
-				source = {};
-				continue;
-			}
-			if (descriptor.NumRecords() == UINT32_MAX) {
-				if (program.info.buffers[resource].written) {
-					// Sentinel write ranges end before tables captured by any bound stage.
-					for (const auto* reader: stages) {
-						for (const auto [read_address, read_size]: reader->runtime->resources->specialization_reads) {
-							if (read_size == 0) continue;
-							if (read_address > address) {
-								size = std::min(size, read_address - address);
-							} else if (address - read_address < read_size) {
-								EXIT("scalar resource reads overlap a shader buffer write\n");
-							}
-						}
+			prepared.buffer_sources[metadata.descriptor_index] =
+			    resolve_source(metadata, snapshot.buffers[resource], false);
+		}
+		prepared.indirect_tables.clear();
+		prepared.indirect_tables.reserve(snapshot.indirect_buffer_tables.size());
+		for (const auto& table: snapshot.indirect_buffer_tables) {
+			const auto& metadata = program.info.buffers[table.root_resource];
+			Common::FrameCost::Add(Common::FrameCost::Counter::TableDispatches);
+			// Written sentinel ranges end before the tables the bound stages captured, so the clamped
+			// sizes in the table depend on those reads too, which the candidate key does not cover.
+			uint64_t reads_key = 0;
+			if (metadata.written) {
+				reads_key = 14695981039346656037ull;
+				for (const auto* reader: stages) {
+					for (const auto [read_address, read_size]:
+					     reader->runtime->resources->specialization_reads) {
+						reads_key = (reads_key ^ read_address) * 1099511628211ull;
+						reads_key = (reads_key ^ read_size) * 1099511628211ull;
 					}
 				}
-				//  PPSA15246
-				const auto& graphics = m_context.GetGraphics();
-				const auto  limit =
-				    uint64_t {graphics.GetPhysicalDeviceProperties().limits.maxStorageBufferRange} -
-				    (graphics.StorageMinAlignment() - 1);
-				size = Libs::LibKernel::Memory::ClampRangeSize(
-				    address, std::min({size, uint64_t {256} * 1024 * 1024, limit}));
-			} else if (size >= (uint64_t {1} << 30u)) {
-				//  PPSA18026
-				// Finite descriptors can span sparse PRT holes; oversized pool windows are mapped
-				// in pieces, so they end at their last committed range.
-				size = Libs::LibKernel::Memory::ClampRangeSize(address, size, true);
 			}
-			source = {.address = address, .size = size, .id = cache.FindBuffer(address, size)};
+			const auto& candidates = *table.candidates;
+			auto found = std::ranges::find_if(m_runtime_buffer_tables, [&](const auto& entry) {
+				return entry.module_id == prepared.runtime->module->id &&
+				       entry.root_resource == table.root_resource &&
+				       entry.candidate_key == candidates.key && entry.reads_key == reads_key;
+			});
+			if (found == m_runtime_buffer_tables.end()) {
+				constexpr size_t MaxCachedRuntimeTables = 256;
+				Common::FrameCost::Add(Common::FrameCost::Counter::TableRebuildKey);
+				if (m_runtime_buffer_tables.size() >= MaxCachedRuntimeTables) {
+					Common::FrameCost::Add(Common::FrameCost::Counter::TableRebuildEvicted);
+					auto oldest = std::ranges::min_element(
+					    m_runtime_buffer_tables, {}, &RuntimeBufferTableCacheEntry::last_use);
+					auto retired = std::move(oldest->buffer);
+					m_runtime_buffer_tables.erase(oldest);
+					if (retired != nullptr && m_context.GetCommandScheduler().Active()) {
+						m_context.GetCommandScheduler().DeferOperation(
+						    [owner = std::move(retired)]() mutable { owner.reset(); });
+					}
+				}
+				found = m_runtime_buffer_tables.emplace(
+				    m_runtime_buffer_tables.end(), RuntimeBufferTableCacheEntry {
+					                                       .candidate_key = candidates.key,
+				                                       .module_id = prepared.runtime->module->id,
+				                                       .root_resource = table.root_resource,
+				                                       .reads_key = reads_key,
+				                                   });
+			}
+			found->last_use = ++m_runtime_buffer_table_tick;
+			const bool port_off = !Config::PortEnabled(Config::Port::RuntimeTableCache);
+			const bool fresh   = found->buffer == nullptr || found->state == nullptr;
+			const bool backing_moved =
+			    !fresh && found->built_generation != found->state->BackingGeneration();
+			const bool buffer_moved =
+			    !fresh && !backing_moved &&
+			    found->built_buffer_generation != found->state->BufferGeneration();
+			const bool rebuild = port_off || fresh || backing_moved || buffer_moved;
+			if (rebuild) {
+				// One reason per rebuild; a fresh entry was counted as a key miss above.
+				if (port_off) {
+					Common::FrameCost::Add(Common::FrameCost::Counter::TableRebuildDisabled);
+				} else if (backing_moved) {
+					Common::FrameCost::Add(Common::FrameCost::Counter::TableRebuildGeneration);
+				} else if (buffer_moved) {
+					Common::FrameCost::Add(Common::FrameCost::Counter::TableRebuildGenerationOwn);
+				}
+				Common::FrameCost::Add(Common::FrameCost::Counter::TableRebuilds);
+				Common::FrameCost::Add(Common::FrameCost::Counter::TableCandidates,
+				                       candidates.entries.size());
+				EXIT_IF(candidates.class_index.size() != candidates.entries.size());
+				std::vector<uint32_t> table_words(candidates.entries.size() * 4u, 0u);
+				std::vector<PreparedBindings::BufferSource> sources;
+				sources.reserve(candidates.entries.size());
+				RangeSet              candidate_ranges;
+				for (const auto& value: candidates.entries) {
+					const auto descriptor = DecodeNativeDescriptor<ShaderBufferResource>(value);
+					const auto address    = descriptor.Base48();
+					auto dependency_size = ShaderRecompiler::IR::BufferBindingSize(metadata, descriptor);
+					if (descriptor.NumRecords() == UINT32_MAX) {
+						dependency_size = std::min<uint64_t>(dependency_size, 256u << 20u);
+					}
+					if (address != 0 && dependency_size != 0 &&
+					    GuestRange {address, dependency_size}.Valid()) {
+						candidate_ranges.Add(address, dependency_size);
+					}
+				}
+				// Registered before anything is resolved, and the generation read here: a map, unmap
+				// or buffer replacement from now on, on any thread, leaves this build stale.
+				RangeSet write_ranges;
+				if (metadata.written) {
+					write_ranges = m_context.IntersectMappedRanges(candidate_ranges);
+				}
+				auto state = cache.RegisterRuntimeTable(std::move(candidate_ranges));
+				const auto build_generation = state->BackingGeneration();
+				for (const auto& value: candidates.entries) {
+					sources.push_back(resolve_source(metadata, value, true));
+				}
+				// Discovery can merge earlier buffer owners. Obtain only after the whole candidate set has
+				// been discovered so every stored BDA names a final backing buffer.
+				const bool texel_sync =
+				    metadata.formatted || (metadata.read && Config::SyncRawImageBuffersEnabled());
+				bool aliased_counted = false;
+				// Obtaining a buffer can merge or retire others, which moves this table's own buffer
+				// generation after the build started. Repeat until a pass changes nothing, and record
+				// the generation that pass began with, so the table is not stale the moment it is built.
+				uint64_t build_buffer_generation = state->BufferGeneration();
+				for (int pass = 0; pass < 4; ++pass) {
+					build_buffer_generation = state->BufferGeneration();
+					for (size_t j = 0; j < sources.size(); ++j) {
+						const auto& source = sources[j];
+						if (source.address == 0 || source.size == 0) continue;
+						auto [buf, off] = cache.ObtainBuffer(source.address, source.size, false,
+						                                     texel_sync, source.id, false);
+						if (texel_sync && !aliased_counted &&
+						    m_context.GetTextureCache().FindImageFromRange(source.address, source.size)) {
+							aliased_counted = true;
+							Common::FrameCost::Add(Common::FrameCost::Counter::TableImageAliased);
+						}
+						const uint64_t host_bda = static_cast<uint64_t>(buf->BufferDeviceAddress()) + off;
+						const uint64_t aligned_bda = host_bda & ~uint64_t {3};
+						const uint32_t byte_offset = static_cast<uint32_t>(host_bda & 3u);
+						const uint32_t byte_size = static_cast<uint32_t>(
+						    std::min<uint64_t>(source.size + byte_offset, UINT32_MAX));
+						const uint32_t cls = candidates.class_index[j] & 0x00ffffffu;
+						table_words[j * 4u + 0u] = static_cast<uint32_t>(aligned_bda);
+						table_words[j * 4u + 1u] = static_cast<uint32_t>(aligned_bda >> 32u);
+						table_words[j * 4u + 2u] = byte_size;
+						table_words[j * 4u + 3u] = (byte_offset << 24u) | cls;
+					}
+					if (state->BufferGeneration() == build_buffer_generation) break;
+				}
+				auto replacement = std::make_unique<Buffer>(
+				    m_context.GetGraphics(), m_context.GetCommandScheduler(), MemoryUsage::Upload, 0,
+				    AllFlags | vk::BufferUsageFlagBits::eShaderDeviceAddress,
+				    table_words.size() * sizeof(uint32_t));
+				EXIT_IF(replacement->Mapped().size() < table_words.size() * sizeof(uint32_t));
+				std::memcpy(replacement->Mapped().data(), table_words.data(),
+				            table_words.size() * sizeof(uint32_t));
+				replacement->Flush(0, table_words.size() * sizeof(uint32_t));
+				m_context.GetBufferCache().AddTableWriteUnion(write_ranges);
+				state->SetWriteRanges(std::move(write_ranges));
+				auto retired = std::move(found->buffer);
+				found->buffer = std::move(replacement);
+				found->state  = std::move(state);
+				found->built_generation = build_generation;
+				found->built_buffer_generation = build_buffer_generation;
+				if (retired != nullptr && m_context.GetCommandScheduler().Active()) {
+					m_context.GetCommandScheduler().DeferOperation(
+					    [owner = std::move(retired)]() mutable { owner.reset(); });
+				}
+			}
+			prepared.indirect_tables.push_back({.root_resource = table.root_resource,
+			                                     .header_word = table.header_word,
+			                                     .table_bda = static_cast<uint64_t>(
+			                                         found->buffer->BufferDeviceAddress()),
+			                                     .written = metadata.written,
+			                                     .state = found->state});
 		}
 	}
 }
@@ -856,7 +1019,20 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 		    static_cast<uint32_t>(prepared.buffer_sources[index].size + buffer_offset);
 	}
 	if (layout.descriptor_counts[static_cast<size_t>(BindingKind::FlattenedSrt)] != 0) {
-		prepared.flattened_srt = NativeUpload(m_context, snapshot.flattened_srt);
+		if (prepared.indirect_tables.empty()) {
+			prepared.flattened_srt = NativeUpload(m_context, snapshot.flattened_srt);
+		} else {
+			std::vector<uint32_t> patched_srt = snapshot.flattened_srt;
+			for (size_t ti = 0; ti < prepared.indirect_tables.size(); ++ti) {
+				const auto& tb = prepared.indirect_tables[ti];
+				patched_srt[tb.header_word + 0u] = static_cast<uint32_t>(tb.table_bda);
+				patched_srt[tb.header_word + 1u] = static_cast<uint32_t>(tb.table_bda >> 32u);
+				if (tb.written) {
+					m_context.GetBufferCache().MarkRuntimeTableWritten(tb.state);
+				}
+			}
+			prepared.flattened_srt = NativeUpload(m_context, patched_srt);
+		}
 	}
 	if (layout.descriptor_counts[static_cast<size_t>(BindingKind::ShaderData)] != 0) {
 		prepared.shader_data_buffer = NativeUpload(m_context, prepared.shader_data);
@@ -903,15 +1079,17 @@ void RenderExecutor::RebindImages(PreparedBindings& prepared) {
 
 void RenderExecutor::PrepareGraphicsBindings(std::span<PreparedBindings* const> stages,
                                              DrawTargets&                       targets) {
-	bool uses_dma        = false;
-	bool uses_image_heap = false;
+	bool uses_dma            = false;
+	bool uses_device_address = false;
+	bool uses_image_heap     = false;
 	FindBuffers(stages);
 	for (auto* stage: stages) {
 		uses_dma |= stage->runtime->module->info.info.uses_dma;
+		uses_device_address |= stage->runtime->module->info.info.uses_device_address;
 		uses_image_heap |= stage->runtime->module->info.info.uses_image_heap;
 	}
-	if (uses_dma) {
-		m_context.PrepareBda();
+	if (uses_dma || uses_device_address) {
+		m_context.PrepareBda(uses_dma);
 	}
 	if (uses_image_heap) {
 		m_context.GetImageHeap().Rebind(*this);
@@ -962,7 +1140,7 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
                                     const PipelineCache::Pipeline&     pipeline,
                                     std::span<PreparedBindings* const> prepared_bindings) {
 	KYTY_PROFILER_FUNCTION();
-	auto                           vk_buffer              = buffer.Handle();
+	auto                           vk_buffer              = buffer.StateHandle();
 	size_t                         image_descriptor_count = 0;
 	ShaderRecompiler::IR::PushData push_data;
 	bool                           has_push_data = false;
@@ -993,6 +1171,9 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 			buffer.EndRendering();
 			const auto barrier       = MakeGdsDependency(descriptors.gds.buffer);
 			const auto shader_stages = ShaderPipelineStages(NativeShaderStage(program.stage));
+			// Dispatches that wrote the GDS buffer are ordered first.
+			buffer.OrderDispatches();
+			Common::FrameCost::Add(Common::FrameCost::Counter::BarriersBuffer);
 			vk_buffer.pipelineBarrier(
 			    vk::PipelineStageFlagBits::eHost | vk::PipelineStageFlagBits::eTransfer |
 			        vk::PipelineStageFlagBits::eAllGraphics |

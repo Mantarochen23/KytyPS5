@@ -86,6 +86,10 @@ static void PrintUsage() {
 	         "                                       reads KYTY_SKIP_SHADERS.\n");
 	::printf("  --gpu-fault-query                    Debug: query VK_EXT_device_fault after flushing\n"
 	         "                                       device-lost breadcrumbs (also KYTY_GPU_FAULT_QUERY=1).\n");
+	::printf("  --gpu-debug                          Debug: record a breadcrumb and a driver marker for every draw\n"
+	         "                                       and dispatch (device-lost reports name the operation).\n"
+	         "                                       Also on with --gpu-fault-query, --graphics-debug-dump,\n"
+	         "                                       --guest-fault-report-only or RADV_DEBUG containing hang.\n");
 	::printf("  --bda-table-validate                 Debug: validate every BDA page-table write and clear\n"
 	         "                                       against live buffers (also KYTY_BDA_TABLE_VALIDATE=1).\n");
 	::printf("  --shader-cache                       Keep compiled shaders and pipelines between boots.\n");
@@ -208,7 +212,21 @@ static void PrintUsage() {
 	         "                                       use the resident image heap. Default: 1.\n"
 	         "  --materialize-memo-stamps <n>        Write-watch the guest pages a remembered materialization\n"
 	         "                                       read, so a lookup reads none of them; a page written more\n"
-	         "                                       than n times is compared by its bytes. 0 = off. Default: 0.\n");
+	         "                                       than n times is compared by its bytes. 0 = off. Default: 0.\n"
+	         "  --prefetch-backoff <n>               After four scans of submitted commands that found every\n"
+	         "                                       compute shader known, scan one submission in 2, 4, ... 2^n\n"
+	         "                                       until a scan finds news. 0 = scan every one. Default: 4.\n"
+	         "  --frame-timer-sample <n>             The per-call timers of the [frame] line read the clock for\n"
+	         "                                       one call in n. 1 = every call. Default: 16.\n"
+	         "  --defer-new-targets-on-stall-ms <n>  Bring-up: once no frame was recorded for n ms, a draw\n"
+	         "                                       into a target not seen redrawn is skipped while its\n"
+	         "                                       shaders build instead of building them on the render\n"
+	         "                                       thread (what it draws may be missing). 0 = never.\n"
+	         "                                       Default: 0.\n"
+	         "  --enable-port <names>                Turn on ports that are off by default (comma-separated):\n"
+	         "                                       callsite-lookup reuses a shader lookup by the command\n"
+	         "                                       packet that made it while the registers the walk reads\n"
+	         "                                       and the bytes it read are unchanged.\n");
 }
 
 static bool NextArg(int argc, char* argv[], int& index, std::string& out) {
@@ -345,6 +363,7 @@ static constexpr Flag FLAGS[] = {
     {"--guest-fault-park", &ConfigOptions::guest_fault_park},
     {"--guest-fault-report-only", &ConfigOptions::guest_fault_report_only},
     {"--spirv-compact", &ConfigOptions::spirv_compact_enabled},
+    {"--gpu-debug", &ConfigOptions::gpu_debug_enabled},
 };
 
 static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_help) {
@@ -716,6 +735,27 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 		} else if (arg == "--materialize-memo-stamps") {
 			if (!ParseUint32(value, options.config.materialize_memo_stamps)) {
 				::printf("invalid materialize memo stamps value: %s\n", value.c_str());
+				return false;
+			}
+		} else if (arg == "--prefetch-backoff") {
+			if (!ParseUint32(value, options.config.prefetch_backoff)) {
+				::printf("invalid prefetch backoff value: %s\n", value.c_str());
+				return false;
+			}
+		} else if (arg == "--frame-timer-sample") {
+			if (!ParseUint32(value, options.config.frame_timer_sample) ||
+			    options.config.frame_timer_sample == 0u) {
+				::printf("invalid frame timer sample value: %s\n", value.c_str());
+				return false;
+			}
+		} else if (arg == "--defer-new-targets-on-stall-ms") {
+			if (!ParseUint32(value, options.config.defer_new_targets_on_stall_ms)) {
+				::printf("invalid defer new targets on stall value: %s\n", value.c_str());
+				return false;
+			}
+		} else if (arg == "--enable-port") {
+			if (!Config::ParseDisabledPorts(value, options.config.enabled_ports)) {
+				::printf("unknown port in --enable-port: %s\n", value.c_str());
 				return false;
 			}
 		} else {

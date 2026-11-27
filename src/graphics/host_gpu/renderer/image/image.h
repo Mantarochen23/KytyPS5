@@ -3,6 +3,7 @@
 
 #include "common/alignment.h"
 #include "common/assert.h"
+#include "common/frameCost.h"
 #include "common/slotVector.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/image/imageInfo.h"
@@ -72,7 +73,7 @@ public:
 	void MarkCpuDirty() {
 		m_cpu_dirty       = true;
 		m_maybe_cpu_dirty = false;
-		HeapChanged();
+		HeapChanged(Common::FrameCost::Counter::HeapBumpCpuDirty);
 	}
 
 	[[nodiscard]] bool IsCpuDirty() const { return m_cpu_dirty || m_maybe_cpu_dirty; }
@@ -82,7 +83,7 @@ public:
 		if (!IsCpuDirty()) {
 			m_maybe_cpu_hash  = HashGuestEdges();
 			m_maybe_cpu_dirty = true;
-			HeapChanged();
+			HeapChanged(Common::FrameCost::Counter::HeapBumpMaybeDirty);
 		}
 	}
 	void ResolveMaybeCpuHash(uint64_t hash) {
@@ -102,7 +103,7 @@ public:
 	[[nodiscard]] bool IsBufferModified() const noexcept { return m_buffer_modified; }
 	void               MarkBufferModified() noexcept {
 		m_buffer_modified = true;
-		HeapChanged();
+		HeapChanged(Common::FrameCost::Counter::HeapBumpBufferModified);
 	}
 	void               ClearBufferModified() noexcept { m_buffer_modified = false; }
 
@@ -123,18 +124,40 @@ public:
 	}
 	struct HeapChange {
 		GuestRange data;
-		uint64_t   serial = 0;
+		uint64_t   serial      = 0;
+		bool       layout_only = false; // Only left the read layout: nothing to rediscover.
 	};
 
 	// Resident image heaps sample an image without rediscovering it until it changes its
 	// contents, tracking, identity or layout, which queues a heap change.
-	void HeapChanged() const {
+	// site names the caller for the `[frame] heap` line.
+	void HeapChanged(Common::FrameCost::Counter site) const {
 		if (heap_refs.load(std::memory_order_relaxed) != 0u) {
 			std::scoped_lock lock {heap_mutex};
-			heap_changes.push_back({info.data, serial});
+			heap_changes.push_back({info.data, serial, false});
 			heap_change_generation.fetch_add(1u, std::memory_order_release);
+			Common::FrameCost::Add(site);
 		}
 	}
+
+	// The image left the read layout (it is written or sampled otherwise by a draw). The heap's
+	// descriptors stay valid and only a later commit has to return the image, so with
+	// heap_layout_quiet the heap-change generation does not move: a resident image that a draw
+	// writes every frame would otherwise keep every rebind off its fast return.
+	void HeapLayoutLeft() const {
+		if (heap_refs.load(std::memory_order_relaxed) != 0u) {
+			std::scoped_lock lock {heap_mutex};
+			heap_changes.push_back({info.data, serial, heap_layout_quiet.load(std::memory_order_relaxed)});
+			if (heap_layout_quiet.load(std::memory_order_relaxed)) {
+				Common::FrameCost::Add(Common::FrameCost::Counter::HeapLayoutQuiet);
+			} else {
+				heap_change_generation.fetch_add(1u, std::memory_order_release);
+				Common::FrameCost::Add(Common::FrameCost::Counter::HeapBumpLayoutLeave);
+			}
+		}
+	}
+
+	static inline std::atomic<bool>       heap_layout_quiet {false}; // Set by ImageHeap.
 
 	static inline std::mutex              heap_mutex; // After TextureCache::m_lock.
 	static inline std::vector<HeapChange> heap_changes;

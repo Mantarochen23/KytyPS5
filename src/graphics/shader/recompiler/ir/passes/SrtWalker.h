@@ -46,6 +46,10 @@ struct SrtRuntime {
 	std::span<const uint32_t> workgroup_counts;
 	uint64_t                  indirect_args_address = 0;
 	ImageHeapSource*          image_heap            = nullptr;
+	MemoryChangeSource*       memory_changes        = nullptr;
+	// Set when a table was replayed from its change stamp without reading it: the reads this walk
+	// made no longer describe everything the result depends on, so a memo must not store it.
+	bool*                     skipped_reads         = nullptr;
 	// Also derive ResourceSnapshot::legacy_hash (diagnostics of the canonical-resources port).
 	bool                      legacy_hash           = false;
 };

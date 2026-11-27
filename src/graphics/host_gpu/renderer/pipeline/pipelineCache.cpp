@@ -22,6 +22,7 @@
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
 #include "graphics/host_gpu/renderer/pipeline/asyncPlan.h"
 #include "graphics/host_gpu/renderer/pipeline/blendMapping.h"
+#include "graphics/host_gpu/renderer/pipeline/frameHoles.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineAsync.h"
 #include "graphics/host_gpu/renderer/pipeline/renderActivity.h"
 #include "graphics/host_gpu/renderer/pipeline/skippedDraws.h"
@@ -39,6 +40,7 @@
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <cinttypes>
 #include <cstdio>
 #include <cstring>
 #include <fmt/format.h>
@@ -154,6 +156,7 @@ void PipelineCacheLog(fmt::format_string<Args...> format, Args&&... args) {
 bool ReadShaderGuestMemory(void*, uint64_t address, std::span<uint32_t> values) {
 	// Scalar and unformatted buffer dependencies use the same backing as native raw loads.
 	// Image synchronization belongs to formatted buffer bindings, not these reads.
+	Common::FrameCost::ScopedReadbackSite rb_site(Common::FrameCost::ReadbackSite::Scalar);
 	return !values.empty() &&
 	       Libs::LibKernel::Memory::TryReadBufferBacking(address, values.data(), values.size_bytes());
 }
@@ -384,7 +387,11 @@ bool PipelineCache::Program::Materialize(const ShaderRecompiler::IR::SrtRuntime&
 	};
 	auto&      memo     = materialization_memo;
 	const auto settings = GlobalMaterializationMemoSettings();
-	memo.Configure(settings.entries, settings.stamps);
+	// A call-site record holds an entry past its eviction; heap plans are only kept by a memo that
+	// can hold two.
+	memo.Configure(Config::PortEnabled(Config::Port::CallsiteLookup) ? std::max(settings.entries, 2u)
+	                                                                  : settings.entries,
+	               settings.stamps);
 	const bool uses_heap = resource_plan.info.uses_image_heap;
 	if (uses_heap) Common::FrameCost::Add(Counter::MemoHeapPlanCalls);
 
@@ -431,6 +438,9 @@ bool PipelineCache::Program::Materialize(const ShaderRecompiler::IR::SrtRuntime&
 	RecordingImageHeap recorder(runtime.image_heap);
 	WalkReadHashes     walk_hashes;
 	auto               walk = walk_hashes.Wrap(runtime);
+	bool skipped_reads = false;
+	walk.memory_changes = settings.stamps;
+	walk.skipped_reads  = &skipped_reads;
 	// Only a memo that keeps heap plans needs what the heap hands out.
 	if (runtime.image_heap != nullptr && memo.Capacity() >= 2u) walk.image_heap = &recorder;
 	if (!ShaderRecompiler::IR::MaterializeResources(resource_plan, walk, resources,
@@ -441,7 +451,7 @@ bool PipelineCache::Program::Materialize(const ShaderRecompiler::IR::SrtRuntime&
 	specialization_hash = SpecializationHash(specialization);
 	MemoLookupStats store_stats;
 	uint32_t        evicted = 0;
-	if (const auto* stored = memo.Store(runtime, resources, specialization, specialization_hash,
+	if (const auto* stored = skipped_reads ? nullptr : memo.Store(runtime, resources, specialization, specialization_hash,
 	                                    recorder, uses_heap, evicted, store_stats, &walk_hashes)) {
 		memo.current = stored->serial;
 		Common::FrameCost::Add(Counter::MemoStored);
@@ -500,7 +510,8 @@ template <bool HasCalls>
 ShaderModule* PipelineCache::Program::FindModule(const ShaderRecompiler::IR::SrtRuntime& runtime,
                                                  ShaderRecompiler::IR::PushData::Window push_data,
                                                  bool*        materialized,
-                                                 std::string* materialization_error) {
+                                                 std::string* materialization_error,
+                                                 const CallSiteQuery* site) {
 	Common::FrameCost::ScopedTimer timer(Common::FrameCost::Counter::FindModuleNs);
 	Common::FrameCost::Add(Common::FrameCost::Counter::FindModuleCalls);
 	const auto begin = std::chrono::steady_clock::now();
@@ -514,6 +525,15 @@ ShaderModule* PipelineCache::Program::FindModule(const ShaderRecompiler::IR::Srt
 		                           : Common::FrameCost::Counter::FindModuleMissNs,
 		                       elapsed);
 	};
+	if constexpr (!HasCalls) {
+		if (site != nullptr && site->table != nullptr) {
+			if (auto* module = FindByCallSite(*site, runtime, push_data)) {
+				if (materialized != nullptr) *materialized = true;
+				note(true);
+				return module;
+			}
+		}
+	}
 	// The old layout's hash is needed while stored modules wait for their first comparison, and
 	// for the module a miss will build.
 	auto probe        = runtime;
@@ -528,7 +548,11 @@ ShaderModule* PipelineCache::Program::FindModule(const ShaderRecompiler::IR::Srt
 	if (materialized != nullptr) {
 		*materialized = true;
 	}
-	if (auto* candidate = FindIndexed(push_data, HasCalls, FunctionCode())) {
+	auto* candidate = FindIndexed(push_data, HasCalls, FunctionCode());
+	if constexpr (!HasCalls) {
+		if (site != nullptr && site->table != nullptr) StoreCallSite(*site, candidate);
+	}
+	if (candidate != nullptr) {
 		note(true);
 		return candidate;
 	}
@@ -549,6 +573,88 @@ ShaderModule* PipelineCache::Program::FindModule(const ShaderRecompiler::IR::Srt
 	}
 	note(false);
 	return nullptr;
+}
+
+ShaderModule* PipelineCache::Program::FindByCallSite(const CallSiteQuery& site,
+                                                     const ShaderRecompiler::IR::SrtRuntime& runtime,
+                                                     ShaderRecompiler::IR::PushData::Window  push_data) {
+	using Counter = Common::FrameCost::Counter;
+	const auto begin = std::chrono::steady_clock::now();
+	const auto done  = [&](bool hit) {
+		Common::FrameCost::Add(hit ? Counter::CallSiteHitNs : Counter::CallSiteMissNs,
+		                       static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+		                                                 std::chrono::steady_clock::now() - begin)
+		                                                 .count()));
+	};
+	// The walk reads the first srt_user_data words of the user data and no more; the others (and
+	// everything else a shader sees through registers) are not inputs of the result.
+	size_t user_words = MemoizedMaterialization::AllUserData;
+	if (resource_plan.srt_code != nullptr && resource_plan.srt_user_data <= runtime.user_data.size()) {
+		user_words = resource_plan.srt_user_data;
+	}
+	CallSiteTable::Record* record = nullptr;
+	CallSiteStats          stats;
+	const auto outcome = site.table->Lookup(site.key, this, materialization_memo.Generation(),
+	                                        materialization_memo, runtime, user_words, record, stats);
+	Common::FrameCost::Add(Counter::CallSiteRangesSmall, stats.ranges_small);
+	Common::FrameCost::Add(Counter::CallSiteRangesLarge, stats.ranges_large);
+	Common::FrameCost::Add(Counter::CallSiteRangesStamped, stats.ranges_stamped);
+	Common::FrameCost::Add(Counter::CallSiteBytesCompared, stats.bytes_compared);
+	Common::FrameCost::Add(Counter::CallSiteBytesLarge, stats.bytes_large);
+	if (outcome != CallSiteOutcome::Hit) {
+		Common::FrameCost::Add(Counter::CallSiteMisses);
+		switch (outcome) {
+			case CallSiteOutcome::NoRecord: Common::FrameCost::Add(Counter::CallSiteMissNew); break;
+			case CallSiteOutcome::Stale: Common::FrameCost::Add(Counter::CallSiteMissStale); break;
+			case CallSiteOutcome::Registers: Common::FrameCost::Add(Counter::CallSiteMissRegisters); break;
+			case CallSiteOutcome::Ranges: Common::FrameCost::Add(Counter::CallSiteMissRanges); break;
+			case CallSiteOutcome::Heap: Common::FrameCost::Add(Counter::CallSiteMissHeap); break;
+			default: break;
+		}
+		done(false);
+		return nullptr;
+	}
+	auto& entry = *record->entry;
+	// The members hold the result of the last materialization; this entry's result is copied in.
+	if (materialization_memo.current != entry.serial) {
+		resources           = entry.resources;
+		specialization      = entry.specialization;
+		specialization_hash = entry.specialization_hash;
+		materialization_memo.current = entry.serial;
+	} else {
+		resources.user_data.assign(runtime.user_data.begin(), runtime.user_data.end());
+	}
+	auto* module = static_cast<ShaderModule*>(record->module);
+	if (module != nullptr) {
+		const auto& layout = module->info.bindings;
+		if (layout.push_data_start_dword !=
+		    push_data.StartFor(layout.ShaderDataDwords(), module->info.stage)) {
+			module = nullptr;
+		}
+	}
+	if (module == nullptr) module = FindIndexed(push_data, false, FunctionCode());
+	// The first use of a stored module is compared with the old layout by the full lookup.
+	if (module == nullptr || (!module->legacy_checked && legacy_unchecked != 0)) {
+		Common::FrameCost::Add(Counter::CallSiteMisses);
+		Common::FrameCost::Add(Counter::CallSiteMissNoModule);
+		done(false);
+		return nullptr;
+	}
+	record->module = module;
+	++materialization_memo_hits;
+	Common::FrameCost::Add(Counter::CallSiteHits);
+	done(true);
+	return module;
+}
+
+void PipelineCache::Program::StoreCallSite(const CallSiteQuery& site, ShaderModule* module) {
+	auto entry = materialization_memo.ShareCurrent();
+	if (entry == nullptr) return;
+	bool evicted = false;
+	site.table->Store(site.key, this, materialization_memo.Generation(), std::move(entry), module,
+	                  evicted);
+	Common::FrameCost::Add(Common::FrameCost::Counter::CallSiteStored);
+	if (evicted) Common::FrameCost::Add(Common::FrameCost::Counter::CallSiteEvicted);
 }
 
 ShaderModule* PipelineCache::Program::FindCandidate(
@@ -1030,6 +1136,9 @@ const ShaderModule* PipelineCache::GetProgramImpl(const ShaderParams& params, In
 			m_lookup_stats.lookups++;
 		}
 		if (cached.skip_dispatch) {
+			if (m_async != nullptr) {
+				m_async->RetireWaiting(m_lookup_key, "negative-cache");
+			}
 			if (!cached.logged_neg_hit) {
 				cached.logged_neg_hit = true;
 				PipelineCacheLog(
@@ -1079,10 +1188,20 @@ const ShaderModule* PipelineCache::GetProgramImpl(const ShaderParams& params, In
 				}
 			}
 		} else if (cached.call_plans.empty()) {
+			Program::CallSiteQuery site;
+			if (g_current_call_site != 0 && Config::PortEnabled(Config::Port::CallsiteLookup)) {
+				if (m_callsites == nullptr) m_callsites = std::make_unique<CallSiteTable>(2048u, 4u);
+				site.table = m_callsites.get();
+				site.key   = {g_current_call_site, params.hash, static_cast<uint8_t>(options.stage)};
+			}
 			module = cached.FindModule<false>(runtime, push_data, &materialized,
-			                                  &materialization_error);
+			                                  &materialization_error,
+			                                  site.table != nullptr ? &site : nullptr);
 		}
 		if (module != nullptr) {
+			if (m_async != nullptr) {
+				m_async->RetireWaiting(m_lookup_key, "module-hit");
+			}
 			(first_attempt ? m_lookup_stats.hit : m_lookup_stats.served_late)++;
 			if (!module->legacy_checked) {
 				// First hit of a stored module: would the old layout's key have found it?
@@ -1119,7 +1238,7 @@ const ShaderModule* PipelineCache::GetProgramImpl(const ShaderParams& params, In
 				    ShaderRecompiler::StageName(options.stage), params.hash, cached.failure_reason);
 				StoreFailedProgram(m_lookup_key, cached.failure_reason);
 				if (m_async != nullptr) {
-					m_async->translations.erase(m_lookup_key);
+					m_async->RetireWaiting(m_lookup_key, "materialization-failed");
 				}
 			}
 			return nullptr;
@@ -1708,6 +1827,19 @@ void PipelineCache::GetGraphicsPrograms(const CommandBuffer& command, DrawRender
 	     db.shader_mask_export_enable || db.shader_dual_export_enable ||
 	     db.shader_execute_on_noop || sh.AlphaToMask());
 	state.ps_active = pixel_active;
+	const auto collect_targets = [&]() {
+		std::vector<uint64_t> addrs;
+		for (uint32_t slot = 0; slot < RENDER_COLOR_ATTACHMENTS_MAX; ++slot) {
+			if ((color_output_mask & (1u << slot)) != 0) {
+				const auto addr = context.GetRenderTarget(slot).base.addr;
+				if (addr != 0) addrs.push_back(addr);
+			}
+		}
+		const auto& dt    = context.GetDepthRenderTarget();
+		const auto  zaddr = dt.z_write_base_addr != 0 ? dt.z_write_base_addr : dt.z_read_base_addr;
+		if (zaddr != 0) addrs.push_back(zaddr);
+		return addrs;
+	};
 	const bool tess_active = user_config.GetPrimType() == Prospero::PrimitiveType::kPatch;
 	std::array<ShaderParams, 3> vertex_params;
 	if (tess_active) {
@@ -1718,6 +1850,7 @@ void PipelineCache::GetGraphicsPrograms(const CommandBuffer& command, DrawRender
 				Log::WriteToConsoleAndLog(
 				    "Warning: dropping tessellation draws with a geometry shader.\n");
 			}
+			FrameHoles::NoteDrawSkip(FrameHoles::DrawSkipReason::UnsupportedStage, collect_targets());
 			return;
 		}
 		vertex_params = PrepareTessellationPrograms(vertex_regs, context, vertex_info);
@@ -1774,6 +1907,7 @@ void PipelineCache::GetGraphicsPrograms(const CommandBuffer& command, DrawRender
 				    "Warning: dropping mesh draws the host does not support (shader 0x{:016x}).\n",
 				    vertex_params[0].hash));
 			}
+			FrameHoles::NoteDrawSkip(FrameHoles::DrawSkipReason::UnsupportedStage, collect_targets());
 			return;
 		}
 		// A task shader launches each record's groups and passes its draw parameters in a
@@ -1934,7 +2068,27 @@ void PipelineCache::GetGraphicsPrograms(const CommandBuffer& command, DrawRender
 	const auto& depth_control = context.GetDepthControl();
 	const bool  gbuffer_pass  = color_targets >= 2 && large_targets == color_targets &&
 	                           depth_control.z_enable && depth_control.z_write_enable;
-	state.deferrable          = m_async != nullptr && (redrawn || gbuffer_pass);
+	// While the frame stands still the redraw history cannot grow (asyncPlan.h, FrameStallTracker):
+	// after --defer-new-targets-on-stall-ms the other draws may be skipped as well.
+	bool stall_deferrable = false;
+	if (m_async != nullptr && !redrawn && !gbuffer_pass) {
+		using Change   = AsyncPlan::FrameStallTracker::Change;
+		auto&  tracker = m_async->frame_stall;
+		Change change  = Change::None;
+		stall_deferrable = tracker.Update(CurrentFrame(), RenderActivity::NowMs(),
+		                                  Config::DeferNewTargetsOnStallMs(), &change);
+		if (change == Change::Started) {
+			std::printf("[async] no frame for %u ms (frame %" PRIu64 "): draws into targets not seen "
+			            "redrawn are skipped while their shaders build "
+			            "(--defer-new-targets-on-stall-ms)\n",
+			            Config::DeferNewTargetsOnStallMs(), tracker.frame);
+		} else if (change == Change::Ended) {
+			std::printf("[async] frame %" PRIu64 " recorded after the stall: %" PRIu64
+			            " draws into targets not seen redrawn were let through (%" PRIu64 " in all)\n",
+			            tracker.frame, tracker.deferred, tracker.deferred_total);
+		}
+	}
+	state.deferrable = m_async != nullptr && (redrawn || gbuffer_pass || stall_deferrable);
 	if (m_async != nullptr) {
 		m_async->reason = all_small && color_targets != 0 ? Async::StallReason::SmallTarget
 		                                                  : Async::StallReason::NotRedrawn;
@@ -1950,6 +2104,7 @@ void PipelineCache::GetGraphicsPrograms(const CommandBuffer& command, DrawRender
 			deferred |= m_last_deferred;
 			if (mode != AsyncMode::On) {
 				vertex_info[0].stage.module = nullptr; // Skips the draw (PrepareDrawRenderState).
+				FrameHoles::NoteDrawSkip(FrameHoles::DrawSkipReason::FailedShader, collect_targets());
 				return;
 			}
 			ready = false;
@@ -1970,6 +2125,7 @@ void PipelineCache::GetGraphicsPrograms(const CommandBuffer& command, DrawRender
 			deferred |= m_last_deferred;
 			if (mode != AsyncMode::On) {
 				vertex_info[0].stage.module = nullptr; // Skips the draw (PrepareDrawRenderState).
+				FrameHoles::NoteDrawSkip(FrameHoles::DrawSkipReason::FailedShader, collect_targets());
 				return;
 			}
 			ready = false;
@@ -1980,6 +2136,9 @@ void PipelineCache::GetGraphicsPrograms(const CommandBuffer& command, DrawRender
 		vertex_info[0].stage.module = nullptr;
 		if (deferred) {
 			NoteDrawSkippedForShaders();
+			FrameHoles::NoteDrawSkip(FrameHoles::DrawSkipReason::ShaderBuilding, collect_targets());
+		} else {
+			FrameHoles::NoteDrawSkip(FrameHoles::DrawSkipReason::FailedShader, collect_targets());
 		}
 	}
 }
@@ -2081,7 +2240,7 @@ bool PipelineCache::PrefetchComputeProgram(const HW::CsStageRegisters& cs_regs,
 	m_lookup_key.user_data_count = params.user_data_count;
 	BuildStageStaticKey(input_info, m_lookup_key.static_state);
 	if (m_program_cache.contains(m_lookup_key) || m_async->translations.contains(m_lookup_key) ||
-	    m_async->sync_only_keys.contains(m_lookup_key)) {
+	    m_async->sync_only_keys.contains(m_lookup_key) || WarmUpPending(m_lookup_key)) {
 		m_prefetch.known++;
 		return false;
 	}

@@ -11,6 +11,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <type_traits>
 #include <vector>
 
@@ -42,11 +43,20 @@ struct PreparedBindings {
 		uint64_t                              module = 0;
 	};
 
+	struct IndirectTableBinding {
+		uint32_t                                       root_resource = 0;
+		uint32_t                                       header_word   = 0;
+		uint64_t                                       table_bda     = 0;
+		bool                                           written       = false;
+		std::shared_ptr<BufferCache::RuntimeTableState> state;
+	};
+
 	// The draw owns the immutable compiled-program/runtime-snapshot association through commit.
 	const ShaderStageRuntime* runtime = nullptr;
 	// Keep the resolved guest range through cache preparation; only the host buffer ID may
 	// become stale and need resolving again when bindings are rebound.
 	std::vector<BufferSource>             buffer_sources;
+	std::vector<IndirectTableBinding>     indirect_tables;
 	std::vector<vk::DescriptorBufferInfo> buffers;
 	std::vector<TextureBinding>           images;
 	std::vector<ImageSource>              image_sources;
@@ -56,6 +66,18 @@ struct PreparedBindings {
 	vk::DescriptorBufferInfo              shader_data_buffer;
 	vk::DescriptorBufferInfo              shared_memory;
 	std::vector<uint32_t>                 shader_data;
+};
+
+struct RuntimeBufferTableCacheEntry {
+	std::array<uint64_t, 2>                         candidate_key {};
+	uint64_t                                        module_id     = 0;
+	uint32_t                                        root_resource = 0;
+	uint64_t                                        reads_key     = 0;
+	std::unique_ptr<Buffer>                         buffer;
+	std::shared_ptr<BufferCache::RuntimeTableState> state;
+	uint64_t                                        built_generation = 0;
+	uint64_t                                        built_buffer_generation = 0;
+	uint64_t                                        last_use         = 0;
 };
 
 [[nodiscard]] vk::DescriptorType

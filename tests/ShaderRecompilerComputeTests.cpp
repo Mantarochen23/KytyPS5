@@ -353,6 +353,15 @@ struct ImageHeapTestAccess {
   static uint64_t EntriesVisited(const ImageHeap &heap) { return heap.m_entries_visited; }
   static uint64_t EntriesSkipped(const ImageHeap &heap) { return heap.m_entries_skipped; }
   static uint64_t EntriesResolved(const ImageHeap &heap) { return heap.m_entries_resolved; }
+  static uint64_t RepointSlots(const ImageHeap &heap) { return heap.m_repoint_slots; }
+  static size_t ResolutionRefs(const ImageHeap &heap) { return heap.m_resolution_refs; }
+  static void ToggleRetry(ImageHeap &heap, uint32_t entry, size_t times) {
+    const auto index = entry & ((1u << ShaderRecompiler::IR::ImageHeapKindShift) - 1u);
+    for (size_t i = 0; i < times; ++i) {
+      heap.SetRetry(index, ImageHeap::RetryKind::Dcc);
+      heap.SetRetry(index, ImageHeap::RetryKind::None);
+    }
+  }
   static void RetryEveryDraw(ImageHeap &heap, uint32_t entry) {
     heap.SetRetry(entry & ((1u << ShaderRecompiler::IR::ImageHeapKindShift) - 1u),
                   ImageHeap::RetryKind::Dcc);
@@ -374,6 +383,7 @@ struct TextureCacheTestAccess {
   static_assert(TextureCache::ImagePageTable::kFirstLevelBits == 14);
 
   static uint64_t GcTick(const TextureCache &cache) { return cache.m_gc_tick; }
+  static uint64_t Generation(const TextureCache &cache) { return cache.ResolutionGeneration(); }
   static void TouchResolution(TextureCache &cache, uint64_t address, uint64_t size) {
     cache.TouchResolutionGeneration(address, size);
   }
@@ -3378,6 +3388,14 @@ public:
 
       const auto other = unrelated();
       Require(name, "register", !resolve_cache.Reuse(id, stamp), "a registered image kept the stamp current");
+      // A GPU write is a resolution change only where an image is registered.
+      const auto generation = TextureCacheTestAccess::Generation(cache);
+      cache.InvalidateMemoryFromGPU(base + 0x7f0000u, 0x1000u);
+      Require(name, "gpu write elsewhere", TextureCacheTestAccess::Generation(cache) == generation,
+          "a GPU write to pages without an image changed the resolution generation");
+      cache.InvalidateMemoryFromGPU(base + 0x18000u, 0x1000u);
+      Require(name, "gpu write on image", TextureCacheTestAccess::Generation(cache) > generation,
+          "a GPU write over a registered image left the resolution generation alone");
       const auto refound = find(rgba).second;
       TextureCacheTestAccess::DeleteImage(cache, other);
       Require(name, "unregister", !resolve_cache.Reuse(id, refound),
@@ -6886,10 +6904,15 @@ public:
       Require(name, "descriptor entry resolved", ImageHeapTestAccess::ResolveCalls(heap) == ++resolves,
               "changed descriptor words did not resolve the entry");
       ImageHeapTestAccess::RetryEveryDraw(heap, filtered.slots[40]);
+      const auto repoint_before = ImageHeapTestAccess::RepointSlots(heap);
       textures.UnmapMemory(texture(2), 0x1000u);
       Require(name, "eviction discovery", acquire(sampled), "the view was declined");
       draw();
       const auto eviction_resolves = ImageHeapTestAccess::ResolveCalls(heap);
+      Require(name, "repoint visits only the moved slots",
+              ImageHeapTestAccess::RepointSlots(heap) > repoint_before &&
+                  ImageHeapTestAccess::RepointSlots(heap) - repoint_before <= 8u,
+              "an element change visited slots that do not select it");
       Require(name, "evicted entry resolved", eviction_resolves > resolves,
               "an evicted backing image did not resolve the entry");
       resolves = eviction_resolves;
@@ -6982,6 +7005,34 @@ public:
               image.backing.state.layout == vk::ImageLayout::eShaderReadOnlyOptimal &&
                   queued() == 0,
               "commit did not return a resident image to its read layout");
+      // Leaving the read layout alone does not take a rebind off its fast return, and the
+      // queue it fills is still drained by the commit.
+      Require(name, "settled", acquire(sampled), "the view was declined");
+      draw();
+      Require(name, "settled again", acquire(sampled), "the view was declined");
+      {
+        const auto fast_before = ImageHeapTestAccess::FastRebinds(heap);
+        image.Transit(vk::ImageLayout::eGeneral, vk::AccessFlagBits2::eShaderWrite, {},
+                      scheduler.Current().Handle());
+        heap.Rebind(executor);
+        Require(name, "layout leave stays fast",
+                ImageHeapTestAccess::FastRebinds(heap) == fast_before + 1u,
+                "a layout-only change of a resident image forced a full rebind");
+        heap.Commit(scheduler.Current(), vk::PipelineBindPoint::eCompute, layout);
+        Require(name, "layout leave returned",
+                image.backing.state.layout == vk::ImageLayout::eShaderReadOnlyOptimal &&
+                    queued() == 0,
+                "a layout-only change was not returned without a rebind");
+        scheduler.Finish();
+        heap.BeginDraw();
+      }
+      // Page index entries of elements that stopped waiting do not pile up.
+      ImageHeapTestAccess::ToggleRetry(heap, filtered.slots[0], 70000u);
+      TextureCacheTestAccess::TouchResolution(textures, base + 0x1f0000u, 0x1000u);
+      Require(name, "sweep discovery", acquire(sampled), "the view was declined");
+      draw();
+      Require(name, "retry index bounded", ImageHeapTestAccess::ResolutionRefs(heap) < 1024u,
+              "stale retry index entries were never dropped");
       // One that leaves it after discovery, as for a download, returns at commit too.
       Require(name, "late transit", acquire(sampled), "the view was declined");
       heap.Rebind(executor);
@@ -7767,6 +7818,195 @@ public:
     context.UnmapMemory(base, 3 * page);
     scheduler.Finish();
     DestroyBuffer(&readback);
+    Require(name, "release",
+            LibKernel::Memory::KernelMunmap(base, 3 * page) == 0 &&
+                LibKernel::Memory::KernelReleaseDirectMemory(direct, 3 * page) == 0,
+            "guest allocation release failed");
+    std::printf("[gpu]     %-32s ok\n", name);
+  }
+
+  void CheckRuntimeBufferTableCache() {
+    constexpr const char *name = "RuntimeBufferTableCache";
+    constexpr auto page = BufferCache::CACHING_PAGESIZE;
+    EnsureRuntimeContext();
+    int64_t direct = -1;
+    void *mapped = nullptr;
+    Require(name, "allocation",
+            LibKernel::Memory::KernelAllocateDirectMemory(
+                0, LibKernel::Memory::KernelGetDirectMemorySize(), 3 * page, page, 0,
+                &direct) == 0 &&
+                LibKernel::Memory::KernelMapDirectMemory(&mapped, 3 * page, 0x3, 0, direct,
+                                                         page) == 0,
+            "guest allocation failed");
+    const auto base = reinterpret_cast<uint64_t>(mapped);
+
+    RenderContext context(m_runtime_context);
+    auto &scheduler = context.GetCommandScheduler();
+    auto &cache = context.GetBufferCache();
+    auto &executor = context.GetRenderExecutor();
+    HW::Context registers{};
+    HW::UserConfig user_config{};
+    HW::Shader shaders{};
+    scheduler.Begin(registers, user_config, shaders);
+    context.InitializeGpu(nullptr);
+    context.MapMemory(base, page);
+    context.MapMemory(base + 2 * page, page);
+
+    ShaderModule module;
+    module.id = 1;
+    module.info.stage = ShaderType::Compute;
+    module.info.info.buffers.push_back({.read = true, .written = true, .live = true});
+    module.info.bindings.descriptor_counts[static_cast<size_t>(
+        ShaderRecompiler::IR::DescriptorBindingKind::FlattenedSrt)] = 1;
+    ShaderRecompiler::IR::ResourceSnapshot snapshot;
+    snapshot.flattened_srt.resize(3);
+    auto &table = snapshot.indirect_buffer_tables.emplace_back();
+    table.root_resource = 0;
+    table.candidates->key = {1, 2};
+    table.candidates->has_live_range = true;
+    for (const auto address : {base, base + 2 * page}) {
+      ShaderBufferResource descriptor{};
+      descriptor.UpdateAddress48(address);
+      descriptor.fields[1] |= 4u << 16u;
+      descriptor.fields[2] = page / 4u;
+      auto &value = table.candidates->entries.emplace_back();
+      value.dword_count = 4;
+      std::copy_n(descriptor.fields, 4, value.dwords.begin());
+      table.candidates->class_index.push_back(1);
+    }
+    ShaderStageRuntime runtime{&module, &snapshot};
+    PreparedBindings bindings;
+    executor.PrepareBindings(runtime, bindings);
+    std::array<PreparedBindings *, 1> stages{&bindings};
+
+    executor.FindBuffers(stages);
+    Require(name, "first table", bindings.indirect_tables.size() == 1,
+            "the runtime-indexed table was not bound");
+    const auto first_bda = bindings.indirect_tables[0].table_bda;
+    const auto first_state = bindings.indirect_tables[0].state;
+    const auto first_generation = first_state->BackingGeneration();
+    executor.FindBuffers(stages);
+    Require(name, "cache hit",
+            bindings.indirect_tables[0].table_bda == first_bda &&
+                bindings.indirect_tables[0].state == first_state &&
+                first_state->BackingGeneration() == first_generation,
+            "unchanged candidates rebuilt or re-registered their persistent table");
+
+    // Replacing either candidate's backing invalidates the cached BDA table once; the next bind
+    // rebuilds it against the merged owner and then becomes stable again.
+    const auto first_buffer_generation = first_state->BufferGeneration();
+    (void)cache.FindBuffer(base, 3 * page);
+    Require(name, "backing invalidation",
+            first_state->BufferGeneration() > first_buffer_generation,
+            "candidate backing replacement did not invalidate the table");
+    executor.FindBuffers(stages);
+    const auto rebuilt_bda = bindings.indirect_tables[0].table_bda;
+    const auto rebuilt_state = bindings.indirect_tables[0].state;
+    Require(name, "rebuild",
+            rebuilt_bda != first_bda && rebuilt_state != first_state,
+            "an invalid table was reused after candidate backing replacement");
+    executor.FindBuffers(stages);
+    Require(name, "stable rebuild",
+            bindings.indirect_tables[0].table_bda == rebuilt_bda &&
+                bindings.indirect_tables[0].state == rebuilt_state,
+            "the rebuilt table did not become persistent");
+
+    const auto low_stamp = cache.WriteStamp(base, page);
+    const auto high_stamp = cache.WriteStamp(base + 2 * page, page);
+    executor.RebindBuffers(bindings);
+    Require(name, "cached write union",
+            cache.IsRegionGpuModified(base, page) &&
+                !cache.IsRegionGpuModified(base + page, page) &&
+                cache.IsRegionGpuModified(base + 2 * page, page) &&
+                cache.WriteStamp(base, page) > low_stamp &&
+                cache.WriteStamp(base + 2 * page, page) > high_stamp,
+            "a writable table did not preserve GPU ownership and write stamps for later reads");
+
+    // A repeated bind while the group still owns its ranges is O(1): it walks no range, but it
+    // is still a visible GPU write to a stamp reader.
+    const auto ranges_of = [] {
+      return Common::FrameCost::SnapshotCounters()[static_cast<size_t>(
+          Common::FrameCost::Counter::TableMarkRanges)];
+    };
+    const auto marked_low_stamp = cache.WriteStamp(base, page);
+    const auto ranges_before = ranges_of();
+    for (int bind = 0; bind < 3; ++bind) {
+      executor.RebindBuffers(bindings);
+    }
+    Require(name, "marked once",
+            ranges_of() == ranges_before &&
+                cache.IsRegionGpuModified(base, page) &&
+                cache.WriteStamp(base, page) > marked_low_stamp,
+            "a repeated table bind walked its write ranges or hid its write from stamps");
+    cache.ReadMemory(base, page);
+    Require(name, "read later", !cache.IsRegionGpuModified(base, page),
+            "a later CPU read did not consume the table's GPU-write ownership");
+    executor.RebindBuffers(bindings);
+    Require(name, "re-marked after release",
+            ranges_of() > ranges_before && cache.IsRegionGpuModified(base, page),
+            "a bind after an ownership release did not take ownership again");
+
+    // An image over a written candidate is flagged as stale by the group's walk. Once the image has
+    // consumed the buffer (a refresh from it), the next write of the group must flag it again even
+    // though no ownership was released, so consuming the buffer moves the group's epoch.
+    {
+      auto &textures = context.GetTextureCache();
+      const auto desc = MakeLinearDesc(base, page, vk::Format::eR8G8B8A8Unorm,
+                                       Prospero::BufferFormat::k8_8_8_8UNorm,
+                                       Prospero::ImageType::kColor2D, {64, 64, 1}, 1, 4, 1);
+      const auto image = TextureCacheTestAccess::InsertImage(textures, desc.info);
+      executor.RebindBuffers(bindings);
+      Require(name, "image flagged",
+              textures.GetImage(image).IsBufferModified(),
+              "a table write over a registered image did not flag the image");
+      textures.UpdateImage(image);
+      Require(name, "image refreshed",
+              !textures.GetImage(image).IsBufferModified(),
+              "the image kept its buffer-modified flag after a refresh");
+      executor.RebindBuffers(bindings);
+      Require(name, "image flagged again",
+              textures.GetImage(image).IsBufferModified(),
+              "a table write after an image consumed the buffer left the image stale");
+      TextureCacheTestAccess::DeleteImage(textures, image);
+    }
+
+    // A state registered before its buffers are resolved sees an invalidation that lands while
+    // the build runs, and its write union is set afterwards.
+    {
+      RangeSet dependencies;
+      dependencies.Add(base, page);
+      const auto early = cache.RegisterRuntimeTable(std::move(dependencies));
+      const auto built_from = early->BackingGeneration();
+      cache.InvalidateRuntimeTables(base, page);
+      RangeSet writes;
+      writes.Add(base, page);
+      early->SetWriteRanges(std::move(writes));
+      uint32_t ranges = 0;
+      early->WriteRanges().ForEach([&](uint64_t, uint64_t) { ++ranges; });
+      Require(name, "early registration",
+              early->BackingGeneration() > built_from && ranges == 1,
+              "an invalidation during a build was not recorded against it");
+    }
+
+    // The port off rebuilds on every bind; on, the table is persistent again.
+    {
+      Config::SetDisabledPorts({"runtime-table-cache"});
+      executor.FindBuffers(stages);
+      const auto off_state = bindings.indirect_tables[0].state;
+      executor.FindBuffers(stages);
+      const bool rebuilt_each = bindings.indirect_tables[0].state != off_state;
+      Config::SetDisabledPorts({});
+      executor.FindBuffers(stages);
+      const auto on_state = bindings.indirect_tables[0].state;
+      executor.FindBuffers(stages);
+      Require(name, "port switch",
+              rebuilt_each && bindings.indirect_tables[0].state == on_state,
+              "the runtime-table-cache port did not switch reuse off and on");
+    }
+
+    context.UnmapMemory(base, page);
+    context.UnmapMemory(base + 2 * page, page);
+    scheduler.Finish();
     Require(name, "release",
             LibKernel::Memory::KernelMunmap(base, 3 * page) == 0 &&
                 LibKernel::Memory::KernelReleaseDirectMemory(direct, 3 * page) == 0,
@@ -23041,7 +23281,10 @@ public:
           shaders.SetEsShaderBase(vertex_shader);
           TextureCacheTestAccess::ClearImage(cache, scheduler.Current(), sparse_color.image_id,
               {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}, {});
-          const DrawIndirectArgs records{args_address + first * stride, 2, stride, offsets};
+          const DrawIndirectArgs records{.address = args_address + first * stride,
+                                         .count = 2,
+                                         .stride = stride,
+                                         .offsets = offsets};
           const bool drawn = indexed
               ? RenderExecutorTestAccess::DrawIndex(executor, scheduler.Current(),
                     {.index_count = 3, .index_addr = reinterpret_cast<const void *>(index_address),
@@ -23248,8 +23491,10 @@ public:
                                bool covered = true) {
           TextureCacheTestAccess::ClearImage(cache, scheduler.Current(), sparse_color.image_id,
               {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}, {});
-          const DrawIndirectArgs records{mesh_args_address + first * stride, count, stride,
-                                         offsets};
+          const DrawIndirectArgs records{.address = mesh_args_address + first * stride,
+                                         .count = count,
+                                         .stride = stride,
+                                         .offsets = offsets};
           read_covered(step, indexed
               ? RenderExecutorTestAccess::DrawIndex(executor, scheduler.Current(),
                     {.index_count = index_buffer_size,
@@ -60333,6 +60578,11 @@ int main(int argc, char **argv) {
     vulkan.CheckBdaSyncUploads();
     vulkan.CheckFaultBufferScan();
     vulkan.CheckFaultRecordsOverflow();
+    return 0;
+  }
+  if (argc == 2 && std::strcmp(argv[1], "--runtime-table-cache-only") == 0) {
+    VulkanHarness vulkan;
+    vulkan.CheckRuntimeBufferTableCache();
     return 0;
   }
   if (argc == 2 && std::strcmp(argv[1], "--buffer-cache-range-only") == 0) {

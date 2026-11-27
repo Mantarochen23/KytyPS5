@@ -30,8 +30,8 @@ namespace Libs::Graphics::ShaderRecompiler::IR {
 constexpr uint32_t MaxIndirectDescriptorProbes = 65536u;
 // A bounded table V# is scanned row by row on the host; only distinct descriptors become resources.
 constexpr uint32_t MaxIndirectScalarTableRows = 262144u;
-// Distinct materialized candidates per indirect buffer root; bounds host descriptor binding
-// updates and emitted indirect dispatch tables.
+// Distinct materialized candidates per indirect buffer root before promoting to a runtime-indexed
+// device-address table (and cap on distinct stride/format/swizzle classes in table mode).
 constexpr uint32_t MaxIndirectBufferCandidates = 4096u;
 // Canonical resource specialization (port canonical-resources): an indirect root's
 // indirect_mapping_offset is IndirectMappingHeader | slot, and flattened_srt[slot] holds the offset
@@ -40,8 +40,21 @@ constexpr uint32_t MaxIndirectBufferCandidates = 4096u;
 // IndirectSearchRuntime iterations is bounded by its key count at run time instead of an unrolled
 // bit_width(key_count), and a resident heap's mapping carries one word per heap arm after its
 // three words that gives the arm's position in the canonical kind order.
-constexpr uint32_t IndirectMappingHeader = 0x80000000u;
-constexpr uint32_t IndirectSearchRuntime = UINT32_MAX;
+// Bit 30 marks an indirect buffer root backed by a runtime-indexed BDA table: flattened_srt at
+// the mapping offset begins with [table_bda_lo, table_bda_hi, runtime_entry_count], followed by
+// the normal key->entry mapping, while specialization.buffers holds only one child per distinct
+// (stride, format, swizzle, oob) class.
+constexpr uint32_t IndirectMappingHeader      = 0x80000000u;
+constexpr uint32_t IndirectBufferRuntimeTable = 0x40000000u;
+constexpr uint32_t IndirectSearchRuntime      = UINT32_MAX;
+
+[[nodiscard]] constexpr bool IsIndirectBufferRuntimeTable(uint32_t mapping_offset) noexcept {
+	return (mapping_offset & IndirectBufferRuntimeTable) != 0u;
+}
+
+[[nodiscard]] constexpr uint32_t IndirectMappingSlot(uint32_t mapping_offset) noexcept {
+	return mapping_offset & ~(IndirectMappingHeader | IndirectBufferRuntimeTable);
+}
 
 enum class ResourceKind {
 	None,
@@ -752,8 +765,12 @@ struct ScanCacheEntry {
 	std::array<uint32_t, 8> root             = {};
 	uint32_t                root_dword_count = 0;
 	uint64_t                content_hash     = 0;
+	std::shared_ptr<MemoryChangeStamp> content_stamp;
 	std::vector<uint32_t>   children;
 	std::vector<uint32_t>   mapping;
+	// Runtime-table scans cache all normalized candidates separately from the class-only children.
+	// Empty for an ordinary descriptor table.
+	std::shared_ptr<RuntimeBufferTableCandidates> runtime_candidates;
 
 	// Everything except the table bytes; a match with other bytes is a stale entry to replace.
 	[[nodiscard]] bool SameInputs(const ScanCacheEntry& other) const {

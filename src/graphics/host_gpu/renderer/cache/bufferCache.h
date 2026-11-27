@@ -3,17 +3,22 @@
 
 #include "common/abi.h"
 #include "common/common.h"
+#include "common/frameCost.h"
 #include "common/lruCache.h"
 #include "common/slotVector.h"
 #include "graphics/host_gpu/memoryTracker.h"
 #include "graphics/host_gpu/rangeSet.h"
 #include "graphics/host_gpu/renderer/cache/faultManager.h"
+#include "graphics/host_gpu/renderer/cache/hotReadbackTable.h"
 #include "graphics/host_gpu/renderer/cache/loopGuardReport.h"
 #include "graphics/host_gpu/renderer/cache/multiLevelPageTable.h"
+#include "graphics/host_gpu/renderer/cache/recentGpuWrites.h"
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
 
 #include <array>
+#include <atomic>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <span>
@@ -77,6 +82,55 @@ public:
 		uint64_t          guest_address = 0;
 	};
 
+	// Lifetime state shared by one persistent runtime-indexed buffer table. Candidate ranges are
+	// resolved once; only overlapping buffer recreation, map or unmap invalidates the BDA generation.
+	class RuntimeTableState final {
+	public:
+		explicit RuntimeTableState(RangeSet dependencies, RangeSet write_ranges = {})
+		    : m_dependencies(std::move(dependencies)), m_write_ranges(std::move(write_ranges)) {}
+
+		// Bumped by a map, unmap or invalidation from any thread.
+		[[nodiscard]] uint64_t BackingGeneration() const noexcept {
+			return m_backing_generation.load(std::memory_order_relaxed);
+		}
+		// Bumped only when a cached buffer overlapping a candidate is retired (merged, deleted,
+		// evicted), which happens on the render thread, also while this table is being built.
+		[[nodiscard]] uint64_t BufferGeneration() const noexcept {
+			return m_buffer_generation.load(std::memory_order_relaxed);
+		}
+		bool InvalidateBacking(uint64_t address, uint64_t size, bool buffer_lifetime = false) noexcept {
+			if (!m_dependencies.Intersects(address, size)) return false;
+			(buffer_lifetime ? m_buffer_generation : m_backing_generation)
+			    .fetch_add(1, std::memory_order_relaxed);
+			return true;
+		}
+		[[nodiscard]] const RangeSet& WriteRanges() const noexcept { return m_write_ranges; }
+		// The table's write set is one group: marking it is O(1) while the group still holds GPU
+		// ownership of its ranges. `epoch` is BufferCache's table epoch, which moves whenever
+		// ownership of a written range may have been lost or an image over it changed. Only then
+		// does a mark walk the ranges. Render thread only.
+		[[nodiscard]] bool MarkNeedsWalk(uint64_t epoch) const noexcept {
+			return !m_write_ranges.Empty() && (!m_marked || m_marked_epoch != epoch);
+		}
+		void NoteWalked(uint64_t epoch) noexcept {
+			m_marked       = true;
+			m_marked_epoch = epoch;
+		}
+		// Render thread only; set once the backing buffers are known, after registration.
+		void SetWriteRanges(RangeSet ranges) {
+			m_write_ranges = std::move(ranges);
+			m_marked       = false;
+		}
+
+	private:
+		RangeSet              m_dependencies;
+		RangeSet              m_write_ranges;
+		std::atomic<uint64_t> m_backing_generation {1};
+		std::atomic<uint64_t> m_buffer_generation {1};
+		bool                  m_marked       = false; // Render thread only.
+		uint64_t              m_marked_epoch = 0;
+	};
+
 	class BdaTableValidator {
 	public:
 		[[nodiscard]] std::optional<std::string> ValidateWrite(
@@ -100,8 +154,12 @@ public:
 	~BufferCache();
 	KYTY_CLASS_NO_COPY(BufferCache);
 
-	void                   InvalidateMemory(uint64_t vaddr, uint64_t size);
-	void                   ReadMemory(uint64_t vaddr, uint64_t size, bool is_write = false);
+	void                   InvalidateMemory(
+	    uint64_t vaddr, uint64_t size,
+	    Common::FrameCost::ReadbackSite site = Common::FrameCost::CurrentReadbackSite());
+	void                   ReadMemory(
+	    uint64_t vaddr, uint64_t size, bool is_write = false,
+	    Common::FrameCost::ReadbackSite site = Common::FrameCost::CurrentReadbackSite());
 	// Ends the draw window, whose draws share the stream copies of CPU-written ranges.
 	void                   EndDrawWindow() noexcept { m_draw_window++; }
 	[[nodiscard]] uint64_t DrawWindow() const noexcept { return m_draw_window; }
@@ -110,7 +168,8 @@ public:
 	[[nodiscard]] std::pair<Buffer*, uint64_t> ObtainBuffer(uint64_t vaddr, uint64_t size,
 	                                                        bool     is_written,
 	                                                        bool     is_texel_buffer = false,
-	                                                        BufferId id              = {});
+	                                                        BufferId id              = {},
+	                                                        bool     allow_stream    = true);
 	[[nodiscard]] StreamBuffer&                GetUtilityBuffer(MemoryUsage usage) noexcept {
 		switch (usage) {
 			case MemoryUsage::Upload: return m_staging_buffer;
@@ -138,6 +197,29 @@ public:
 	void               MarkColorMetadataChecked(uint64_t vaddr, uint64_t size, uint32_t keys);
 	[[nodiscard]] bool IsColorMetadataChecked(uint64_t vaddr, uint64_t size, uint32_t keys) const;
 	void               ProcessFaultBuffer();
+	// Write stamps: a number that changes whenever bytes of [vaddr, vaddr + size) may have been
+	// written by the GPU (a written binding, an upload, a copy from an image) or by a shader that
+	// stores through device addresses (NoteUntrackedWrite). Equal stamps taken at two times mean the
+	// range was not written in between. Ranges over 64 pages count as untracked writes.
+	[[nodiscard]] uint64_t WriteStamp(uint64_t vaddr, uint64_t size) const;
+	void                   NoteUntrackedWrite() noexcept;
+	// GPU thread, between commands (every write marked so far is recorded): the buffers written
+	// since the last boundary take the current tick as the tick of their latest write.
+	void                   NoteCommandBoundary();
+	// Called after recording a draw or dispatch: the ranges bound for writing, and any address
+	// writes (which can reach untracked ranges), belong to the current command buffer.
+	void                   RecordPendingWrites(bool address_writes = false);
+	[[nodiscard]] std::shared_ptr<RuntimeTableState> RegisterRuntimeTable(
+	    RangeSet dependencies, RangeSet write_ranges = {});
+	// Called only for backing-lifetime changes, not ordinary guest writes.
+	void InvalidateRuntimeTables(uint64_t vaddr, uint64_t size, bool buffer_lifetime = false);
+	// Marks the cached, mapped candidate-backing union once per dispatch, not once per candidate.
+	void MarkRuntimeTableWritten(const std::shared_ptr<RuntimeTableState>& state);
+	// Ownership of, or an image over, a range that written runtime tables cover may have changed:
+	// the next mark of every table whose group touches it walks its ranges again. Any thread.
+	void NoteTableRangeChanged(uint64_t vaddr, uint64_t size) noexcept;
+	// Adds a table's write ranges to the union stamped by marks. Render thread.
+	void AddTableWriteUnion(const RangeSet& ranges);
 	// Uploads the CPU-dirty bytes of the queued ranges `mapped` covers behind one barrier pair.
 	void SynchronizeBda(const RangeSet& mapped);
 	// Queue after the range's state change becomes visible, or a drain could consume it first.
@@ -174,6 +256,7 @@ private:
 		uint64_t position = 0;
 	};
 	static constexpr uint32_t STREAM_COPY_BITS = 10;
+	static constexpr size_t   kWriteStampMaxPages = 64;
 
 	using PageTable = MultiLevelPageTable<BufferId, CACHING_PAGEBITS, 44, 20>;
 	static_assert(CACHING_PAGESIZE == (uint64_t {1} << PageTable::kPageBits));
@@ -195,8 +278,54 @@ private:
 	[[nodiscard]] bool SynchronizeBufferFromImage(Buffer& buffer, uint64_t vaddr, uint64_t size);
 	// Synchronous downloads publish before returning; asynchronous callers wait before reuse.
 	template <bool async>
-	[[nodiscard]] bool DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t size);
+	[[nodiscard]] bool DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t size,
+	                                        BufferId main_id = {});
+	struct PendingDownload {
+		std::vector<vk::BufferCopy> copies;
+		uint64_t                    total_size     = 0;
+		uint64_t                    buffer_address = 0;
+		uint64_t                    offset         = 0;
+		uint8_t*                    mapped         = nullptr;
+		std::shared_ptr<Buffer>     temporary;
+	};
+	struct BatchedDownload {
+		Buffer*         buffer = nullptr;
+		PendingDownload pending;
+		uint64_t        unmark_address = 0;
+		uint64_t        unmark_size    = 0;
+	};
+	[[nodiscard]] PendingDownload CollectDownloadCopies(const Buffer& buffer, uint64_t vaddr,
+	                                                    uint64_t size);
+	void                          ReserveDownloadMemory(std::span<PendingDownload* const> items);
+	void                          RecordDownload(vk::CommandBuffer native, const Buffer& buffer,
+	                                             const PendingDownload& pending);
+	void                          PublishDownload(const PendingDownload& pending);
+	[[nodiscard]] BufferId        FindHotBuffer(uint64_t address, uint64_t size);
+	[[nodiscard]] uint64_t        EstimateDownloadBytes(uint64_t address, uint64_t size) const;
+	void                          CollectHotDownloads(BufferId main_id, uint64_t& budget,
+	                                                  std::vector<BatchedDownload>& batch);
+	void                          CollectRecentWrites(RangeSet& claimed, uint64_t& budget,
+	                                                  std::vector<BatchedDownload>& batch);
+	void                          CollectRecentPiece(uint64_t address, uint64_t size,
+	                                                 uint64_t& budget,
+	                                                 std::vector<BatchedDownload>& batch);
+	void                          NoteHotReadback(uint64_t address, uint64_t size);
+	void                          NoteRecentWrite(uint64_t address, uint64_t size);
+	// Reads the GPU-dirty bytes of [vaddr, size) of a host-readable buffer straight from its
+	// mapping into guest memory, after waiting only for the submission that holds the buffer's
+	// latest GPU write (not for the work queued behind it).
+	[[nodiscard]] bool        ReadBackInPlace(Buffer& buffer, uint64_t vaddr, uint64_t size);
+	// GPU writes of the current command buffer, and bound writes not recorded yet.
+	void                      MarkUnsubmittedWrite(uint64_t vaddr, uint64_t size);
+	[[nodiscard]] bool        HasPendingWrite(uint64_t vaddr, uint64_t size) const;
+	[[nodiscard]] bool        HasUnsubmittedWrite(uint64_t vaddr, uint64_t size) const;
+	[[nodiscard]] bool        CanDownloadDetached(uint64_t                        buffer_address,
+	                                              std::span<const vk::BufferCopy> copies);
+	void                      NoteOpenWrite(Buffer& buffer, BufferId id);
+	void                      NoteOpenWritesInRange(uint64_t vaddr, uint64_t size);
+	static constexpr uint64_t MaxInPlaceReadback = uint64_t {512} << 10u;
 	void               ForgetColorMetadataChecks(uint64_t vaddr, uint64_t size);
+	void               NoteWrite(uint64_t vaddr, uint64_t size);
 
 	GraphicContext&                                   m_graphics;
 	CommandScheduler&                                 m_scheduler;
@@ -208,6 +337,25 @@ private:
 	BufferMap                                         m_buffers;
 	PageTable                                         m_page_table;
 	RangeSet                                          m_gpu_modified_ranges;
+	RangeSet                                          m_unsubmitted_writes;
+	RangeSet                                          m_pending_writes;
+	uint64_t                                          m_unsubmitted_tick = 0;
+	bool                                              m_table_pending_write = false;
+	std::vector<std::weak_ptr<RuntimeTableState>>     m_runtime_tables;
+	std::mutex                                        m_runtime_tables_mutex;
+	// Render-thread state; see WriteStamp.
+	MultiLevelPageTable<uint64_t, CACHING_PAGEBITS, 44, 20> m_write_stamps;
+	uint64_t                                          m_write_clock           = 1;
+	uint64_t                                          m_untracked_write_stamp = 1;
+	uint64_t                                          m_address_write_tick    = 0;
+	std::vector<uint8_t>                              m_in_place_scratch;
+	std::vector<BufferId>                             m_open_writes;
+	// Union of every written table's write ranges, the clock of the last mark (a write stamp for
+	// anything in the union) and the epoch that forces a group to walk its ranges again.
+	mutable std::mutex                                m_table_union_mutex;
+	RangeSet                                          m_table_write_union;
+	uint64_t                                          m_table_write_stamp = 0;
+	std::atomic<uint64_t>                             m_table_epoch {1};
 	// One per TileManager::ColorClearSlots key slot.
 	std::array<RangeSet, 8>                           m_checked_color_metadata;
 	MemoryTracker                                     m_memory_tracker;
@@ -220,6 +368,8 @@ private:
 	std::array<StreamCopy, 1u << STREAM_COPY_BITS>    m_stream_copies {};
 	uint64_t                                          m_draw_window = 0;
 	TextureCache&                                     m_texture_cache;
+	HotReadbackTable                                  m_hot_readbacks;
+	RecentGpuWriteRing                                m_recent_writes;
 	uint64_t                                          m_total_used_memory  = 0;
 	uint64_t m_trigger_gc_memory  = 1ull * 1024 * 1024 * 1024;
 	uint64_t m_critical_gc_memory = 2ull * 1024 * 1024 * 1024;

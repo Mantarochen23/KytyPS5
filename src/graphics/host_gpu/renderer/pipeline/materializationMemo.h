@@ -11,7 +11,14 @@
 #include <span>
 #include <vector>
 
+struct XXH3_state_s;
+
 namespace Libs::Graphics {
+
+// Frees the streaming hash state of a memo (xxhash is included by the .cpp only).
+struct HashStateDeleter {
+	void operator()(XXH3_state_s* state) const;
+};
 
 // One page of watched guest memory at the generation it had when a memo entry was recorded.
 struct PageStamp {
@@ -22,7 +29,7 @@ struct PageStamp {
 // Says whether guest memory a memo entry read has changed since, without reading it. A stamp stays
 // current until a write is seen over its page (CPU fault, host I/O into the page, unmap); bytes only
 // the GPU holds are reported by GpuHolds, since reading them downloads new content.
-class ReadStamps {
+class ReadStamps: public ShaderRecompiler::IR::MemoryChangeSource {
 public:
 	// Watches the pages of the range and appends their stamps. False, with nothing appended, when a
 	// page cannot be proven tracked (unmapped, image-backed, written too often).
@@ -31,6 +38,11 @@ public:
 	virtual bool Unchanged(std::span<const PageStamp> stamps) = 0;
 	// True when the range holds GPU-written bytes that have not been downloaded.
 	virtual bool GpuHolds(uint64_t address, uint64_t size) = 0;
+	// General memo implementations need not expose an opaque stamp. The renderer's guest watch does,
+	// so large runtime tables can retain their enumeration outside the general memo.
+	std::shared_ptr<ShaderRecompiler::IR::MemoryChangeStamp> Track(uint64_t, uint64_t) override {
+		return {};
+	}
 
 protected:
 	~ReadStamps() = default;
@@ -101,6 +113,9 @@ struct MemoLookupStats {
 	uint32_t ranges_compared = 0; // ranges read and hashed
 	uint64_t bytes_compared  = 0;
 	uint32_t entries_tried   = 0; // entries whose key matched
+	uint32_t ranges_small    = 0; // ranges compared by their stored bytes
+	uint32_t ranges_large    = 0; // ranges over SmallRangeBytes, compared by hash
+	uint64_t bytes_large     = 0;
 	bool     walk_changed    = false; // Store: a range held other bytes than the walk read
 };
 
@@ -115,6 +130,8 @@ public:
 		uint64_t address = 0;
 		uint64_t size    = 0;
 		uint64_t hash    = 0;
+		uint32_t byte_offset = 0; // into Entry::bytes, when has_bytes
+		bool     has_bytes   = false;
 		uint32_t first_page = 0; // into Entry::pages, when tracked
 		uint32_t page_count = 0;
 		bool     tracked    = false;
@@ -126,6 +143,8 @@ public:
 		uint64_t                     indirect_args_address = 0;
 		bool                         legacy_hash           = false;
 		std::vector<Read>            reads;
+		// The bytes of every range of at most SmallRangeBytes, compared directly.
+		std::vector<uint8_t>         bytes;
 		std::vector<PageStamp>       pages;
 		std::vector<RecordingImageHeap::Acquired> heap;
 		ShaderRecompiler::IR::ResourceSnapshot       resources;
@@ -134,6 +153,11 @@ public:
 		uint64_t                     serial              = 0;
 		uint64_t                     used                = 0;
 	};
+
+	// Ranges up to this size keep their bytes and are compared with memcmp, larger ones by hash.
+	static constexpr uint64_t SmallRangeBytes = 256;
+	// "Compare the whole user-data vector" for Revalidate.
+	static constexpr size_t AllUserData = static_cast<size_t>(-1);
 
 	// `entries` is how many results are kept (at least one); `stamps` the guest memory stamp source,
 	// or null to compare every range.
@@ -152,6 +176,18 @@ public:
 	             uint64_t specialization_hash, RecordingImageHeap& heap, bool uses_image_heap,
 	             uint32_t& evicted, MemoLookupStats& stats, const WalkReadHashes* walk = nullptr);
 
+	// Checks one entry against these inputs outside the memo's own lookup: the key (only the first
+	// `user_data_words` user-data words, the ones the walk reads), every recorded range, and the heap
+	// tables. On a hit the entry is current. A call-site record holds the entry beyond its eviction.
+	bool Revalidate(Entry& entry, const ShaderRecompiler::IR::SrtRuntime& runtime,
+	                size_t user_data_words, MemoOutcome& outcome, MemoLookupStats& stats);
+	// The entry the owner holds the result of right now (`current`), or null.
+	[[nodiscard]] std::shared_ptr<Entry> ShareCurrent() const;
+	// Bumped by Clear: what an entry shared before it described is gone.
+	[[nodiscard]] uint64_t Generation() const { return m_generation; }
+	// What the entry holds, for memory accounting.
+	static uint64_t ApproximateBytes(const Entry& entry);
+
 	// Serial of the entry whose result the owner holds right now, 0 for none.
 	uint64_t current = 0;
 	// Test and report visible.
@@ -160,7 +196,7 @@ public:
 
 private:
 	bool KeyMatches(const Entry& entry, const ShaderRecompiler::IR::SrtRuntime& runtime,
-	                MemoOutcome& why) const;
+	                MemoOutcome& why, size_t user_data_words = AllUserData) const;
 	// Reads one range through the runtime's reader and hashes it; false when it cannot be read.
 	bool HashRange(const ShaderRecompiler::IR::SrtRuntime& runtime, uint64_t address, uint64_t size,
 	               uint64_t& hash);
@@ -168,11 +204,14 @@ private:
 	                   MemoOutcome& why, MemoLookupStats& stats);
 	bool ReplayHeap(const Entry& entry, const ShaderRecompiler::IR::SrtRuntime& runtime);
 
-	std::vector<std::unique_ptr<Entry>> m_entries;
+	std::vector<std::shared_ptr<Entry>> m_entries;
 	std::vector<uint32_t>               m_scratch;
 	uint32_t                            m_capacity = 1;
 	uint64_t                            m_tick     = 0;
 	uint64_t                            m_serials  = 0;
+	uint64_t                            m_generation = 0;
+	// Streaming state for ranges hashed in pieces; made once, so a hit allocates nothing.
+	std::unique_ptr<XXH3_state_s, HashStateDeleter> m_hash_state;
 	ReadStamps*                         m_stamps   = nullptr;
 };
 

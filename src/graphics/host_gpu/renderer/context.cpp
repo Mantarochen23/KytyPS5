@@ -1,5 +1,7 @@
 #include "common/assert.h"
 #include "common/common.h"
+#include "common/frameCost.h"
+#include "common/ports.h"
 #include "common/profiler.h"
 #include "common/threads.h"
 #include "graphics/host_gpu/graphicContext.h"
@@ -19,9 +21,79 @@ namespace Libs::Graphics {
 CommandBuffer::CommandBuffer(CommandScheduler& scheduler)
     : m_context(scheduler.Context()), m_graphics(scheduler.Graphics()) {}
 
+vk::CommandBuffer CommandBuffer::Handle() const {
+	if (Config::PortEnabled(Config::Port::BarrierTracker) && m_buffer != nullptr) {
+		RecordBarrier(m_barriers.BeforeCommand());
+	}
+	return m_buffer;
+}
+
+vk::CommandBuffer CommandBuffer::DispatchHandle(bool writes) const {
+	// A dispatch is recorded outside a render pass instance.
+	EndRendering();
+	if (Config::PortEnabled(Config::Port::BarrierTracker)) {
+		RecordBarrier(m_barriers.BeforeDispatch(writes));
+	}
+	return m_buffer;
+}
+
+void CommandBuffer::OrderDispatches() const {
+	if (Config::PortEnabled(Config::Port::BarrierTracker)) {
+		RecordBarrier(m_barriers.BeforeBarrier());
+	}
+}
+
+void CommandBuffer::RecordBarrier(BarrierTracker::Barrier barrier) const {
+	using Barrier = BarrierTracker::Barrier;
+	if (barrier == Barrier::None) {
+		return;
+	}
+	// A pipeline barrier with compute stages is not allowed inside a render pass instance. Pending
+	// dispatches mean no pass is open (a dispatch ends it and starting one orders them first).
+	EndRendering();
+	constexpr auto ComputeReads = vk::AccessFlagBits2::eShaderRead |
+	                              vk::AccessFlagBits2::eShaderWrite |
+	                              vk::AccessFlagBits2::eUniformRead;
+	constexpr auto MemoryAccess =
+	    vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite;
+	vk::MemoryBarrier2 memory {};
+	switch (barrier) {
+		case Barrier::ComputeToCompute:
+			memory.srcStageMask  = vk::PipelineStageFlagBits2::eComputeShader;
+			memory.srcAccessMask = vk::AccessFlagBits2::eShaderWrite;
+			memory.dstStageMask  = vk::PipelineStageFlagBits2::eComputeShader;
+			memory.dstAccessMask = ComputeReads;
+			break;
+		case Barrier::AllToCompute:
+			memory.srcStageMask  = vk::PipelineStageFlagBits2::eAllCommands;
+			memory.srcAccessMask = MemoryAccess;
+			memory.dstStageMask  = vk::PipelineStageFlagBits2::eComputeShader;
+			memory.dstAccessMask = ComputeReads;
+			break;
+		case Barrier::ComputeToAll:
+			memory.srcStageMask  = vk::PipelineStageFlagBits2::eComputeShader;
+			memory.srcAccessMask = vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite;
+			memory.dstStageMask  = vk::PipelineStageFlagBits2::eAllCommands;
+			memory.dstAccessMask = MemoryAccess;
+			break;
+		case Barrier::AllToAll:
+			memory.srcStageMask  = vk::PipelineStageFlagBits2::eAllCommands;
+			memory.srcAccessMask = MemoryAccess;
+			memory.dstStageMask  = vk::PipelineStageFlagBits2::eAllCommands;
+			memory.dstAccessMask = MemoryAccess;
+			break;
+		case Barrier::None: return;
+	}
+	vk::DependencyInfo dependency {};
+	dependency.memoryBarrierCount = 1;
+	dependency.pMemoryBarriers    = &memory;
+	m_buffer.pipelineBarrier2(dependency);
+	Common::FrameCost::Add(Common::FrameCost::Counter::BarriersGlobal);
+}
+
 void CommandBuffer::Begin() {
 	EXIT_IF(m_rendering || IsInvalid());
-	auto buffer = Handle();
+	auto buffer = m_buffer;
 
 	vk::CommandBufferBeginInfo begin_info {};
 	begin_info.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit;
@@ -34,7 +106,9 @@ void CommandBuffer::Begin() {
 
 void CommandBuffer::End() const {
 	EndRendering();
-	auto buffer = Handle();
+	// The deferred barrier after the last dispatches stays in this submission.
+	OrderDispatches();
+	auto buffer = m_buffer;
 	m_graphics.breadcrumbs.EndSubmitRecording(m_graphics, buffer);
 
 	auto result = buffer.end();
@@ -93,8 +167,9 @@ void CommandBuffer::EndRendering() const {
 	if (!m_rendering) {
 		return;
 	}
-	Handle().endRendering();
+	m_buffer.endRendering();
 	m_rendering = false;
+	Common::FrameCost::Add(Common::FrameCost::Counter::PassBreaks);
 }
 
 } // namespace Libs::Graphics

@@ -62,6 +62,24 @@ enum class Counter : uint8_t {
 	MemoRangesTracked,
 	MemoRangesUntracked,
 	MemoWalkChanged,
+	// Per-call-site lookup (port callsite-lookup): one call per shader lookup that had a call site.
+	CallSiteHits,
+	CallSiteMisses, // every lookup that did not hit, whatever the reason
+	CallSiteMissNew,
+	CallSiteMissStale,
+	CallSiteMissRegisters,
+	CallSiteMissRanges,
+	CallSiteMissHeap,
+	CallSiteMissNoModule, // the record held, but no module is built for its specialization yet
+	CallSiteStored,
+	CallSiteEvicted,
+	CallSiteRangesSmall,
+	CallSiteRangesLarge,
+	CallSiteRangesStamped,
+	CallSiteBytesCompared,
+	CallSiteBytesLarge,
+	CallSiteHitNs,
+	CallSiteMissNs,
 	// Render-thread vs. off-thread GPU wait split and reason breakdown.
 	GpuFenceWaitBgNs,
 	GpuPriorityOpWaitNs,
@@ -127,6 +145,98 @@ enum class Counter : uint8_t {
 	DispatchStepGuardNs,
 	DispatchStepCommitNs,
 	DispatchStepRecordNs,
+	// Per-call cuts: debug breadcrumbs recorded, GPU-side texture invalidations, indirect dispatch
+	// argument guards, the shader prefetch scan and the asynchronous-work pump.
+	BreadcrumbOps,
+	GpuInvalidateCalls,
+	GpuInvalidateSkipped,
+	GpuInvalidateGenBumps,
+	GuardGpuRuns,
+	GuardCpuChecks,
+	GuardSkipped,
+	PrefetchScans,
+	PrefetchSkipped,
+	PumpAsyncCalls,
+	PumpAsyncSkipped,
+	// Why an image-heap rebind missed its fast return (one per failed condition, so a miss can count
+	// several), and which call sites bumped the two generations it compares. HeapSelfBump counts
+	// slow rebinds that ended with the heap-change generation already past the one they stored.
+	HeapMissPending,
+	HeapMissDescriptorGen,
+	HeapMissCacheGen,
+	HeapMissHeapGen,
+	HeapSelfBump,
+	CacheSelfBump,
+	HeapRepointCalls,
+	HeapRepointSlots,
+	HeapLayoutQuiet,
+	HeapBumpCpuDirty,
+	HeapBumpMaybeDirty,
+	HeapBumpBufferModified,
+	HeapBumpLayoutLeave,
+	HeapBumpUntrackHead,
+	HeapBumpUntrackTail,
+	HeapBumpUnregister,
+	HeapBumpUnmap,
+	CacheBumpRegister,
+	CacheBumpUnregister,
+	CacheBumpStencil,
+	CacheBumpGpuInvalidate,
+	CacheBumpCpuInvalidate,
+	CacheBumpClearMeta,
+	CacheBumpTouchMeta,
+	CacheBumpOther,
+	// Runtime-indexed buffer table activity: candidates are paid only on rebuild.
+	TableCandidates,
+	TableDispatches,
+	TableRebuilds,
+	TableEnumerations,
+	TableMarks,
+	TableMarkRanges,
+	// Rebuilt tables of typed or image-synced buffers with a candidate range inside a registered image.
+	TableImageAliased,
+	// Barriers recorded by kind (global memory, buffer, image), render pass breaks, and barriers
+	// the barrier tracker did not record.
+	BarriersGlobal,
+	BarriersBuffer,
+	BarriersImage,
+	PassBreaks,
+	BarriersDropped,
+	// Synchronous readback waits split by producer site.
+	WaitRbThreadDimCalls,
+	WaitRbThreadDimNs,
+	WaitRbLdsCalls,
+	WaitRbLdsNs,
+	WaitRbScalarCalls,
+	WaitRbScalarNs,
+	WaitRbHeapCalls,
+	WaitRbHeapNs,
+	WaitRbVertexAttribCalls,
+	WaitRbVertexAttribNs,
+	WaitRbColorMetaCalls,
+	WaitRbColorMetaNs,
+	WaitRbReadFaultCalls,
+	WaitRbReadFaultNs,
+	WaitRbWriteFaultCalls,
+	WaitRbWriteFaultNs,
+	WaitRbInvalidateCalls,
+	WaitRbInvalidateNs,
+	WaitRbOtherCalls,
+	WaitRbOtherNs,
+	// Readback execution paths and GPU-side indirect removals.
+	ReadbackInPlace,
+	ReadbackDetached,
+	ReadbackSync,
+	ReadbackBatchExtra,
+	DispatchIndirectThreadDimGpu,
+	DrawIndirectCountGpu,
+	// Why a table was rebuilt (one per rebuild) and how a mark was resolved.
+	TableRebuildKey,
+	TableRebuildGeneration,
+	TableRebuildGenerationOwn,
+	TableRebuildEvicted,
+	TableRebuildDisabled,
+	TableMarksSkipped,
 	Count
 };
 
@@ -141,6 +251,19 @@ enum class WaitReason : uint8_t {
 	Rt,
 	Swapchain,
 	PriorityThread,
+};
+
+enum class ReadbackSite : uint8_t {
+	Other,
+	ThreadDim,
+	Lds,
+	Scalar,
+	Heap,
+	VertexAttrib,
+	ColorMeta,
+	ReadFault,
+	WriteFault,
+	Invalidate,
 };
 
 enum class SubmitReason : uint8_t {
@@ -177,6 +300,19 @@ private:
 [[nodiscard]] WaitReason CurrentWaitReason() noexcept;
 void                     RecordRenderWaitReason(uint64_t elapsed_ns) noexcept;
 
+class ScopedReadbackSite final {
+public:
+	explicit ScopedReadbackSite(ReadbackSite site) noexcept;
+	~ScopedReadbackSite();
+	ScopedReadbackSite(const ScopedReadbackSite&)            = delete;
+	ScopedReadbackSite& operator=(const ScopedReadbackSite&) = delete;
+
+private:
+	ReadbackSite m_previous;
+};
+
+[[nodiscard]] ReadbackSite CurrentReadbackSite() noexcept;
+
 class ScopedSubmitReason final {
 public:
 	explicit ScopedSubmitReason(SubmitReason reason) noexcept;
@@ -205,6 +341,12 @@ private:
 	std::chrono::steady_clock::time_point m_start;
 	ScopedTimer*                          m_parent   = nullptr;
 	uint64_t                              m_child_ns = 0;
+	// Per-call timers read the clock for one call in --frame-timer-sample and count that call's
+	// time that many times over; a timer inside an unmeasured one is not measured either, one inside
+	// a measured one is, with the same weight. Waits are always measured, with weight 1.
+	uint32_t                              m_weight   = 1;
+	bool                                  m_measured = true;
+	bool                                  m_done     = false;
 };
 
 // Lightweight 1-in-N step sampler. When inactive, AddTo() is a single branch with zero clock
@@ -250,6 +392,8 @@ private:
 struct ReportLines {
 	std::string summary;
 	std::string arch;
+	std::string cuts;
+	std::string heap;
 };
 
 [[nodiscard]] std::array<uint64_t, CounterCount> SnapshotCounters();

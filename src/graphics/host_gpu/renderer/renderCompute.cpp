@@ -3,9 +3,11 @@
 #include "common/common.h"
 #include "common/debugCounters.h"
 #include "common/frameCost.h"
+#include "common/ports.h"
 #include "common/emulatorConfig.h"
 #include "common/file.h"
 #include "common/logging/log.h"
+#include "common/ports.h"
 #include "common/profiler.h"
 #include "common/stringUtils.h"
 #include "common/threads.h"
@@ -21,7 +23,9 @@
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/renderer/pipeline/bufferProbe.h"
+#include "graphics/host_gpu/renderer/pipeline/frameHoles.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
+#include "graphics/host_gpu/renderer/pipeline/skippedDraws.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/vulkanCommon.h"
@@ -255,22 +259,37 @@ static void PrepareRayQuery(RenderContext& context, const ShaderStageRuntime& st
 }
 
 static void BindSharedMemory(RenderContext& context, ShaderComputeInputInfo& input,
-                             PreparedBindings& bindings, uint64_t indirect_args = 0) {
+                             PreparedBindings& bindings, uint64_t indirect_args = 0,
+                             const vk::DispatchIndirectCommand* host_args = nullptr) {
 	if (input.stage.module->info.bindings.descriptor_counts[
 	        static_cast<size_t>(ShaderRecompiler::IR::DescriptorBindingKind::SharedMemory)] == 0) {
 		return;
 	}
 	auto& cache = context.GetBufferCache();
-	if (indirect_args != 0) {
-		cache.ReadMemory(indirect_args, sizeof(vk::DispatchIndirectCommand));
-		std::memcpy(input.workgroup_counts, reinterpret_cast<const void*>(indirect_args),
-		            sizeof(input.workgroup_counts));
-	}
 	// LDS has no contents to preserve between dispatches. The existing shader hazard
 	// barriers also order other users of this GPU-only utility buffer.
 	auto& storage = cache.GetUtilityBuffer(MemoryUsage::DeviceLocal);
 	const auto limit = std::min<uint64_t>(storage.Size(),
 	    context.GetGraphics().GetPhysicalDeviceProperties().limits.maxStorageBufferRange);
+	if (indirect_args != 0) {
+		if (Config::PortEnabled(Config::Port::GpuIndirectThreadDim)) {
+			if (host_args != nullptr) {
+				input.workgroup_counts[0] = host_args->x;
+				input.workgroup_counts[1] = host_args->y;
+				input.workgroup_counts[2] = host_args->z;
+			} else {
+				// lds_variable indexes offset 0 by WorkgroupId and never queries OpArrayLength:
+				// bind the full utility range instead of stalling the GPU for group counts.
+				bindings.shared_memory = {storage.Handle(), 0, limit};
+				return;
+			}
+		} else {
+			cache.ReadMemory(indirect_args, sizeof(vk::DispatchIndirectCommand), false,
+			                 Common::FrameCost::ReadbackSite::Lds);
+			std::memcpy(input.workgroup_counts, reinterpret_cast<const void*>(indirect_args),
+			            sizeof(input.workgroup_counts));
+		}
+	}
 	uint64_t size = sizeof(uint32_t);
 	if (std::ranges::find(input.workgroup_counts, 0u) == std::end(input.workgroup_counts)) {
 		size = uint64_t {input.lds_size_dwords} * sizeof(uint32_t);
@@ -647,6 +666,20 @@ static bool HasStorageWrites(const ShaderComputeInputInfo& input_info,
 	       });
 }
 
+// Whether a dispatch may write memory through any path. A dispatch that only reads is not ordered
+// after earlier dispatches that only read, so no write may be missed here.
+static bool DispatchMayWriteMemory(const ShaderStageRuntime& stage, const PreparedBindings& bindings) {
+	const auto& program = stage.module->info;
+	const auto& info    = program.info;
+	return bindings.shared_memory.buffer != nullptr || bindings.gds.buffer != nullptr ||
+	       program.has_address_writes || info.uses_dma || info.uses_gds || info.function_scratch ||
+	       HasShaderBufferWrites(stage) ||
+	       std::ranges::any_of(info.buffers,
+	                           [](const auto& resource) { return resource.written || resource.atomic; }) ||
+	       std::ranges::any_of(info.images,
+	                           [](const auto& resource) { return resource.written || resource.atomic; });
+}
+
 // The guest buffers a compute program names through descriptors, with how it uses them. Memory it
 // reaches through pointers it computes itself is not listed.
 static std::vector<SkipTaint::Use> ComputeBufferUses(const ShaderStageRuntime& stage) {
@@ -662,6 +695,18 @@ static std::vector<SkipTaint::Use> ComputeBufferUses(const ShaderStageRuntime& s
 		uses.push_back({descriptor.Base48(), size, metadata[i].read || !metadata[i].written,
 		                metadata[i].written});
 	}
+	for (const auto& table: stage.resources->indirect_buffer_tables) {
+		if (table.root_resource >= metadata.size()) continue;
+		const auto& meta = metadata[table.root_resource];
+		if (!meta.written) continue;
+		for (const auto& entry: table.candidates->entries) {
+			const auto descriptor = DecodeNativeDescriptor<ShaderBufferResource>(entry);
+			auto       size       = ShaderRecompiler::IR::BufferBindingSize(meta, descriptor);
+			if (descriptor.NumRecords() == UINT32_MAX) size = std::min<uint64_t>(size, 256u << 20u);
+			if (descriptor.Base48() == 0 || size == 0) continue;
+			uses.push_back({descriptor.Base48(), size, meta.read || !meta.written, meta.written});
+		}
+	}
 	return uses;
 }
 
@@ -671,9 +716,119 @@ static uint64_t SteadyNowMs() {
 	                                 .count());
 }
 
-void RenderExecutor::TaintSkippedDispatch() {
-	m_skip_taint.Taint(m_pending_uses, SteadyNowMs());
+static std::vector<uint64_t> WrittenAddresses(std::span<const SkipTaint::Use> uses) {
+	std::vector<uint64_t> addrs;
+	for (const auto& u: uses) {
+		if (u.written && u.address != 0) {
+			addrs.push_back(u.address);
+		}
+	}
+	return addrs;
+}
+
+static uint64_t CapturedDispatchKey(const HW::ComputeShaderInfo& cs_regs, uint32_t gx, uint32_t gy,
+                                    uint32_t gz, uint32_t mode, bool async_compute,
+                                    uint64_t indirect_args, bool is_indirect) {
+	uint64_t h = cs_regs.cs_regs.data_addr;
+	const auto mix = [&h](uint64_t v) {
+		h ^= v + 0x9e3779b9u + (h << 6u) + (h >> 2u);
+	};
+	mix((uint64_t {gx} << 32u) | gy);
+	mix((uint64_t {gz} << 32u) | mode);
+	mix(indirect_args ^ (uint64_t {async_compute ? 1u : 0u} << 1u) ^
+	    uint64_t {is_indirect ? 1u : 0u});
+	for (uint32_t i = 0; i < 16u; ++i) {
+		mix(cs_regs.cs_user_sgpr.value[i]);
+	}
+	return h;
+}
+
+void RenderExecutor::TaintSkippedDispatch(bool record_wait_hole) {
+	const auto now = SteadyNowMs();
+	if (record_wait_hole) {
+		FrameHoles::NoteDispatchSkip(FrameHoles::DispatchSkipReason::Wait,
+		                             WrittenAddresses(m_pending_uses));
+		// Mark this frame incomplete so the presenter holds the last complete frame instead of
+		// presenting a hole while the skipped producer's shader finishes compiling.
+		NoteDrawSkippedForShaders();
+		if (m_pending_dispatch.has_value()) {
+			const auto& cap = *m_pending_dispatch;
+			const auto  key = CapturedDispatchKey(cap.cs_regs, cap.groups[0], cap.groups[1],
+			                                      cap.groups[2], cap.mode, cap.async_compute,
+			                                      cap.indirect_args, cap.is_indirect);
+			m_skip_catchup.Enqueue(key, cap.cs_regs.cs_regs.data_addr, m_pending_uses, cap, now);
+		}
+	}
+	m_skip_taint.Taint(m_pending_uses, now);
 	m_pending_uses.clear();
+	m_pending_dispatch.reset();
+}
+
+void RenderExecutor::DrainSkippedDispatchesLocked(CommandBuffer& buffer) {
+	if (m_replaying_catchup || m_skip_catchup.Empty()) {
+		return;
+	}
+	const auto now = SteadyNowMs();
+	auto ready = m_skip_catchup.TakeReady(now, [this](const auto& entry) -> SkipCatchUp::ProbeState {
+		const auto&            cap = entry.payload;
+		ShaderComputeInputInfo probe_info {};
+		probe_info.async_compute = cap.async_compute;
+		if (cap.is_indirect) {
+			probe_info.indirect_args_address = cap.indirect_args;
+		} else {
+			const bool use_threads =
+			    (cap.mode & Pm4::COMPUTE_DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS) != 0;
+			probe_info.dispatch_thread_dimensions = use_threads;
+			probe_info.workgroup_counts[0]        = cap.groups[0];
+			probe_info.workgroup_counts[1]        = cap.groups[1];
+			probe_info.workgroup_counts[2]        = cap.groups[2];
+			if (use_threads) {
+				const uint32_t gs[] = {cap.cs_regs.cs_regs.num_thread_x,
+				                       cap.cs_regs.cs_regs.num_thread_y,
+				                       cap.cs_regs.cs_regs.num_thread_z};
+				for (uint32_t a = 0; a < 3u; ++a) {
+					const auto sz = std::max(gs[a], 1u);
+					probe_info.workgroup_counts[a] =
+					    cap.groups[a] / sz + (cap.groups[a] % sz != 0u);
+				}
+			}
+		}
+		m_context.GetImageHeap().BeginDraw();
+		bool pending = false;
+		if (!m_context.GetPipelineCache().GetComputeProgram(cap.cs_regs, probe_info, &pending)) {
+			return pending ? SkipCatchUp::ProbeState::Pending : SkipCatchUp::ProbeState::Failed;
+		}
+		if (!m_context.GetPipelineCache().EnsureComputePipeline(probe_info, pending)) {
+			return pending ? SkipCatchUp::ProbeState::Pending : SkipCatchUp::ProbeState::Failed;
+		}
+		return SkipCatchUp::ProbeState::Ready;
+	});
+	if (ready.empty()) {
+		return;
+	}
+	const auto saved_cs = buffer.GetShaders().GetCs();
+	m_replaying_catchup = true;
+	for (const auto& item: ready) {
+		const auto& cap = item.payload;
+		buffer.GetShaders().SetCsInfo(cap.cs_regs);
+		if (cap.is_indirect) {
+			(void)DispatchIndirectLocked(buffer, cap.indirect_args, cap.mode, cap.async_compute,
+			                             /*allow_async=*/false);
+		} else {
+			(void)DispatchDirectLocked(buffer, cap.groups[0], cap.groups[1], cap.groups[2],
+			                           cap.mode, cap.async_compute, /*allow_async=*/false,
+			                           cap.indirect_args);
+		}
+		static std::atomic<uint32_t> replay_logs {0};
+		if (replay_logs.fetch_add(1, std::memory_order_relaxed) < 32) {
+			LOGF("[catchup] replayed skipped cs shader=0x%016" PRIx64
+			     " pending=%zu total_replayed=%" PRIu64 "\n",
+			     cap.cs_regs.cs_regs.data_addr, m_skip_catchup.Size(),
+			     m_skip_catchup.GetStats().replayed);
+		}
+	}
+	m_replaying_catchup = false;
+	buffer.GetShaders().SetCsInfo(saved_cs);
 }
 
 // Before a ready dispatch records: true when it reads memory a skipped dispatch was to write. It is
@@ -846,11 +1001,25 @@ bool RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 	Common::FrameCost::ScopedTimer lock_wait(Common::FrameCost::Counter::LockWaitNs);
 	Common::LockGuard              lock(m_context.GetMutex());
 	lock_wait.Stop();
+	if (!m_skip_catchup.Empty()) {
+		DrainSkippedDispatchesLocked(buffer);
+	}
+	return DispatchDirectLocked(buffer, thread_group_x, thread_group_y, thread_group_z, mode,
+	                            async_compute, allow_async, indirect_args);
+}
+
+bool RenderExecutor::DispatchDirectLocked(CommandBuffer& buffer, uint32_t thread_group_x,
+                                          uint32_t thread_group_y, uint32_t thread_group_z,
+                                          uint32_t mode, bool async_compute, bool allow_async,
+                                          uint64_t indirect_args) {
+	auto& sh_ctx = buffer.GetShaders();
 	m_pending_uses.clear();
+	m_pending_dispatch.reset();
 	if (sh_ctx.GetCs().cs_regs.data_addr == 0) {
 		LOGF("GraphicsRenderDispatchDirect: temporary: ignoring dispatch with null CS shader, "
 		     "groups=%ux%ux%u mode=%u\n",
 		     thread_group_x, thread_group_y, thread_group_z, mode);
+		FrameHoles::NoteDispatchSkip(FrameHoles::DispatchSkipReason::NullShader);
 		Common::FrameCost::Add(Common::FrameCost::Counter::DispatchesSkipped);
 		return true;
 	}
@@ -873,6 +1042,16 @@ bool RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 	}
 
 	const auto& cs_regs = sh_ctx.GetCs();
+	const auto  make_capture = [&]() -> CapturedDispatch {
+		return CapturedDispatch {
+		    .cs_regs       = cs_regs,
+		    .groups        = {thread_group_x, thread_group_y, thread_group_z},
+		    .mode          = mode,
+		    .async_compute = async_compute,
+		    .indirect_args = indirect_args,
+		    .is_indirect   = false,
+		};
+	};
 
 	ShaderComputeInputInfo input_info {};
 	input_info.async_compute = async_compute;
@@ -896,6 +1075,11 @@ bool RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 	bool pending = false;
 	if (!m_context.GetPipelineCache().GetComputeProgram(cs_regs, input_info,
 	                                                    allow_async ? &pending : nullptr)) {
+		if (pending && Config::AsyncComputeWaitMs() != 0) {
+			m_pending_dispatch = make_capture();
+		} else if (!pending) {
+			FrameHoles::NoteDispatchSkip(FrameHoles::DispatchSkipReason::FailedShader);
+		}
 		if (!pending) Common::FrameCost::Add(Common::FrameCost::Counter::DispatchesSkipped);
 		return !pending;
 	}
@@ -917,7 +1101,9 @@ bool RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 		                       final_groups, mode, indirect_args,
 		                       indirect_args != 0 ? "indirect-threads" : "direct")) {
 			m_pending_uses = ComputeBufferUses(input_info.stage);
-			TaintSkippedDispatch();
+			FrameHoles::NoteDispatchSkip(FrameHoles::DispatchSkipReason::Refused,
+			                             WrittenAddresses(m_pending_uses));
+			TaintSkippedDispatch(/*record_wait_hole=*/false);
 			Common::FrameCost::Add(Common::FrameCost::Counter::DispatchesSkipped);
 			return true;
 		}
@@ -933,7 +1119,11 @@ bool RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 	sample.clock.AddTo(sample.program_ns);
 	if (allow_async && !m_context.GetPipelineCache().EnsureComputePipeline(input_info, pending)) {
 		if (pending && Config::AsyncComputeWaitMs() != 0) {
-			m_pending_uses = ComputeBufferUses(input_info.stage);
+			m_pending_uses     = ComputeBufferUses(input_info.stage);
+			m_pending_dispatch = make_capture();
+		} else if (!pending) {
+			FrameHoles::NoteDispatchSkip(FrameHoles::DispatchSkipReason::PipelineFailed,
+			                             WrittenAddresses(ComputeBufferUses(input_info.stage)));
 		}
 		if (!pending) Common::FrameCost::Add(Common::FrameCost::Counter::DispatchesSkipped);
 		return !pending;
@@ -947,8 +1137,26 @@ bool RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 	                                                           sizeof(vk::DispatchIndirectCommand),
 	                                                           true, false}}
 	                           : std::vector<SkipTaint::Use> {})) {
+		const auto uses = ComputeBufferUses(input_info.stage);
+		FrameHoles::NoteDispatchSkip(FrameHoles::DispatchSkipReason::Tainted,
+		                             WrittenAddresses(uses));
+		NoteDrawSkippedForShaders();
+		const auto key = CapturedDispatchKey(cs_regs, thread_group_x, thread_group_y,
+		                                     thread_group_z, mode, async_compute, indirect_args,
+		                                     false);
+		m_skip_catchup.Enqueue(key, cs_regs.cs_regs.data_addr, uses, make_capture(), SteadyNowMs());
 		Common::FrameCost::Add(Common::FrameCost::Counter::DispatchesSkipped);
 		return true;
+	}
+	if (m_replaying_catchup && !m_skip_taint.Empty()) {
+		m_skip_taint.ClearWritten(ComputeBufferUses(input_info.stage));
+	}
+	if (!m_replaying_catchup && !m_skip_catchup.Empty()) {
+		const auto key = CapturedDispatchKey(cs_regs, thread_group_x, thread_group_y,
+		                                     thread_group_z, mode, async_compute, indirect_args,
+		                                     false);
+		m_skip_catchup.DropByKey(key);
+		m_skip_catchup.DropSuperseded(ComputeBufferUses(input_info.stage));
 	}
 
 	if (use_thread_dimensions) {
@@ -972,8 +1180,8 @@ bool RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 	const bool buffer_probe = Config::BufferProbeShader(program.shader_hash);
 	std::vector<BufferProbe::CacheState> probe_states;
 	if (buffer_probe) probe_states = BufferProbeRunner::SampleCacheState(m_context, bindings);
-	if (program.info.uses_dma) {
-		m_context.PrepareBda();
+	if (program.info.uses_dma || program.info.uses_device_address) {
+		m_context.PrepareBda(program.info.uses_dma);
 	}
 	PrepareRayQuery(m_context, input_info.stage, bindings);
 	if (program.info.uses_image_heap) {
@@ -987,15 +1195,23 @@ bool RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 	}
 	sample.clock.AddTo(sample.bind_ns);
 
-	const auto vk_buffer = buffer.Handle();
 	CommitBindings(buffer, vk::PipelineBindPoint::eCompute, pipeline,
 	               std::span {&descriptor_stage, 1u});
-	const bool writes_memory = HasStorageWrites(input_info, bindings) || program.info.uses_dma ||
+	const bool tracked_barriers = Config::PortEnabled(Config::Port::BarrierTracker);
+	const bool writes_memory    = HasStorageWrites(input_info, bindings) || program.info.uses_dma ||
 	                           bindings.gds.buffer != nullptr;
-	if (writes_memory) {
-		// A host fence used to serialize every dispatch. Preserve its read-before-write ordering
-		// while allowing the queue to execute asynchronously.
-		ShaderWriteHazardBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
+	vk::CommandBuffer vk_buffer;
+	if (tracked_barriers) {
+		// The tracker orders this dispatch against the commands around it and defers the barrier
+		// after it until a later command needs it.
+		vk_buffer = buffer.DispatchHandle(DispatchMayWriteMemory(input_info.stage, bindings));
+	} else {
+		vk_buffer = buffer.Handle();
+		if (writes_memory) {
+			// A host fence used to serialize every dispatch. Preserve its read-before-write
+			// ordering while allowing the queue to execute asynchronously.
+			ShaderWriteHazardBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
+		}
 	}
 	sample.clock.AddTo(sample.commit_ns);
 	if (Config::GraphicsDebugDumpEnabled()) {
@@ -1061,17 +1277,20 @@ bool RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 	}
 
 	vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.pipeline);
-	OpBreadcrumb dispatch_op {};
-	dispatch_op.kind        = BreadcrumbOpKind::Dispatch;
-	dispatch_op.dim_x       = thread_group_x;
-	dispatch_op.dim_y       = thread_group_y;
-	dispatch_op.dim_z       = thread_group_z;
-	dispatch_op.stage_count = 1;
-	dispatch_op.stages[0]   = {program.stage, program.shader_hash, input_info.stage.module->id,
-	                           program.info.uses_dma};
-	CaptureComputeBufferBreadcrumbs(m_context, cs_regs, bindings, dispatch_op);
-	auto&          graphics  = m_context.GetGraphics();
-	const uint32_t marker_id = graphics.breadcrumbs.BeginOp(graphics, vk_buffer, dispatch_op);
+	auto&    graphics  = m_context.GetGraphics();
+	uint32_t marker_id = 0;
+	if (graphics.breadcrumbs.Active()) {
+		OpBreadcrumb dispatch_op {};
+		dispatch_op.kind        = BreadcrumbOpKind::Dispatch;
+		dispatch_op.dim_x       = thread_group_x;
+		dispatch_op.dim_y       = thread_group_y;
+		dispatch_op.dim_z       = thread_group_z;
+		dispatch_op.stage_count = 1;
+		dispatch_op.stages[0]   = {program.stage, program.shader_hash, input_info.stage.module->id,
+		                           program.info.uses_dma};
+		CaptureComputeBufferBreadcrumbs(m_context, cs_regs, bindings, dispatch_op);
+		marker_id = graphics.breadcrumbs.BeginOp(graphics, vk_buffer, dispatch_op);
+	}
 	constexpr uint32_t DISPATCH_INITIATOR_ORDERED_APPEND_ENABLE = 1u << 3u;
 	const uint64_t     group_threads = uint64_t {std::max(input_info.threads_num[0], 1u)} *
 	                                   std::max(input_info.threads_num[1], 1u) *
@@ -1090,7 +1309,20 @@ bool RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 			for (uint32_t y = 0; y < thread_group_y; ++y) {
 				for (uint32_t x = 0; x < thread_group_x; ++x) {
 					if ((x | y | z) != 0u) {
-						ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
+						if (tracked_barriers) {
+							// A group sees the GDS and memory writes of the groups before it.
+							const vk::MemoryBarrier order {
+							    .srcAccessMask = vk::AccessFlagBits::eShaderWrite,
+							    .dstAccessMask = vk::AccessFlagBits::eShaderRead |
+							                     vk::AccessFlagBits::eShaderWrite};
+							vk_buffer.pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader,
+							                          vk::PipelineStageFlagBits::eComputeShader,
+							                          vk::DependencyFlags {}, 1, &order, 0, nullptr,
+							                          0, nullptr);
+							Common::FrameCost::Add(Common::FrameCost::Counter::BarriersGlobal);
+						} else {
+							ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
+						}
 					}
 					vk_buffer.dispatchBase(x, y, z, 1, 1, 1);
 				}
@@ -1100,6 +1332,8 @@ bool RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 		vk_buffer.dispatch(thread_group_x, thread_group_y, thread_group_z);
 	}
 	graphics.breadcrumbs.EndOp(graphics, vk_buffer, marker_id);
+	m_context.GetBufferCache().RecordPendingWrites(program.has_address_writes ||
+	                                               program.info.uses_dma);
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::Dispatches);
 	Common::FrameCost::Add(Common::FrameCost::Counter::Dispatches);
 	if (program.info.bvh) {
@@ -1107,7 +1341,11 @@ bool RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 	}
 
 	// The removed host fence also ordered read-only dispatches before later writers.
-	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader, writes_memory);
+	if (tracked_barriers) {
+		Common::FrameCost::Add(Common::FrameCost::Counter::BarriersDropped);
+	} else {
+		ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader, writes_memory);
+	}
 	ResetBindings();
 	sample.Commit();
 	return true;
@@ -1116,16 +1354,29 @@ bool RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 bool RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr, uint32_t mode,
                                       bool async_compute, bool allow_async) {
 	EXIT_IF(args_addr == 0 || (args_addr & 3u) != 0 ||
-	        (mode & Pm4::COMPUTE_DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS) != 0);
+	        (!Config::PortEnabled(Config::Port::GpuIndirectThreadDim) &&
+	         (mode & Pm4::COMPUTE_DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS) != 0));
 	m_context.GetCommandScheduler().PopPendingOperations();
 	Common::FrameCost::ScopedTimer lock_wait(Common::FrameCost::Counter::LockWaitNs);
 	Common::LockGuard              lock(m_context.GetMutex());
 	lock_wait.Stop();
+	if (!m_skip_catchup.Empty()) {
+		DrainSkippedDispatchesLocked(buffer);
+	}
+	return DispatchIndirectLocked(buffer, args_addr, mode, async_compute, allow_async);
+}
+
+bool RenderExecutor::DispatchIndirectLocked(CommandBuffer& buffer, uint64_t args_addr,
+                                            uint32_t mode, bool async_compute, bool allow_async) {
 	m_pending_uses.clear();
+	m_pending_dispatch.reset();
+	const bool use_thread_dimensions =
+	    (mode & Pm4::COMPUTE_DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS) != 0;
 	vk::DispatchIndirectCommand args {};
 	// The counts are known here only when the guest wrote them (the GPU-written ones are checked
 	// by DispatchArgsGuard on the GPU).
-	const bool args_on_host = !m_context.GetBufferCache().HasGpuDirtyBytes(args_addr, sizeof(args)) &&
+	const bool args_gpu_dirty = m_context.GetBufferCache().HasGpuDirtyBytes(args_addr, sizeof(args));
+	const bool args_on_host   = !args_gpu_dirty &&
 	                          LibKernel::Memory::TryReadBacking(args_addr, &args, sizeof(args));
 	if (args_on_host && (args.x == 0 || args.y == 0 || args.z == 0)) {
 		Common::FrameCost::Add(Common::FrameCost::Counter::DispatchesSkipped);
@@ -1133,24 +1384,55 @@ bool RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 	}
 	const auto& cs_regs = buffer.GetShaders().GetCs();
 	if (cs_regs.cs_regs.data_addr == 0) {
+		FrameHoles::NoteDispatchSkip(FrameHoles::DispatchSkipReason::NullShader);
 		Common::FrameCost::Add(Common::FrameCost::Counter::DispatchesSkipped);
 		return true;
 	}
+	vk::DispatchIndirectCommand host_groups = args;
+	if (args_on_host && use_thread_dimensions) {
+		const uint32_t gx = std::max(cs_regs.cs_regs.num_thread_x, 1u);
+		const uint32_t gy = std::max(cs_regs.cs_regs.num_thread_y, 1u);
+		const uint32_t gz = std::max(cs_regs.cs_regs.num_thread_z, 1u);
+		host_groups.x     = args.x / gx + (args.x % gx != 0u);
+		host_groups.y     = args.y / gy + (args.y % gy != 0u);
+		host_groups.z     = args.z / gz + (args.z % gz != 0u);
+	}
+	const auto make_capture = [&]() -> CapturedDispatch {
+		return CapturedDispatch {
+		    .cs_regs       = cs_regs,
+		    .groups        = {0, 0, 0},
+		    .mode          = mode,
+		    .async_compute = async_compute,
+		    .indirect_args = args_addr,
+		    .is_indirect   = true,
+		};
+	};
 	ShaderComputeInputInfo input_info {};
-	input_info.async_compute = async_compute;
-	input_info.indirect_args_address = args_addr;
+	input_info.async_compute              = async_compute;
+	input_info.dispatch_thread_dimensions = use_thread_dimensions;
+	input_info.indirect_thread_dimensions = use_thread_dimensions;
+	input_info.indirect_args_address      = args_addr;
 	DispatchStepSample sample;
 	m_context.GetImageHeap().BeginDraw();
 	bool pending = false;
 	if (!m_context.GetPipelineCache().GetComputeProgram(cs_regs, input_info,
 	                                                    allow_async ? &pending : nullptr)) {
+		if (pending && Config::AsyncComputeWaitMs() != 0) {
+			m_pending_dispatch = make_capture();
+		} else if (!pending) {
+			FrameHoles::NoteDispatchSkip(FrameHoles::DispatchSkipReason::FailedShader);
+		}
 		if (!pending) Common::FrameCost::Add(Common::FrameCost::Counter::DispatchesSkipped);
 		return !pending;
 	}
 	sample.clock.AddTo(sample.program_ns);
 	if (allow_async && !m_context.GetPipelineCache().EnsureComputePipeline(input_info, pending)) {
 		if (pending && Config::AsyncComputeWaitMs() != 0) {
-			m_pending_uses = ComputeBufferUses(input_info.stage);
+			m_pending_uses     = ComputeBufferUses(input_info.stage);
+			m_pending_dispatch = make_capture();
+		} else if (!pending) {
+			FrameHoles::NoteDispatchSkip(FrameHoles::DispatchSkipReason::PipelineFailed,
+			                             WrittenAddresses(ComputeBufferUses(input_info.stage)));
 		}
 		if (!pending) Common::FrameCost::Add(Common::FrameCost::Counter::DispatchesSkipped);
 		return !pending;
@@ -1159,18 +1441,37 @@ bool RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 	if (allow_async &&
 	    SkipOnTaintedInput(m_skip_taint, input_info.stage,
 	                       {{args_addr, sizeof(vk::DispatchIndirectCommand), true, false}})) {
+		const auto uses = ComputeBufferUses(input_info.stage);
+		FrameHoles::NoteDispatchSkip(FrameHoles::DispatchSkipReason::Tainted,
+		                             WrittenAddresses(uses));
+		NoteDrawSkippedForShaders();
+		const auto key =
+		    CapturedDispatchKey(cs_regs, 0, 0, 0, mode, async_compute, args_addr, true);
+		m_skip_catchup.Enqueue(key, cs_regs.cs_regs.data_addr, uses, make_capture(), SteadyNowMs());
 		Common::FrameCost::Add(Common::FrameCost::Counter::DispatchesSkipped);
 		return true;
 	}
 	if (args_on_host) {
-		const uint32_t final_groups[3] = {args.x, args.y, args.z};
+		const uint32_t final_groups[3] = {host_groups.x, host_groups.y, host_groups.z};
 		if (JudgeLargeDispatch(m_skip_taint, input_info.stage, cs_regs, input_info.threads_num,
-		                       final_groups, mode, args_addr, "indirect")) {
+		                       final_groups, mode, args_addr,
+		                       use_thread_dimensions ? "indirect-threads" : "indirect")) {
 			m_pending_uses = ComputeBufferUses(input_info.stage);
-			TaintSkippedDispatch();
+			FrameHoles::NoteDispatchSkip(FrameHoles::DispatchSkipReason::Refused,
+			                             WrittenAddresses(m_pending_uses));
+			TaintSkippedDispatch(/*record_wait_hole=*/false);
 			Common::FrameCost::Add(Common::FrameCost::Counter::DispatchesSkipped);
 			return true;
 		}
+	}
+	if (m_replaying_catchup && !m_skip_taint.Empty()) {
+		m_skip_taint.ClearWritten(ComputeBufferUses(input_info.stage));
+	}
+	if (!m_replaying_catchup && !m_skip_catchup.Empty()) {
+		const auto key =
+		    CapturedDispatchKey(cs_regs, 0, 0, 0, mode, async_compute, args_addr, true);
+		m_skip_catchup.DropByKey(key);
+		m_skip_catchup.DropSuperseded(ComputeBufferUses(input_info.stage));
 	}
 	buffer.EndRendering();
 	auto& pipeline = m_context.GetPipelineCache().GetComputePipeline(input_info);
@@ -1184,11 +1485,12 @@ bool RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 	const bool buffer_probe = Config::BufferProbeShader(program.shader_hash);
 	std::vector<BufferProbe::CacheState> probe_states;
 	if (buffer_probe) probe_states = BufferProbeRunner::SampleCacheState(m_context, bindings);
-	if (program.info.uses_dma) {
-		m_context.PrepareBda();
+	if (program.info.uses_dma || program.info.uses_device_address) {
+		m_context.PrepareBda(program.info.uses_dma);
 	}
 	PrepareRayQuery(m_context, input_info.stage, bindings);
-	BindSharedMemory(m_context, input_info, bindings, args_addr);
+	BindSharedMemory(m_context, input_info, bindings, args_addr,
+	                 args_on_host ? &host_groups : nullptr);
 	if (program.info.uses_image_heap) {
 		m_context.GetImageHeap().Rebind(*this);
 	}
@@ -1197,51 +1499,137 @@ bool RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 	const auto [args_buffer, args_offset] = m_context.GetBufferCache().ObtainBuffer(
 	    args_addr, sizeof(vk::DispatchIndirectCommand), false);
 	EXIT_IF((args_offset & 3u) != 0);
+	const vk::Buffer args_vk_buffer = args_buffer->Handle();
 	sample.clock.AddTo(sample.bind_ns);
 	// Temporary workaround: counts the GPU wrote are checked on the GPU (dispatchGuard.h).
-	vk::Buffer indirect_buffer = args_buffer->Handle();
+	// For thread-dimension indirect dispatches the same 1x1 pass converts thread counts to group
+	// counts on the GPU so the CPU does not read them back.
+	vk::Buffer indirect_buffer = args_vk_buffer;
 	uint64_t   indirect_offset = args_offset;
-	if (DispatchArgsGuard::Enabled()) {
+	const bool guard_enabled   = DispatchArgsGuard::Enabled();
+	if (use_thread_dimensions) {
 		if (!m_dispatch_guard) {
 			m_dispatch_guard = std::make_unique<DispatchArgsGuard>(
 			    m_context.GetGraphics(), m_context.GetCommandScheduler());
 		}
-		std::tie(indirect_buffer, indirect_offset) =
-		    m_dispatch_guard->Record(buffer, *args_buffer, args_offset, args_addr);
-		Common::FrameCost::Add(Common::FrameCost::Counter::DispatchesGuard);
+		const uint64_t stamp =
+		    args_gpu_dirty ? m_context.GetBufferCache().WriteStamp(args_addr, sizeof(args)) : 0;
+		std::tie(indirect_buffer, indirect_offset) = m_dispatch_guard->Record(
+		    buffer, *args_buffer, args_offset, args_addr, stamp, cs_regs.cs_regs.num_thread_x,
+		    cs_regs.cs_regs.num_thread_y, cs_regs.cs_regs.num_thread_z, true, guard_enabled);
+		Common::FrameCost::Add(Common::FrameCost::Counter::DispatchIndirectThreadDimGpu);
+	} else if (guard_enabled) {
+		// Counts the CPU read are already checked against the limits here (the dispatch was skipped
+		// above when too large): no GPU pass. Counts the GPU wrote are checked on the GPU, once
+		// per write of the range.
+		const auto& device_limits = m_context.GetGraphics().GetPhysicalDeviceProperties().limits;
+		if (args_on_host &&
+		    CountsSafeWithoutGuard(args.x, args.y, args.z, device_limits.maxComputeWorkGroupCount[0],
+		                           device_limits.maxComputeWorkGroupCount[1],
+		                           device_limits.maxComputeWorkGroupCount[2], DispatchGroupLimit())) {
+			Common::FrameCost::Add(Common::FrameCost::Counter::GuardCpuChecks);
+		} else {
+			if (!m_dispatch_guard) {
+				m_dispatch_guard = std::make_unique<DispatchArgsGuard>(
+				    m_context.GetGraphics(), m_context.GetCommandScheduler());
+			}
+			const uint64_t stamp =
+			    args_gpu_dirty ? m_context.GetBufferCache().WriteStamp(args_addr, sizeof(args)) : 0;
+			std::tie(indirect_buffer, indirect_offset) =
+			    m_dispatch_guard->Record(buffer, *args_buffer, args_offset, args_addr, stamp);
+		}
 	}
 	sample.clock.AddTo(sample.guard_ns);
 	RebindBuffers(bindings);
+	if (use_thread_dimensions &&
+	    program.bindings.dispatch_thread_dword != ShaderRecompiler::IR::PushData::NoStart) {
+		EXIT_IF(bindings.shader_data_buffer.buffer == nullptr);
+		const auto vk_cmd = buffer.Handle();
+		const uint64_t dst_offset =
+		    bindings.shader_data_buffer.offset +
+		    static_cast<uint64_t>(program.bindings.dispatch_thread_dword) * sizeof(uint32_t);
+		vk::BufferMemoryBarrier before {};
+		before.srcAccessMask       = vk::AccessFlagBits::eMemoryWrite;
+		before.dstAccessMask       = vk::AccessFlagBits::eTransferRead;
+		before.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		before.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		before.buffer              = args_vk_buffer;
+		before.offset              = args_offset;
+		before.size                = sizeof(vk::DispatchIndirectCommand);
+		vk_cmd.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
+		                       vk::PipelineStageFlagBits::eTransfer, {}, 0, nullptr, 1, &before, 0,
+		                       nullptr);
+		const vk::BufferCopy copy {args_offset, dst_offset, sizeof(vk::DispatchIndirectCommand)};
+		vk_cmd.copyBuffer(args_vk_buffer, bindings.shader_data_buffer.buffer, 1, &copy);
+		vk::BufferMemoryBarrier after {};
+		after.srcAccessMask       = vk::AccessFlagBits::eTransferWrite;
+		after.dstAccessMask       = vk::AccessFlagBits::eShaderRead;
+		after.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		after.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		after.buffer              = bindings.shader_data_buffer.buffer;
+		after.offset              = dst_offset;
+		after.size                = sizeof(vk::DispatchIndirectCommand);
+		vk_cmd.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
+		                       vk::PipelineStageFlagBits::eComputeShader, {}, 0, nullptr, 1, &after,
+		                       0, nullptr);
+	}
 	if (buffer_probe) {
 		GetBufferProbe().Record(m_context, buffer, program.shader_hash, bindings, probe_states);
 	}
 	sample.clock.AddTo(sample.bind_ns);
 	CommitBindings(buffer, vk::PipelineBindPoint::eCompute, pipeline,
 	               std::span {&descriptor_stage, 1u});
-	const auto vk_buffer = buffer.Handle();
-	const bool writes_memory = HasStorageWrites(input_info, bindings) || program.info.uses_dma ||
+	const bool tracked_barriers = Config::PortEnabled(Config::Port::BarrierTracker);
+	const bool writes_memory    = HasStorageWrites(input_info, bindings) || program.info.uses_dma ||
 	                           bindings.gds.buffer != nullptr;
-	if (writes_memory) {
-		ShaderWriteHazardBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
+	vk::CommandBuffer vk_buffer;
+	if (tracked_barriers) {
+		vk_buffer = buffer.DispatchHandle(DispatchMayWriteMemory(input_info.stage, bindings));
+		// The barriers the tracker records leave out nothing the argument read needs, but the read
+		// happens at the draw-indirect stage, which the compute-to-compute barrier does not name:
+		// order every earlier shader and transfer write before it (the guard's included).
+		const vk::MemoryBarrier arguments {
+		    .srcAccessMask = vk::AccessFlagBits::eShaderWrite | vk::AccessFlagBits::eTransferWrite,
+		    .dstAccessMask = vk::AccessFlagBits::eIndirectCommandRead};
+		vk_buffer.pipelineBarrier(vk::PipelineStageFlagBits::eAllGraphics |
+		                              vk::PipelineStageFlagBits::eComputeShader |
+		                              vk::PipelineStageFlagBits::eTransfer,
+		                          vk::PipelineStageFlagBits::eDrawIndirect, vk::DependencyFlags {}, 1,
+		                          &arguments, 0, nullptr, 0, nullptr);
+		Common::FrameCost::Add(Common::FrameCost::Counter::BarriersGlobal);
+	} else {
+		vk_buffer = buffer.Handle();
+		if (writes_memory) {
+			ShaderWriteHazardBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
+		}
 	}
 	sample.clock.AddTo(sample.commit_ns);
 	vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.pipeline);
-	OpBreadcrumb dispatch_op {};
-	dispatch_op.kind        = BreadcrumbOpKind::DispatchIndirect;
-	dispatch_op.stage_count = 1;
-	dispatch_op.stages[0]   = {program.stage, program.shader_hash, input_info.stage.module->id,
-	                           program.info.uses_dma};
-	CaptureComputeBufferBreadcrumbs(m_context, cs_regs, bindings, dispatch_op);
-	auto&          graphics  = m_context.GetGraphics();
-	const uint32_t marker_id = graphics.breadcrumbs.BeginOp(graphics, vk_buffer, dispatch_op);
+	auto&    graphics  = m_context.GetGraphics();
+	uint32_t marker_id = 0;
+	if (graphics.breadcrumbs.Active()) {
+		OpBreadcrumb dispatch_op {};
+		dispatch_op.kind        = BreadcrumbOpKind::DispatchIndirect;
+		dispatch_op.stage_count = 1;
+		dispatch_op.stages[0]   = {program.stage, program.shader_hash, input_info.stage.module->id,
+		                           program.info.uses_dma};
+		CaptureComputeBufferBreadcrumbs(m_context, cs_regs, bindings, dispatch_op);
+		marker_id = graphics.breadcrumbs.BeginOp(graphics, vk_buffer, dispatch_op);
+	}
 	vk_buffer.dispatchIndirect(indirect_buffer, indirect_offset);
 	graphics.breadcrumbs.EndOp(graphics, vk_buffer, marker_id);
+	m_context.GetBufferCache().RecordPendingWrites(program.has_address_writes ||
+	                                               program.info.uses_dma);
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::Dispatches);
 	Common::FrameCost::Add(Common::FrameCost::Counter::Dispatches);
 	if (program.info.bvh) {
 		Common::FrameCost::Add(Common::FrameCost::Counter::BvhDispatches);
 	}
-	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader, writes_memory);
+	if (tracked_barriers) {
+		Common::FrameCost::Add(Common::FrameCost::Counter::BarriersDropped);
+	} else {
+		ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader, writes_memory);
+	}
 	ResetBindings();
 	sample.Commit();
 	return true;

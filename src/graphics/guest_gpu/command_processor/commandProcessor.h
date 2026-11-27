@@ -4,6 +4,7 @@
 #include "common/assert.h"
 #include "common/emulatorConfig.h"
 #include "graphics/guest_gpu/hardwareContext.h"
+#include "graphics/guest_gpu/prefetchBackoff.h"
 #include "graphics/guest_gpu/pssr.h"
 #include "graphics/host_gpu/renderer/dispatchOrigin.h"
 #include "graphics/host_gpu/renderer/pipeline/flowPlan.h"
@@ -133,6 +134,8 @@ public:
 	[[nodiscard]] bool IsAsyncComputeQueue() const { return m_interrupt_event_id >= 0x20; }
 
 private:
+	void ScanComputeShaders(std::span<const uint32_t> commands);
+	PrefetchBackoff m_prefetch_backoff;
 	void ProcessPm4(Pm4Execution& execution);
 	void SuspendPm4();
 	void SuspendPm4ForShader();
@@ -159,8 +162,12 @@ private:
 	uint64_t       m_dispatch_indirect_args_base_addr = 0;
 	// Persistent draw state. Indirect draws leave the address of their last instance count,
 	// read only when a later draw inherits it.
-	uint32_t m_num_instances      = 1;
-	uint64_t m_num_instances_addr = 0;
+	uint32_t m_num_instances            = 1;
+	uint64_t m_num_instances_addr       = 0;
+	uint64_t m_num_instances_count_addr = 0;
+	uint64_t m_num_instances_args_addr  = 0;
+	uint32_t m_num_instances_max_count  = 0;
+	uint32_t m_num_instances_stride     = 0;
 
 	const int      m_interrupt_event_id;
 	const uint32_t m_flush_draws                 = Config::GetFlushDraws();

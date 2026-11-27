@@ -1,4 +1,5 @@
 #include "common/frameCost.h"
+#include "graphics/host_gpu/renderer/pipeline/pipelineAsync.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderStoreCapability.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderStoreFile.h"
@@ -372,6 +373,9 @@ bool PipelineCache::ApplyStoreItem(StoreItem& item, std::vector<vk::ShaderModule
 			module.legacy_checked = module.legacy_hash == 0;
 			program->second.legacy_unchecked += module.legacy_checked ? 0u : 1u;
 			program->second.Adopt(std::move(module));
+			if (m_async != nullptr) {
+				m_async->RetireWaiting(item.key, "served-by-store");
+			}
 			return true;
 		}
 		case Record::GraphicsPipeline:
@@ -391,6 +395,9 @@ bool PipelineCache::ApplyStoreItem(StoreItem& item, std::vector<vk::ShaderModule
 				program.skip_dispatch  = true;
 				program.failure_reason =
 				    item.reason.empty() ? "unspecified failure" : std::move(item.reason);
+				if (m_async != nullptr) {
+					m_async->RetireWaiting(item.key, "failed-in-store");
+				}
 			}
 			return true;
 		case Record::KeyIndex:

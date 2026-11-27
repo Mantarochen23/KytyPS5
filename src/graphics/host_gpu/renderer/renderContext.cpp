@@ -134,11 +134,13 @@ bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr) no
 	}
 	if (access == PageFaultAccess::Write) {
 		m_read_watch.Written(fault_vaddr, fault_size);
-		m_buffer_cache.InvalidateMemory(fault_vaddr, fault_size);
+		m_buffer_cache.InvalidateMemory(fault_vaddr, fault_size,
+		                                Common::FrameCost::ReadbackSite::WriteFault);
 		m_texture_cache.InvalidateMemory(fault_vaddr, fault_size);
 		m_image_heap.InvalidateMemory(fault_vaddr, fault_size);
 	} else {
-		m_buffer_cache.ReadMemory(fault_vaddr, fault_size);
+		m_buffer_cache.ReadMemory(fault_vaddr, fault_size, false,
+		                          Common::FrameCost::ReadbackSite::ReadFault);
 	}
 	finish();
 	return true;
@@ -167,7 +169,7 @@ bool RenderContext::InvalidateMemory(uint64_t vaddr, uint64_t size) {
 		return false;
 	}
 	m_read_watch.Written(vaddr, size);
-	m_buffer_cache.InvalidateMemory(vaddr, size);
+	m_buffer_cache.InvalidateMemory(vaddr, size, Common::FrameCost::ReadbackSite::Invalidate);
 	m_texture_cache.InvalidateMemory(vaddr, size);
 	m_image_heap.InvalidateMemory(vaddr, size);
 	return true;
@@ -181,10 +183,27 @@ bool RenderContext::IsMapped(uint64_t vaddr, uint64_t size) const noexcept {
 	return m_mapped_ranges.Contains(vaddr, size);
 }
 
+RangeSet RenderContext::IntersectMappedRanges(const RangeSet& ranges) const {
+	RangeSet result;
+	std::shared_lock lock(m_mapped_ranges_mutex);
+	ranges.ForEach([&](uint64_t begin, uint64_t end) {
+		m_mapped_ranges.ForEachInRange(begin, end - begin, [&](uint64_t mapped_begin,
+		                                                        uint64_t mapped_end) {
+			result.Add(mapped_begin, mapped_end - mapped_begin);
+		});
+	});
+	return result;
+}
+
 void RenderContext::MapMemory(uint64_t vaddr, uint64_t size) {
-	std::lock_guard lock(m_mapped_ranges_mutex);
-	m_mapped_ranges.Add(vaddr, size);
-	m_buffer_cache.QueueBdaSync(vaddr, size);
+	{
+		std::lock_guard lock(m_mapped_ranges_mutex);
+		m_mapped_ranges.Add(vaddr, size);
+		m_buffer_cache.QueueBdaSync(vaddr, size);
+	}
+	// After the range is published: a table rebuilt from here on sees it, and one built before is
+	// invalidated. Invalidating first would let a concurrent rebuild miss the new mapping for good.
+	m_buffer_cache.InvalidateRuntimeTables(vaddr, size);
 }
 
 void RenderContext::UnmapMemory(uint64_t vaddr, uint64_t size) {
@@ -206,7 +225,8 @@ void RenderContext::UnmapMemory(uint64_t vaddr, uint64_t size) {
 			m_command_scheduler.WaitPriorityOperations(tick);
 		}
 		m_read_watch.Written(vaddr, size);
-		m_buffer_cache.InvalidateMemory(vaddr, size);
+		m_buffer_cache.InvalidateRuntimeTables(vaddr, size);
+		m_buffer_cache.InvalidateMemory(vaddr, size, Common::FrameCost::ReadbackSite::Invalidate);
 		m_texture_cache.UnmapMemory(vaddr, size);
 		m_image_heap.UnmapMemory(vaddr, size);
 		std::lock_guard lock(m_mapped_ranges_mutex);
@@ -221,11 +241,14 @@ void RenderContext::UnmapMemory(uint64_t vaddr, uint64_t size) {
 	m_gpu->SendCommandSync(unmap);
 }
 
-void RenderContext::PrepareBda() {
+void RenderContext::PrepareBda(bool untracked_writes) {
 	[[maybe_unused]] static const bool logged = [] {
 		Log::WriteToConsoleAndLog("GPU: using buffer device address (BDA) shader memory access.\n");
 		return true;
 	}();
+	// DMA/device-address shaders can write any range. Runtime buffer tables pass false because
+	// their exact cached candidate union is stamped by RebindBuffers.
+	if (untracked_writes) m_buffer_cache.NoteUntrackedWrite();
 	std::shared_lock lock(m_mapped_ranges_mutex);
 	m_buffer_cache.SynchronizeBda(m_mapped_ranges);
 	m_fault_process_pending = true;
