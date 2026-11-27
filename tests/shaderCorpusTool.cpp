@@ -808,15 +808,25 @@ bool ValidateSpirv(std::span<const uint32_t> words, std::string& error) {
 	return tools.Validate(words.data(), words.size());
 }
 
-std::vector<uint32_t> OptimizeSpirv(std::span<const uint32_t> words, bool size_recipe,
+enum class OptimizationRecipe { Size, Performance, Compact };
+
+std::vector<uint32_t> OptimizeSpirv(std::span<const uint32_t> words, OptimizationRecipe recipe,
 	                                double& milliseconds, std::string& error) {
 	spvtools::Optimizer optimizer(SPV_ENV_VULKAN_1_3);
 	optimizer.SetMessageConsumer([&](spv_message_level_t, const char*, const spv_position_t& position,
 	                                 const char* message) {
 		error = "word " + std::to_string(position.index) + ": " + message;
 	});
-	if (size_recipe) optimizer.RegisterSizePasses();
-	else optimizer.RegisterPerformancePasses();
+	if (recipe == OptimizationRecipe::Size) {
+		optimizer.RegisterSizePasses();
+	} else if (recipe == OptimizationRecipe::Performance) {
+		optimizer.RegisterPerformancePasses();
+	} else {
+		optimizer.RegisterPass(spvtools::CreateRedundancyEliminationPass());
+		optimizer.RegisterPass(spvtools::CreateSimplificationPass());
+		optimizer.RegisterPass(spvtools::CreateAggressiveDCEPass());
+		optimizer.RegisterPass(spvtools::CreateCompactIdsPass());
+	}
 	std::vector<uint32_t> optimized;
 	const auto begin = std::chrono::steady_clock::now();
 	const bool valid = optimizer.Run(words.data(), words.size(), &optimized);
@@ -1104,7 +1114,8 @@ void WritePipelineTimings(const Options& options, const std::vector<Json>& resul
 	}
 
 	std::printf("PIPELINE_TIMING columns=sample,raw_words,raw_module_ms,raw_pipeline_ms,"
-	            "size_words,size_opt_ms,size_pipeline_ms,perf_words,perf_opt_ms,perf_pipeline_ms\n");
+	            "compact_words,compact_opt_ms,compact_pipeline_ms,size_words,size_opt_ms,"
+	            "size_pipeline_ms,perf_words,perf_opt_ms,perf_pipeline_ms\n");
 	for (size_t sample_index = 0; sample_index < sample.size(); sample_index++) {
 		const auto& module = sample[sample_index];
 		const auto descriptor_mask =
@@ -1112,15 +1123,23 @@ void WritePipelineTimings(const Options& options, const std::vector<Json>& resul
 		const auto descriptor_counts =
 		    results[module.result_index].value("descriptor_counts", std::vector<uint32_t> {});
 		auto raw = ReadSpirv(AnalysisModulePath(options, module.result_index));
-		double size_opt_ms = 0.0, perf_opt_ms = 0.0;
-		std::string size_error, perf_error, raw_validation, size_validation, perf_validation;
-		auto size = OptimizeSpirv(raw, true, size_opt_ms, size_error);
-		auto perf = OptimizeSpirv(raw, false, perf_opt_ms, perf_error);
+		double compact_opt_ms = 0.0, size_opt_ms = 0.0, perf_opt_ms = 0.0;
+		std::string compact_error, size_error, perf_error, raw_validation, compact_validation,
+		    size_validation, perf_validation;
+		auto compact =
+		    OptimizeSpirv(raw, OptimizationRecipe::Compact, compact_opt_ms, compact_error);
+		auto size = OptimizeSpirv(raw, OptimizationRecipe::Size, size_opt_ms, size_error);
+		auto perf = OptimizeSpirv(raw, OptimizationRecipe::Performance, perf_opt_ms, perf_error);
 		const bool raw_valid  = ValidateSpirv(raw, raw_validation);
+		const bool compact_valid =
+		    !compact.empty() && ValidateSpirv(compact, compact_validation);
 		const bool size_valid = !size.empty() && ValidateSpirv(size, size_validation);
 		const bool perf_valid = !perf.empty() && ValidateSpirv(perf, perf_validation);
 		const auto raw_time = raw_valid ? vulkan.Measure(raw, descriptor_mask, descriptor_counts)
 		                                : PipelineMeasurement {};
+		const auto compact_time = compact_valid
+		                              ? vulkan.Measure(compact, descriptor_mask, descriptor_counts)
+		                              : PipelineMeasurement {};
 		const auto size_time = size_valid ? vulkan.Measure(size, descriptor_mask, descriptor_counts)
 		                                  : PipelineMeasurement {};
 		const auto perf_time = perf_valid ? vulkan.Measure(perf, descriptor_mask, descriptor_counts)
@@ -1140,16 +1159,19 @@ void WritePipelineTimings(const Options& options, const std::vector<Json>& resul
 			                                                        : timing.error}};
 		};
 		add_recipe("raw", raw.size(), 0.0, raw_valid, {}, raw_validation, raw_time);
+		add_recipe("compact", compact.size(), compact_opt_ms, compact_valid, compact_error,
+		           compact_validation, compact_time);
 		add_recipe("size", size.size(), size_opt_ms, size_valid, size_error, size_validation,
 		           size_time);
 		add_recipe("performance", perf.size(), perf_opt_ms, perf_valid, perf_error,
 		           perf_validation, perf_time);
 		output << record.dump() << '\n';
-		std::printf("PIPELINE_TIMING sample=%zu raw=%zu,%.3f,%.3f size=%zu,%.3f,%.3f "
-		            "perf=%zu,%.3f,%.3f valid=%d/%d/%d\n",
+		std::printf("PIPELINE_TIMING sample=%zu raw=%zu,%.3f,%.3f compact=%zu,%.3f,%.3f "
+		            "size=%zu,%.3f,%.3f perf=%zu,%.3f,%.3f valid=%d/%d/%d/%d\n",
 		            sample_index + 1, raw.size(), raw_time.module_ms, raw_time.pipeline_ms,
-		            size.size(), size_opt_ms, size_time.pipeline_ms, perf.size(), perf_opt_ms,
-		            perf_time.pipeline_ms, raw_valid, size_valid, perf_valid);
+		            compact.size(), compact_opt_ms, compact_time.pipeline_ms, size.size(), size_opt_ms,
+		            size_time.pipeline_ms, perf.size(), perf_opt_ms, perf_time.pipeline_ms, raw_valid,
+		            compact_valid, size_valid, perf_valid);
 	}
 }
 
