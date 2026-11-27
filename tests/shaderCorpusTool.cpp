@@ -812,6 +812,14 @@ enum class OptimizationRecipe { Size, Performance, Compact };
 
 std::vector<uint32_t> OptimizeSpirv(std::span<const uint32_t> words, OptimizationRecipe recipe,
 	                                double& milliseconds, std::string& error) {
+	if (recipe == OptimizationRecipe::Compact) {
+		std::vector<uint32_t> optimized;
+		const auto begin = std::chrono::steady_clock::now();
+		const bool valid = Recompiler::CompactSpirv(words, optimized, error);
+		milliseconds = Milliseconds(std::chrono::steady_clock::now() - begin);
+		if (!valid) optimized.clear();
+		return optimized;
+	}
 	spvtools::Optimizer optimizer(SPV_ENV_VULKAN_1_3);
 	optimizer.SetMessageConsumer([&](spv_message_level_t, const char*, const spv_position_t& position,
 	                                 const char* message) {
@@ -821,11 +829,6 @@ std::vector<uint32_t> OptimizeSpirv(std::span<const uint32_t> words, Optimizatio
 		optimizer.RegisterSizePasses();
 	} else if (recipe == OptimizationRecipe::Performance) {
 		optimizer.RegisterPerformancePasses();
-	} else {
-		optimizer.RegisterPass(spvtools::CreateRedundancyEliminationPass());
-		optimizer.RegisterPass(spvtools::CreateSimplificationPass());
-		optimizer.RegisterPass(spvtools::CreateAggressiveDCEPass());
-		optimizer.RegisterPass(spvtools::CreateCompactIdsPass());
 	}
 	std::vector<uint32_t> optimized;
 	const auto begin = std::chrono::steady_clock::now();
@@ -1180,8 +1183,10 @@ void WriteAnalysis(const Options& options, const std::vector<Json>& results) {
 	const auto modules = EmittedModules(results);
 	WriteSpirvProfiles(options, results, modules);
 	WritePipelineTimings(options, results, modules);
-	std::error_code ignored;
-	std::filesystem::remove_all(options.output / ".analysis-modules", ignored);
+	if (!options.self_test) {
+		std::error_code ignored;
+		std::filesystem::remove_all(options.output / ".analysis-modules", ignored);
+	}
 }
 
 void WriteSummary(const Options& options, const std::vector<Json>& results) {
@@ -1338,7 +1343,8 @@ int SelfTest() {
 	                 .output = output,
 	                 .jobs = 2,
 	                 .timeout_ms = 5000,
-	                 .spirv_profile = 1};
+	                 .spirv_profile = 1,
+	                 .self_test = true};
 	const int status = Run(options);
 	std::vector<Json> results;
 	std::string error;
@@ -1355,15 +1361,23 @@ int SelfTest() {
 		while (std::getline(summary, line)) std::printf("%s\n", line.c_str());
 	}
 	const bool have_profile = std::filesystem::exists(output / "spirv-profile.jsonl");
+	bool compact_valid = false;
+	if (have_emitted) {
+		auto module = ReadSpirv(AnalysisModulePath(options, 0));
+		std::vector<uint32_t> compact;
+		std::string compact_error, validation_error;
+		compact_valid = Recompiler::CompactSpirv(module, compact, compact_error) &&
+		                ValidateSpirv(compact, validation_error);
+	}
 	std::error_code ignored;
 	std::filesystem::remove_all(root, ignored);
 	if (status != 0 || !read || results.size() != 3 || !have_emitted || !have_rejected ||
-	    !have_runtime || !have_profile) {
+	    !have_runtime || !have_profile || !compact_valid) {
 		std::fprintf(stderr,
 		             "shader_corpus_tool self-test failed: count=%zu emitted=%d rejected=%d "
-		             "runtime=%d profile=%d %s\n",
+		             "runtime=%d profile=%d compact=%d %s\n",
 		             results.size(), have_emitted, have_rejected, have_runtime, have_profile,
-		             error.c_str());
+		             compact_valid, error.c_str());
 		return 1;
 	}
 	return 0;

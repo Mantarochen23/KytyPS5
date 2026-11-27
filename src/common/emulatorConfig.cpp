@@ -535,4 +535,8 @@ const std::filesystem::path& GetRegisteredShaderDumpFolder() {
 	return g_config != nullptr ? g_config->dump_registered_shaders_folder : none;
 }
 
+bool SpirvCompactEnabled() {
+	return g_config != nullptr && g_config->spirv_compact_enabled;
+}
+
 } // namespace Config

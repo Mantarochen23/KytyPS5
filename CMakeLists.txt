@@ -393,7 +393,7 @@ list(REMOVE_ITEM kyty_emulator_src ${spatial_renderer_src})
 add_library(kyty_spatial_audio STATIC ${spatial_renderer_src})
 target_link_libraries(kyty_spatial_audio PRIVATE common OpenAL::OpenAL)
 
-set(kyty_emulator_link_libraries common Vulkan::Headers SPIRV-Tools-static SDL3::SDL3-static kyty_spatial_audio imgui xxhash FFmpeg::ffmpeg fmt::fmt nlohmann_json::nlohmann_json LibAtrac9 kyty_git_version Zydis::Zydis xbyak::xbyak opus OpenXR::openxr_loader libzstd_static)
+set(kyty_emulator_link_libraries common Vulkan::Headers SPIRV-Tools-static SPIRV-Tools-opt SDL3::SDL3-static kyty_spatial_audio imgui xxhash FFmpeg::ffmpeg fmt::fmt nlohmann_json::nlohmann_json LibAtrac9 kyty_git_version Zydis::Zydis xbyak::xbyak opus OpenXR::openxr_loader libzstd_static)
 
 # Linux system libraries.
 if(LINUX)
@@ -456,7 +456,6 @@ endfunction()
 add_kyty_full_emulator_test(shader_cfg_tests "${KYTY_TESTS_DIR}/shaderCfgTests.cpp")
 add_kyty_full_emulator_test(shader_store_tests "${KYTY_TESTS_DIR}/ShaderStoreTests.cpp")
 add_kyty_full_emulator_test(shader_corpus_tool "${KYTY_TESTS_DIR}/shaderCorpusTool.cpp")
-target_link_libraries(shader_corpus_tool SPIRV-Tools-opt)
 
 add_executable(scalar_provenance_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/ScalarProvenanceTests.cpp"

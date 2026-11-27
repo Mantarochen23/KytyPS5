@@ -168,6 +168,8 @@ struct ConfigOptions {
 	// --dump-registered-shaders: copy each distinct registered shader and an index record here.
 	// Empty = off.
 	std::filesystem::path    dump_registered_shaders_folder;
+	// --spirv-compact: run the measured conservative post-emission cleanup recipe. Off by default.
+	bool                     spirv_compact_enabled = false;
 };
 
 void Load(const ConfigOptions& cfg);
@@ -279,6 +281,7 @@ bool     GuestFaultParkEnabled();
 bool     GuestFaultReportOnlyEnabled();
 uint32_t GuestClockHoldMs();
 const std::filesystem::path& GetRegisteredShaderDumpFolder();
+bool SpirvCompactEnabled();
 
 } // namespace Config
 
