@@ -644,6 +644,18 @@ TEST(Ports, DisablePortParsesNamesAndSelectsTheShaderStore) {
 	Config::SetDisabledPorts({});
 }
 
+TEST(Ports, DefaultOffPortNeedsEnablingAndDisablingStillWins) {
+	Config::SetDisabledPorts({});
+	EXPECT_FALSE(Config::PortEnabled(Config::Port::CallsiteLookup));
+	EXPECT_TRUE(Config::PortEnabled(Config::Port::RuntimeTableCache));
+	Config::SetEnabledPorts({"callsite-lookup"}, {});
+	EXPECT_TRUE(Config::PortEnabled(Config::Port::CallsiteLookup));
+	Config::SetDisabledPorts({"callsite-lookup"});
+	Config::SetEnabledPorts({"callsite-lookup"}, {"callsite-lookup"});
+	EXPECT_FALSE(Config::PortEnabled(Config::Port::CallsiteLookup));
+	Config::SetDisabledPorts({});
+}
+
 namespace {
 
 TEST(MemAccount, ProcStatusFieldsAreKilobytes) {
