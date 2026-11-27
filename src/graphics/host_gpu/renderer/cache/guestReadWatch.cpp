@@ -2,6 +2,7 @@
 
 #include "graphics/host_gpu/regionDefinitions.h"
 
+#include <algorithm>
 #include <vector>
 
 namespace Libs::Graphics {
@@ -89,7 +90,20 @@ void GuestReadWatch::Written(uint64_t address, uint64_t size) {
 		}
 		run_begin = run_end = 0;
 	};
-	for (uint64_t index = first; index <= last; ++index) {
+	// A large range (a download of megabytes) is cheaper to scan from the watched side.
+	const bool scan = last - first + 1u > m_pages.size();
+	std::vector<uint64_t> indices;
+	if (scan) {
+		for (const auto& [index, page]: m_pages) {
+			if (index >= first && index <= last && page->watched.load(std::memory_order_relaxed)) {
+				indices.push_back(index);
+			}
+		}
+		std::ranges::sort(indices);
+	}
+	const uint64_t count = scan ? indices.size() : last - first + 1u;
+	for (uint64_t n = 0; n < count; ++n) {
+		const uint64_t index = scan ? indices[n] : first + n;
 		const auto found = m_pages.find(index);
 		if (found == m_pages.end() || !found->second->watched.load(std::memory_order_relaxed)) continue;
 		auto& page = *found->second;
@@ -114,6 +128,12 @@ void GuestReadWatch::Touched(uint64_t address, uint64_t size) {
 	const uint64_t first = address / PageSize;
 	const uint64_t last  = (address + size - 1u) / PageSize;
 	std::scoped_lock lock {m_mutex};
+	if (last - first + 1u > m_pages.size()) {
+		for (auto& [index, page]: m_pages) {
+			if (index >= first && index <= last) page->generation.fetch_add(1u, std::memory_order_acq_rel);
+		}
+		return;
+	}
 	for (uint64_t index = first; index <= last; ++index) {
 		const auto found = m_pages.find(index);
 		if (found != m_pages.end()) found->second->generation.fetch_add(1u, std::memory_order_acq_rel);
