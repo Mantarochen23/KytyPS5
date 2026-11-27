@@ -871,7 +871,7 @@ void RenderExecutor::FindBuffers(std::span<PreparedBindings* const> stages) {
 				std::vector<PreparedBindings::BufferSource> sources;
 				sources.reserve(table.entries.size());
 				RangeSet              candidate_ranges;
-				RangeSet              backing_ranges;
+				RangeSet              write_ranges;
 				for (const auto& value: table.entries) {
 					const auto descriptor = DecodeNativeDescriptor<ShaderBufferResource>(value);
 					const auto address    = descriptor.Base48();
@@ -894,7 +894,7 @@ void RenderExecutor::FindBuffers(std::span<PreparedBindings* const> stages) {
 					    source.address, source.size, false,
 					    metadata.formatted || (metadata.read && Config::SyncRawImageBuffersEnabled()),
 					    source.id, false);
-					backing_ranges.Add(buf->CpuAddress(), buf->Size());
+					write_ranges.Add(source.address, source.size);
 					const uint64_t host_bda = static_cast<uint64_t>(buf->BufferDeviceAddress()) + off;
 					const uint64_t aligned_bda = host_bda & ~uint64_t {3};
 					const uint32_t byte_offset = static_cast<uint32_t>(host_bda & 3u);
@@ -917,7 +917,7 @@ void RenderExecutor::FindBuffers(std::span<PreparedBindings* const> stages) {
 				auto retired = std::move(found->buffer);
 				found->buffer = std::move(replacement);
 				found->state  = cache.RegisterRuntimeTable(std::move(candidate_ranges),
-				                                                 std::move(backing_ranges));
+				                                                 std::move(write_ranges));
 				found->built_generation = found->state->BackingGeneration();
 				if (retired != nullptr && m_context.GetCommandScheduler().Active()) {
 					m_context.GetCommandScheduler().DeferOperation(

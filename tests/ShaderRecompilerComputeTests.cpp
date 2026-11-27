@@ -7873,6 +7873,7 @@ public:
     executor.RebindBuffers(bindings);
     Require(name, "cached write union",
             cache.IsRegionGpuModified(base, page) &&
+                !cache.IsRegionGpuModified(base + page, page) &&
                 cache.IsRegionGpuModified(base + 2 * page, page) &&
                 cache.WriteStamp(base, page) > low_stamp &&
                 cache.WriteStamp(base + 2 * page, page) > high_stamp,
