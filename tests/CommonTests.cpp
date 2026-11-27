@@ -2,6 +2,7 @@
 #include "common/assert.h"
 #include "common/config.h"
 #include "common/emulatorConfig.h"
+#include "common/faultReport.h"
 #include "common/file.h"
 #include "common/hostException.h"
 #include "common/logging/log.h"
@@ -18,6 +19,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
@@ -105,6 +107,69 @@ TEST(HostException, GuestSignalWaitsUntilTheFaultHandlerReturns) {
 		    const bool mapped   = VirtualMemory::AllocFixed(BASE, PAGE, VirtualMemory::Mode::Read);
 		    *reinterpret_cast<volatile uint32_t*>(BASE) = 1;
 		    std::_Exit(installs && mapped && g_dispatched == 1 ? 0 : 1);
+	    },
+	    testing::ExitedWithCode(0), "");
+}
+#endif
+
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+namespace {
+char   g_fault_text[1 << 16];
+size_t g_fault_length = 0;
+
+size_t CountOf(const char* text, const char* needle) {
+	size_t count = 0;
+	for (const char* at = std::strstr(text, needle); at != nullptr; at = std::strstr(at + 1, needle)) {
+		count++;
+	}
+	return count;
+}
+
+// Builds the host fault report into a static buffer, checks it and ends the process: 0 when it names
+// the thread, its tag, this module, the faulting function and at least three frames.
+bool ReportAndExit(const Common::HostException::ExceptionInfo& info) {
+	Common::FaultReport::Registers regs {};
+	regs.pc  = info.exception_address;
+	regs.rsp = info.rsp;
+	regs.rbp = info.rbp;
+	Common::FaultReport::WriteHostContext(
+	    regs, {[](void*, const char* text) {
+		           const size_t n = std::strlen(text);
+		           if (g_fault_length + n < sizeof(g_fault_text)) {
+			           std::memcpy(g_fault_text + g_fault_length, text, n + 1);
+			           g_fault_length += n;
+		           }
+	           },
+	           nullptr});
+	const size_t frames = CountOf(g_fault_text, " bt[") + CountOf(g_fault_text, " fp[");
+	const bool   ok     = std::strstr(g_fault_text, "fault-test-worker") != nullptr &&
+	                      std::strstr(g_fault_text, "doing: fault test tag") != nullptr &&
+	                      std::strstr(g_fault_text, "common_tests+0x") != nullptr &&
+	                      std::strstr(g_fault_text, "KytyFaultReportTestNullWrite") != nullptr &&
+	                      frames >= 3;
+	if (!ok) {
+		std::fputs(g_fault_text, stderr);
+	}
+	std::_Exit(ok ? 0 : 1);
+}
+} // namespace
+
+extern "C" __attribute__((noinline, used)) void KytyFaultReportTestNullWrite(volatile int* target) {
+	*target = 1;
+}
+
+TEST(FaultReport, WorkerThreadFaultNamesModuleFunctionAndFrames) {
+	EXPECT_EXIT(
+	    {
+		    Common::FaultReport::RefreshModules();
+		    Common::HostException::InstallHandler(ReportAndExit);
+		    std::thread worker([] {
+			    Common::FaultReport::SetThreadTag("fault test tag", "fault-test-worker");
+			    Common::FaultReport::RegisterThreadStack();
+			    KytyFaultReportTestNullWrite(nullptr);
+		    });
+		    worker.join();
+		    std::_Exit(2);
 	    },
 	    testing::ExitedWithCode(0), "");
 }

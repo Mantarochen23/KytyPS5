@@ -4,6 +4,7 @@
 #include "graphics/host_gpu/renderer/pipeline/shaderStoreIdentity.h"
 
 #include "common/emulatorConfig.h"
+#include "common/faultReport.h"
 #include "common/logging/log.h"
 #include "common/memAccount.h"
 #include "common/parallelFor.h"
@@ -93,6 +94,7 @@ void ShaderStoreWriter::Open(const std::filesystem::path& path, std::span<const 
 
 ShaderStoreWriter::ShaderStoreWriter() {
 	m_thread = std::jthread([this](std::stop_token stop) {
+		Common::FaultReport::SetThreadTag("store write", "store-writer");
 		std::unique_lock lock(m_mutex);
 		// Once stop is requested the wait returns false only when the queue is empty.
 		while (m_ready.wait(lock, stop, [this] { return !m_jobs.empty(); })) {
@@ -890,7 +892,10 @@ void PipelineCache::WarmUp(const std::filesystem::path& path) {
 		for (size_t i = created; i < pipeline_jobs.size(); ++i) {
 			if (pipeline_jobs[i].module != nullptr) loader.compute.push_back(pipeline_jobs[i].module->id);
 		}
-		loader.thread = std::jthread([this](std::stop_token stop) { RunWarmUpLoader(stop); });
+		loader.thread = std::jthread([this](std::stop_token stop) {
+			Common::FaultReport::SetThreadTag("store load", "store-load");
+			RunWarmUpLoader(stop);
+		});
 	}
 }
 

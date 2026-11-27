@@ -1,5 +1,6 @@
 #include "graphics/host_gpu/renderer/pipeline/shaderWorkers.h"
 
+#include "common/faultReport.h"
 #include "common/threads.h"
 #include "graphics/host_gpu/renderer/pipeline/skippedDraws.h"
 
@@ -10,6 +11,7 @@ ShaderWorkers::ShaderWorkers(uint32_t threads) {
 	for (uint32_t i = 0; i < threads; i++) {
 		m_threads.emplace_back([this, i](std::stop_token stop) {
 			Common::Thread::LowerPriority();
+			Common::FaultReport::SetThreadTag("shader worker", "shader-worker");
 			std::unique_lock lock(m_mutex);
 			// Once stop is requested the wait returns false only when no job may be taken.
 			while (m_ready.wait(lock, stop, [this, i] { return CanPick(i); })) {

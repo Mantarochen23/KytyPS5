@@ -5,6 +5,7 @@
 #include "common/common.h"
 #include "common/debugCounters.h"
 #include "common/emulatorConfig.h"
+#include "common/faultReport.h"
 #include "common/file.h"
 #include "common/fpEnv.h"
 #include "common/hostException.h"
@@ -731,6 +732,12 @@ bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exception_
 	// Report whatever guest context can be read safely before terminating: which guest thread
 	// faulted, the register file, the faulting code bytes and the top of its stack.
 	char thread_name[64] = "(host thread)";
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+	if (char host_name[32] {}; ::pthread_getname_np(::pthread_self(), host_name, sizeof(host_name)) == 0 &&
+	                          host_name[0] != '\0') {
+		std::snprintf(thread_name, sizeof(thread_name), "(host thread '%s')", host_name);
+	}
+#endif
 	if (auto self = Libs::LibKernel::PthreadSelfOrNull(); self != nullptr) {
 		if (Libs::LibKernel::PthreadGetname(self, thread_name) != 0) {
 			std::snprintf(thread_name, sizeof(thread_name), "(unnamed guest thread)");
@@ -760,6 +767,18 @@ bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exception_
 	if (full_report) {
 		std::printf("--- Guest fault context ---\n");
 		std::printf("thread: %s\n", thread_name);
+		// A pc outside every guest module is emulator or driver code: name its module, symbol and
+		// call chain (the guest-code lines below only know guest modules).
+		if (Common::Singleton<RuntimeLinker>::Instance()->FindProgramByAddr(
+		        info->exception_address) == nullptr) {
+			Common::FaultReport::Registers regs {};
+			regs.pc  = info->exception_address;
+			regs.rsp = info->rsp;
+			regs.rbp = info->rbp;
+			Common::FaultReport::WriteHostContext(
+			    regs, {[](void*, const char* text) { std::fputs(text, stdout); }, nullptr});
+			std::fflush(stdout);
+		}
 		std::printf("rax=%016" PRIx64 " rbx=%016" PRIx64 " rcx=%016" PRIx64 " rdx=%016" PRIx64 "\n"
 		            "rsi=%016" PRIx64 " rdi=%016" PRIx64 " rbp=%016" PRIx64 " rsp=%016" PRIx64 "\n"
 		            "r8 =%016" PRIx64 " r9 =%016" PRIx64 " r10=%016" PRIx64 " r11=%016" PRIx64 "\n"
@@ -1805,6 +1824,7 @@ void RuntimeLinker::LoadProgramToMemory(Program* program) {
 	     "mapped_size            = 0x%016" PRIx64 "\n",
 	     program->base_vaddr, program->base_size, program->base_size_aligned, program->mapped_size);
 
+	Common::FaultReport::RefreshModules();
 	if (!Common::HostException::InstallHandler(KytyExceptionHandler)) {
 		EXIT("Failed to install the required vectored exception handler\n");
 	}
