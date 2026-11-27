@@ -3,6 +3,7 @@
 #include "common/common.h"
 #include "common/debugCounters.h"
 #include "common/frameCost.h"
+#include "common/ports.h"
 #include "common/emulatorConfig.h"
 #include "common/file.h"
 #include "common/logging/log.h"
@@ -649,6 +650,20 @@ static bool HasStorageWrites(const ShaderComputeInputInfo& input_info,
 	       });
 }
 
+// Whether a dispatch may write memory through any path. A dispatch that only reads is not ordered
+// after earlier dispatches that only read, so no write may be missed here.
+static bool DispatchMayWriteMemory(const ShaderStageRuntime& stage, const PreparedBindings& bindings) {
+	const auto& program = stage.module->info;
+	const auto& info    = program.info;
+	return bindings.shared_memory.buffer != nullptr || bindings.gds.buffer != nullptr ||
+	       program.has_address_writes || info.uses_dma || info.uses_gds || info.function_scratch ||
+	       HasShaderBufferWrites(stage) ||
+	       std::ranges::any_of(info.buffers,
+	                           [](const auto& resource) { return resource.written || resource.atomic; }) ||
+	       std::ranges::any_of(info.images,
+	                           [](const auto& resource) { return resource.written || resource.atomic; });
+}
+
 // The guest buffers a compute program names through descriptors, with how it uses them. Memory it
 // reaches through pointers it computes itself is not listed.
 static std::vector<SkipTaint::Use> ComputeBufferUses(const ShaderStageRuntime& stage) {
@@ -1164,15 +1179,23 @@ bool RenderExecutor::DispatchDirectLocked(CommandBuffer& buffer, uint32_t thread
 	}
 	sample.clock.AddTo(sample.bind_ns);
 
-	const auto vk_buffer = buffer.Handle();
 	CommitBindings(buffer, vk::PipelineBindPoint::eCompute, pipeline,
 	               std::span {&descriptor_stage, 1u});
-	const bool writes_memory = HasStorageWrites(input_info, bindings) || program.info.uses_dma ||
+	const bool tracked_barriers = Config::PortEnabled(Config::Port::BarrierTracker);
+	const bool writes_memory    = HasStorageWrites(input_info, bindings) || program.info.uses_dma ||
 	                           bindings.gds.buffer != nullptr;
-	if (writes_memory) {
-		// A host fence used to serialize every dispatch. Preserve its read-before-write ordering
-		// while allowing the queue to execute asynchronously.
-		ShaderWriteHazardBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
+	vk::CommandBuffer vk_buffer;
+	if (tracked_barriers) {
+		// The tracker orders this dispatch against the commands around it and defers the barrier
+		// after it until a later command needs it.
+		vk_buffer = buffer.DispatchHandle(DispatchMayWriteMemory(input_info.stage, bindings));
+	} else {
+		vk_buffer = buffer.Handle();
+		if (writes_memory) {
+			// A host fence used to serialize every dispatch. Preserve its read-before-write
+			// ordering while allowing the queue to execute asynchronously.
+			ShaderWriteHazardBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
+		}
 	}
 	sample.clock.AddTo(sample.commit_ns);
 	if (Config::GraphicsDebugDumpEnabled()) {
@@ -1270,7 +1293,20 @@ bool RenderExecutor::DispatchDirectLocked(CommandBuffer& buffer, uint32_t thread
 			for (uint32_t y = 0; y < thread_group_y; ++y) {
 				for (uint32_t x = 0; x < thread_group_x; ++x) {
 					if ((x | y | z) != 0u) {
-						ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
+						if (tracked_barriers) {
+							// A group sees the GDS and memory writes of the groups before it.
+							const vk::MemoryBarrier order {
+							    .srcAccessMask = vk::AccessFlagBits::eShaderWrite,
+							    .dstAccessMask = vk::AccessFlagBits::eShaderRead |
+							                     vk::AccessFlagBits::eShaderWrite};
+							vk_buffer.pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader,
+							                          vk::PipelineStageFlagBits::eComputeShader,
+							                          vk::DependencyFlags {}, 1, &order, 0, nullptr,
+							                          0, nullptr);
+							Common::FrameCost::Add(Common::FrameCost::Counter::BarriersGlobal);
+						} else {
+							ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
+						}
 					}
 					vk_buffer.dispatchBase(x, y, z, 1, 1, 1);
 				}
@@ -1287,7 +1323,11 @@ bool RenderExecutor::DispatchDirectLocked(CommandBuffer& buffer, uint32_t thread
 	}
 
 	// The removed host fence also ordered read-only dispatches before later writers.
-	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader, writes_memory);
+	if (tracked_barriers) {
+		Common::FrameCost::Add(Common::FrameCost::Counter::BarriersDropped);
+	} else {
+		ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader, writes_memory);
+	}
 	ResetBindings();
 	sample.Commit();
 	return true;
@@ -1458,11 +1498,29 @@ bool RenderExecutor::DispatchIndirectLocked(CommandBuffer& buffer, uint64_t args
 	sample.clock.AddTo(sample.bind_ns);
 	CommitBindings(buffer, vk::PipelineBindPoint::eCompute, pipeline,
 	               std::span {&descriptor_stage, 1u});
-	const auto vk_buffer = buffer.Handle();
-	const bool writes_memory = HasStorageWrites(input_info, bindings) || program.info.uses_dma ||
+	const bool tracked_barriers = Config::PortEnabled(Config::Port::BarrierTracker);
+	const bool writes_memory    = HasStorageWrites(input_info, bindings) || program.info.uses_dma ||
 	                           bindings.gds.buffer != nullptr;
-	if (writes_memory) {
-		ShaderWriteHazardBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
+	vk::CommandBuffer vk_buffer;
+	if (tracked_barriers) {
+		vk_buffer = buffer.DispatchHandle(DispatchMayWriteMemory(input_info.stage, bindings));
+		// The barriers the tracker records leave out nothing the argument read needs, but the read
+		// happens at the draw-indirect stage, which the compute-to-compute barrier does not name:
+		// order every earlier shader and transfer write before it (the guard's included).
+		const vk::MemoryBarrier arguments {
+		    .srcAccessMask = vk::AccessFlagBits::eShaderWrite | vk::AccessFlagBits::eTransferWrite,
+		    .dstAccessMask = vk::AccessFlagBits::eIndirectCommandRead};
+		vk_buffer.pipelineBarrier(vk::PipelineStageFlagBits::eAllGraphics |
+		                              vk::PipelineStageFlagBits::eComputeShader |
+		                              vk::PipelineStageFlagBits::eTransfer,
+		                          vk::PipelineStageFlagBits::eDrawIndirect, vk::DependencyFlags {}, 1,
+		                          &arguments, 0, nullptr, 0, nullptr);
+		Common::FrameCost::Add(Common::FrameCost::Counter::BarriersGlobal);
+	} else {
+		vk_buffer = buffer.Handle();
+		if (writes_memory) {
+			ShaderWriteHazardBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
+		}
 	}
 	sample.clock.AddTo(sample.commit_ns);
 	vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.pipeline);
@@ -1484,7 +1542,11 @@ bool RenderExecutor::DispatchIndirectLocked(CommandBuffer& buffer, uint64_t args
 	if (program.info.bvh) {
 		Common::FrameCost::Add(Common::FrameCost::Counter::BvhDispatches);
 	}
-	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader, writes_memory);
+	if (tracked_barriers) {
+		Common::FrameCost::Add(Common::FrameCost::Counter::BarriersDropped);
+	} else {
+		ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader, writes_memory);
+	}
 	ResetBindings();
 	sample.Commit();
 	return true;

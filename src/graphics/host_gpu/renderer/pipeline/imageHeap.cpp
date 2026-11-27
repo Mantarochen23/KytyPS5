@@ -840,7 +840,7 @@ void ImageHeap::Commit(CommandBuffer& buffer, vk::PipelineBindPoint bind_point,
 		               buffer.Handle());
 		return true;
 	});
-	buffer.Handle().bindDescriptorSets(bind_point, layout, IR::ImageHeapSet, 1, &m_set, 0,
+	buffer.StateHandle().bindDescriptorSets(bind_point, layout, IR::ImageHeapSet, 1, &m_set, 0,
 	                                   nullptr);
 }
 

@@ -892,6 +892,11 @@ TEST(FrameCost, FormatWindowSeparatesBackgroundGpuWaitsAndReportsArchFields) {
 	set(Counter::DispatchesGuard, 340);
 	set(Counter::BvhDispatches, 16);
 	set(Counter::BarriersAllCommands, 1200);
+	set(Counter::BarriersGlobal, 1000);
+	set(Counter::BarriersBuffer, 100);
+	set(Counter::BarriersImage, 60);
+	set(Counter::PassBreaks, 400);
+	set(Counter::BarriersDropped, 2000);
 	set(Counter::DrawStepSamples, 4);
 	set(Counter::DrawStepProgramsNs, 4000);
 	set(Counter::DrawStepTargetsNs, 2000);
@@ -927,7 +932,10 @@ TEST(FrameCost, FormatWindowSeparatesBackgroundGpuWaitsAndReportsArchFields) {
 	                          "oa_ex=0.00 skip=0.00 bvh=8.00)"),
 	          std::string::npos)
 	    << lines.arch;
-	EXPECT_NE(lines.arch.find("barriers_all=600.00"), std::string::npos) << lines.arch;
+	EXPECT_NE(lines.arch.find("barriers_all=600.00 barriers(global=500.00 buffer=50.00 image=30.00) "
+	                          "pass_breaks=200.00 barriers_dropped=1000.00 "),
+	          std::string::npos)
+	    << lines.arch;
 	EXPECT_NE(lines.arch.find("draw_ns(n=4 prog=1000 rt=500 pipe=300 bind=2000 commit=1500 rec=700)"),
 	          std::string::npos)
 	    << lines.arch;

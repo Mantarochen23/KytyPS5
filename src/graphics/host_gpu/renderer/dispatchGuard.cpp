@@ -117,7 +117,7 @@ std::pair<vk::Buffer, uint64_t> DispatchArgsGuard::Record(CommandBuffer& buffer,
                                                           uint64_t offset, uint64_t guest_address,
                                                           uint64_t write_stamp) {
 	const auto cmd_id = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(
-	    static_cast<VkCommandBuffer>(buffer.Handle())));
+	    static_cast<VkCommandBuffer>(buffer.StateHandle())));
 	auto&      checked = m_checked[(guest_address >> 2u) % CheckedCount];
 	if (ValidationStillHolds(checked, guest_address, write_stamp, cmd_id, m_next, SlotCount)) {
 		Common::FrameCost::Add(Common::FrameCost::Counter::GuardSkipped);
@@ -129,7 +129,9 @@ std::pair<vk::Buffer, uint64_t> DispatchArgsGuard::Record(CommandBuffer& buffer,
 	if ((m_next & 63u) == 0) {
 		Report();
 	}
-	const auto     command = buffer.Handle();
+	// With the barrier tracker the pass is a guest dispatch like the one it guards.
+	const bool     tracked = Config::PortEnabled(Config::Port::BarrierTracker);
+	const auto     command = tracked ? buffer.DispatchHandle(true) : buffer.Handle();
 	const auto&    limits  = m_graphics.GetPhysicalDeviceProperties().limits;
 	const uint64_t slot    = (m_next++ % SlotCount) * SlotBytes;
 	// A storage buffer binding starts on the device's alignment; the shader indexes from there.
@@ -165,7 +167,13 @@ std::pair<vk::Buffer, uint64_t> DispatchArgsGuard::Record(CommandBuffer& buffer,
 	command.pushConstants(m_layout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(params), &params);
 	command.dispatch(1, 1, 1);
 
-	ShaderAccessBarrier(command, vk::PipelineStageFlagBits::eComputeShader);
+	if (tracked) {
+		// The guarded dispatch records the barrier from every earlier shader write to its
+		// indirect-argument read; this pass's own is included.
+		Common::FrameCost::Add(Common::FrameCost::Counter::BarriersDropped);
+	} else {
+		ShaderAccessBarrier(command, vk::PipelineStageFlagBits::eComputeShader);
+	}
 	if (write_stamp != 0) {
 		checked = {guest_address, write_stamp, slot, m_next - 1u, cmd_id};
 	}

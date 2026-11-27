@@ -248,6 +248,7 @@ void BufferCache::WriteDataBuffer(Buffer& buffer, uint64_t address, const void* 
 		dependency.bufferMemoryBarrierCount = 1;
 		dependency.pBufferMemoryBarriers    = &before;
 		command.pipelineBarrier2(dependency);
+		Common::FrameCost::Add(Common::FrameCost::Counter::BarriersBuffer);
 		const vk::BufferCopy copy {offset, destination_offset, chunk};
 		command.copyBuffer(m_staging_buffer.Handle(), buffer.Handle(), 1, &copy);
 		auto after          = before;
@@ -257,6 +258,7 @@ void BufferCache::WriteDataBuffer(Buffer& buffer, uint64_t address, const void* 
 		after.dstAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite;
 		dependency.pBufferMemoryBarriers = &after;
 		command.pipelineBarrier2(dependency);
+		Common::FrameCost::Add(Common::FrameCost::Counter::BarriersBuffer);
 		bytes += chunk;
 		address += chunk;
 		size -= chunk;
@@ -418,6 +420,7 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 	native.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
 	                       vk::PipelineStageFlagBits::eTransfer, {}, 0, nullptr, 1, &before, 0,
 	                       nullptr);
+	Common::FrameCost::Add(Common::FrameCost::Counter::BarriersBuffer);
 	native.copyBuffer(buffer.Handle(), download.buffer->Handle(),
 	                  static_cast<uint32_t>(copies.size()), copies.data());
 
@@ -431,6 +434,7 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 	                       vk::PipelineStageFlagBits::eAllCommands |
 	                           vk::PipelineStageFlagBits::eHost,
 	                       {}, 0, nullptr, 1, &after, 0, nullptr);
+	Common::FrameCost::Add(Common::FrameCost::Counter::BarriersBuffer);
 	auto publish = [total_size, buffer_address, copies = std::move(copies),
 	                download = std::move(download)] {
 		download.buffer->Invalidate(download.offset, total_size);
@@ -702,6 +706,7 @@ void BufferCache::UploadCopies(std::span<const BufferUpload> uploads,
 	native.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
 	                       vk::PipelineStageFlagBits::eTransfer, vk::DependencyFlagBits::eByRegion,
 	                       1, &before, 0, nullptr, 0, nullptr);
+	Common::FrameCost::Add(Common::FrameCost::Counter::BarriersBuffer);
 	size_t first = 0;
 	for (const auto& upload: uploads) {
 		native.copyBuffer(source.first->Handle(), upload.buffer->Handle(),
@@ -714,6 +719,7 @@ void BufferCache::UploadCopies(std::span<const BufferUpload> uploads,
 	native.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
 	                       vk::PipelineStageFlagBits::eAllCommands,
 	                       vk::DependencyFlagBits::eByRegion, 1, &after, 0, nullptr, 0, nullptr);
+	Common::FrameCost::Add(Common::FrameCost::Counter::BarriersBuffer);
 }
 
 std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t size,
