@@ -1,6 +1,7 @@
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
 
 #include "common/assert.h"
+#include "common/ports.h"
 #include "graphics/guest_gpu/gpu_format.h"
 #include "graphics/shader/recompiler/BufferFormat.h"
 #include "graphics/shader/recompiler/ir/Serialize.h"
@@ -14,6 +15,7 @@
 #include <fmt/format.h>
 #include <functional>
 #include <numeric>
+#include <tuple>
 #include <unordered_set>
 #define XXH_INLINE_ALL
 #include <xxhash.h>
@@ -626,6 +628,24 @@ bool ResolveSelectorKeys(const ResourcePlan& program, const DescriptorSource::In
 	return true;
 }
 
+// State of a canonical materialization (port canonical-resources, see IndirectMappingHeader).
+struct CanonicalLayout {
+	bool     enabled = false;
+	bool     legacy  = false; // Also derive the hash of the specialization the old layout gives.
+	uint32_t header  = 0;     // flattened_srt word of the first header slot.
+	uint32_t header_words = 0;
+	// Words the canonical layout adds behind the header (heap arm maps): position, count.
+	std::vector<std::pair<uint32_t, uint32_t>> extra;
+	// Children moved into canonical order: kind (0 buffers, 1 images), first child, and for each
+	// new position the old one.
+	struct Permutation {
+		uint32_t              kind  = 0;
+		uint32_t              begin = 0;
+		std::vector<uint32_t> old_of_new;
+	};
+	std::vector<Permutation> permutations;
+};
+
 template <typename Specialization, typename Normalize>
 bool MaterializeIndirectDescriptor(const ResourcePlan& program, uint32_t source_index,
                                    uint32_t resource_index, uint32_t dword_count,
@@ -634,7 +654,8 @@ bool MaterializeIndirectDescriptor(const ResourcePlan& program, uint32_t source_
                                    std::vector<DescriptorValue>& descriptors,
                                    std::vector<Specialization>&  specializations,
                                    Normalize&& normalize, bool allow_scan_cache = false,
-                                   bool* validate_buffer_keys = nullptr) {
+                                   bool* validate_buffer_keys = nullptr,
+                                   CanonicalLayout* canonical = nullptr) {
 	const auto& indirect = *program.descriptor_sources[source_index].indirect_descriptor;
 	const auto  descriptor_bytes = read_dwords * sizeof(uint32_t);
 	const auto& sources = indirect.sources;
@@ -803,6 +824,14 @@ bool MaterializeIndirectDescriptor(const ResourcePlan& program, uint32_t source_
 					specializations[resource_index] = root;
 					snapshot.flattened_srt.insert(snapshot.flattened_srt.end(),
 					    {view.slot_count, static_cast<uint32_t>(view.slots), static_cast<uint32_t>(view.slots >> 32u)});
+					if (canonical != nullptr && canonical->enabled) {
+						// Arm a of a slot word reads the kind at position map[a]; identity until the
+						// children are sorted.
+						const auto arms = static_cast<uint32_t>(view.kinds.size());
+						const auto at   = static_cast<uint32_t>(snapshot.flattened_srt.size());
+						for (uint32_t arm = 0; arm < arms; ++arm) snapshot.flattened_srt.push_back(arm);
+						canonical->extra.emplace_back(at, arms);
+					}
 					for (const auto& kind: view.kinds) {
 						descriptors.push_back(kind);
 						specializations.push_back(root);
@@ -1092,8 +1121,177 @@ private:
 	uint32_t                                    count = 0;
 };
 
+namespace {
+
+// Rewrites the ordinals a root's mapping selects after its children moved; new_of_old[0] is the
+// root. A heap maps arms to positions instead (one word per arm behind its three words).
+bool RemapOrdinals(std::vector<uint32_t>& flat, uint32_t offset, uint32_t iterations, bool heap,
+                   std::span<const uint32_t> new_of_old) {
+	const auto children = static_cast<uint32_t>(new_of_old.size() - 1u);
+	if (heap) {
+		if (uint64_t {offset} + 3u + children > flat.size()) return false;
+		for (uint32_t arm = 0; arm < children; ++arm) {
+			auto& word = flat[offset + 3u + arm];
+			if (word >= children) return false;
+			word = new_of_old[word + 1u] - 1u;
+		}
+		return true;
+	}
+	if (offset >= flat.size()) return false;
+	const auto count = flat[offset];
+	const auto words = iterations == 0u ? uint64_t {count} : uint64_t {count} * 2u;
+	if (offset + 1u + words > flat.size()) return false;
+	for (uint32_t entry = 0; entry < count; ++entry) {
+		auto& word = iterations == 0u ? flat[offset + 1u + entry] : flat[offset + 2u + entry * 2u];
+		if (word > children) return false;
+		word = new_of_old[word];
+	}
+	return true;
+}
+
+// Puts the children of every indirect root into an order of their own fields (key), so the
+// specialization does not depend on the order the guest tables presented them in; ties have
+// equal fields, so their order does not reach the module.
+template <typename Spec, typename Key>
+bool SortCanonicalChildren(std::vector<Spec>& specs, std::vector<DescriptorValue>& descriptors,
+                           size_t plan_count, uint32_t kind, std::vector<uint32_t>& flat,
+                           CanonicalLayout& layout, Key&& key) {
+	for (uint32_t root = 0; root < plan_count; ++root) {
+		if (specs[root].indirect_root != root) continue;
+		auto begin = static_cast<uint32_t>(plan_count);
+		while (begin < specs.size() && specs[begin].indirect_root != root) ++begin;
+		auto end = begin;
+		while (end < specs.size() && specs[end].indirect_root == root) ++end;
+		if (end - begin < 2u) continue;
+		std::vector<uint32_t> order(end - begin);
+		std::iota(order.begin(), order.end(), 0u);
+		std::ranges::stable_sort(order, [&](uint32_t a, uint32_t b) {
+			return key(specs[begin + a], descriptors[begin + a]) <
+			       key(specs[begin + b], descriptors[begin + b]);
+		});
+		if (std::ranges::is_sorted(order)) continue;
+		std::vector<uint32_t> new_of_old(order.size() + 1u, 0u);
+		for (uint32_t position = 0; position < order.size(); ++position)
+			new_of_old[order[position] + 1u] = position + 1u;
+		bool heap = false;
+		if constexpr (std::is_same_v<Spec, ResourceSpecialization::Image>) heap = specs[root].heap;
+		if (!RemapOrdinals(flat, specs[root].indirect_mapping_offset,
+		                   specs[root].indirect_search_iterations, heap, new_of_old))
+			return SpecializationFail("canonical order: indirect mapping out of range");
+		std::vector<Spec>            moved_specs(order.size());
+		std::vector<DescriptorValue> moved_descriptors(order.size());
+		for (uint32_t position = 0; position < order.size(); ++position) {
+			moved_specs[position]       = specs[begin + order[position]];
+			moved_descriptors[position] = descriptors[begin + order[position]];
+		}
+		std::ranges::copy(moved_specs, specs.begin() + begin);
+		std::ranges::copy(moved_descriptors, descriptors.begin() + begin);
+		if (layout.legacy) layout.permutations.push_back({kind, begin, std::move(order)});
+	}
+	return true;
+}
+
+// The mapping offset of an indirect root without the port: no header, no heap arm maps.
+uint32_t LegacyMappingOffset(const CanonicalLayout& layout, uint32_t offset) {
+	uint32_t extra = layout.header_words;
+	for (const auto& [at, words]: layout.extra)
+		if (at < offset) extra += words;
+	return offset - extra;
+}
+
+// Copies the type of an indirect image root's first non-null candidate onto its null ones.
+template <typename IsNull>
+void FillNullImageCandidates(std::vector<ResourceSpecialization::Image>& images, IsNull&& is_null) {
+	for (uint32_t root = 0; root < images.size(); ++root) {
+		if (images[root].indirect_root != root) continue;
+		uint32_t exemplar = ImageResource::NoIndirectImage;
+		for (uint32_t index = 0; index < images.size() && exemplar == ImageResource::NoIndirectImage; ++index)
+			if (images[index].indirect_root == root && !is_null(index)) exemplar = index;
+		if (exemplar == ImageResource::NoIndirectImage) continue;
+		const auto type = images[exemplar];
+		for (uint32_t index = 0; index < images.size(); ++index) {
+			if (images[index].indirect_root != root || !is_null(index)) continue;
+			auto& image             = images[index];
+			image.numeric_class     = type.numeric_class;
+			image.dimension         = type.dimension;
+			image.mip_count         = type.mip_count;
+			image.conversion_format = type.conversion_format;
+			image.shader_swizzle    = type.shader_swizzle;
+			image.cube              = type.cube;
+		}
+	}
+}
+
+// The specialization these inputs give without the port, from the canonical one: children back in
+// their table order, null candidates typed by that order, offsets without header and arm maps.
+uint64_t LegacySpecializationHash(const ResourceSpecialization&               canonical,
+                                  const std::vector<ResourceSpecialization::Image>& unfilled,
+                                  const std::vector<DescriptorValue>&          images,
+                                  const CanonicalLayout&                       layout) {
+	auto legacy   = canonical;
+	legacy.images = unfilled;
+	std::vector<bool> null(images.size());
+	for (size_t index = 0; index < images.size(); ++index) null[index] = NullImageDescriptor(images[index]);
+	for (const auto& [kind, begin, old_of_new]: layout.permutations) {
+		if (kind == 0u) {
+			for (uint32_t position = 0; position < old_of_new.size(); ++position)
+				legacy.buffers[begin + old_of_new[position]] = canonical.buffers[begin + position];
+		} else {
+			for (uint32_t position = 0; position < old_of_new.size(); ++position) {
+				legacy.images[begin + old_of_new[position]] = unfilled[begin + position];
+				null[begin + old_of_new[position]] = NullImageDescriptor(images[begin + position]);
+			}
+		}
+	}
+	FillNullImageCandidates(legacy.images, [&](uint32_t index) { return null[index]; });
+	const auto unshift = [&](auto& entries, const auto& source) {
+		for (uint32_t index = 0; index < entries.size(); ++index) {
+			const auto root = entries[index].indirect_root;
+			if (root >= entries.size() || source[root].indirect_root != root) continue;
+			if (entries[index].indirect_mapping_offset == source[root].indirect_mapping_offset &&
+			    (index == root || source[root].indirect_mapping_offset != 0u))
+				entries[index].indirect_mapping_offset =
+				    LegacyMappingOffset(layout, source[root].indirect_mapping_offset);
+		}
+	};
+	unshift(legacy.buffers, canonical.buffers);
+	unshift(legacy.images, canonical.images);
+	unshift(legacy.samplers, canonical.samplers);
+	Writer writer;
+	Io(writer, legacy);
+	return XXH3_64bits(writer.bytes.data(), writer.bytes.size());
+}
+
+// Moves every indirect root's mapping offset into its header slot and leaves the slot in the
+// specialization; sparse searches take their bound from the key count at run time.
+void UseMappingHeader(const ResourcePlan& program, ResourceSpecialization& specialization,
+                      std::vector<uint32_t>& flat, const CanonicalLayout& layout) {
+	uint32_t slot = layout.header;
+	const auto convert = [&](auto& entries, size_t plan_count) {
+		for (uint32_t root = 0; root < plan_count; ++root, ++slot) {
+			if (root >= entries.size() || entries[root].indirect_root != root) continue;
+			const auto offset = entries[root].indirect_mapping_offset;
+			flat[slot]        = offset;
+			const auto moved  = IndirectMappingHeader | slot;
+			for (uint32_t index = static_cast<uint32_t>(plan_count); index < entries.size(); ++index)
+				if (entries[index].indirect_root == root && entries[index].indirect_mapping_offset == offset)
+					entries[index].indirect_mapping_offset = moved;
+			entries[root].indirect_mapping_offset = moved;
+			// A heap root maps slots and searches nothing (its iterations stay 0).
+			if (entries[root].indirect_search_iterations != 0u)
+				entries[root].indirect_search_iterations = IndirectSearchRuntime;
+		}
+	};
+	convert(specialization.buffers, program.info.buffers.size());
+	convert(specialization.images, program.info.images.size());
+	convert(specialization.samplers, program.info.samplers.size());
+}
+
+} // namespace
+
 static bool BuildResourceSpecialization(const ResourcePlan& program, ResourceSnapshot& snapshot,
-                                        ResourceSpecialization& specialization) {
+                                        ResourceSpecialization& specialization,
+                                        CanonicalLayout& canonical) {
 	for (uint32_t i = 0; i < specialization.images.size(); i++) {
 		const auto& descriptor = snapshot.images[i];
 		auto&       image      = specialization.images[i];
@@ -1229,6 +1427,20 @@ static bool BuildResourceSpecialization(const ResourcePlan& program, ResourceSna
 			return SpecializationFail(message);
 		}
 	}
+	std::vector<ResourceSpecialization::Image> unfilled;
+	if (canonical.enabled) {
+		// Null candidates sort last; their type comes from the first typed one below.
+		const auto image_key = [](const ResourceSpecialization::Image& image,
+		                          const DescriptorValue&               descriptor) {
+			return std::tuple(NullImageDescriptor(descriptor), image.numeric_class, image.dimension,
+			                  image.mip_count, image.conversion_format, image.shader_swizzle,
+			                  image.srgb_decode, image.cube, image.skip_degamma, image.fmask);
+		};
+		if (!SortCanonicalChildren(specialization.images, snapshot.images, program.info.images.size(),
+		                           1u, snapshot.flattened_srt, canonical, image_key))
+			return false;
+		if (canonical.legacy) unfilled = specialization.images;
+	}
 	for (uint32_t root_index = 0; root_index < specialization.images.size(); root_index++) {
 		auto& root = specialization.images[root_index];
 		if (root.indirect_root != root_index) {
@@ -1322,6 +1534,12 @@ static bool BuildResourceSpecialization(const ResourcePlan& program, ResourceSna
 				                program.info.images[root_index].first_use_pc));
 			}
 		}
+	}
+	if (canonical.enabled) {
+		if (canonical.legacy)
+			snapshot.legacy_hash =
+			    LegacySpecializationHash(specialization, unfilled, snapshot.images, canonical);
+		UseMappingHeader(program, specialization, snapshot.flattened_srt, canonical);
 	}
 	CompactImages(snapshot.images, [&](size_t index) { return !specialization.images[index].fmask; });
 	return true;
@@ -1783,6 +2001,21 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 		return SpecializationFail(fmt::format("SRT refresh complete={} reads={} user_data={}",
 		    program.srt_plan_complete, program.srt_reads.size(), runtime.user_data.size()));
 	}
+	// The header holds one slot per resource of the plan (see IndirectMappingHeader), right after
+	// the walked words, so a slot depends on the plan alone.
+	CanonicalLayout canonical;
+	canonical.enabled = Config::PortEnabled(Config::Port::CanonicalResources) &&
+	                    std::ranges::any_of(program.descriptor_sources, [](const DescriptorSource& source) {
+		                    return source.indirect_descriptor.has_value();
+	                    });
+	canonical.legacy  = canonical.enabled && runtime.legacy_hash;
+	snapshot.legacy_hash = 0;
+	if (canonical.enabled) {
+		canonical.header       = static_cast<uint32_t>(snapshot.flattened_srt.size());
+		canonical.header_words = static_cast<uint32_t>(
+		    program.info.buffers.size() + program.info.images.size() + program.info.samplers.size());
+		snapshot.flattened_srt.resize(canonical.header + canonical.header_words, 0u);
+	}
 	SrtReadCapture capture {runtime, reads};
 	auto observed = capture_reads ? capture.ObservedRuntime() : runtime;
 	std::array<uint32_t, 3> workgroup_counts {};
@@ -1886,6 +2119,15 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 		buffer.zero_stride_oob    = descriptor.OutOfBounds() == 0u && stride == 0u;
 		buffer.scalar_empty       = base.scalar && descriptor.GetSize() == 0u;
 	}
+	if (canonical.enabled) {
+		const auto buffer_key = [](const ResourceSpecialization::Buffer& buffer, const DescriptorValue&) {
+			return std::tuple(buffer.packed_stride, buffer.descriptor_format, buffer.descriptor_swizzle,
+			                  buffer.zero_stride_oob, buffer.scalar_empty);
+		};
+		if (!SortCanonicalChildren(specialization.buffers, snapshot.buffers, program.info.buffers.size(),
+		                           0u, snapshot.flattened_srt, canonical, buffer_key))
+			return false;
+	}
 	if (validate_buffer_keys) {
 		// Only the resolved destinations can write. Check after all indirect children exist.
 		for (uint32_t i = 0; i < snapshot.buffers.size(); ++i) {
@@ -1932,7 +2174,7 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 				            (bounded_table && DescriptorDimension(value, image.dimension) != image.dimension))
 					        value.dwords.fill(0u);
 				        return true;
-			        })) {
+			        }, false, nullptr, &canonical)) {
 				return resource_failed("image", i, image.source, snapshot.images.size());
 			}
 		} else {
@@ -1983,7 +2225,7 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 		}
 	}
 	snapshot.user_data.assign(runtime.user_data.begin(), runtime.user_data.end());
-	return BuildResourceSpecialization(program, snapshot, specialization);
+	return BuildResourceSpecialization(program, snapshot, specialization, canonical);
 }
 
 uint32_t ImageHeapKind(const ImageResource& root, DescriptorValue& value) {

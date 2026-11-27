@@ -30,6 +30,10 @@ struct LookupStats {
 	uint64_t served_late = 0;
 	// Misses that were counted once per distinct key and resources, not once per retry.
 	uint64_t distinct_misses = 0;
+	// Port canonical-resources: stored modules a lookup hit first with a known old-layout hash, and
+	// of them those whose old-layout hash differs from the lookup's (the old key would have missed).
+	uint64_t canonical_checked = 0;
+	uint64_t canonical_saved   = 0;
 	// How many misses were described so far.
 	uint32_t described = 0;
 	std::unordered_set<uint64_t> seen;
@@ -52,6 +56,11 @@ struct LookupStats {
 			line += fmt::format(" served-late={}", served_late);
 		}
 		return line;
+	}
+	[[nodiscard]] std::string CanonicalLine() const {
+		return fmt::format("[store] canonical: hits that the old key would have missed = {} (of {} "
+		                   "stored modules first hit with an old key)",
+		                   canonical_saved, canonical_checked);
 	}
 };
 

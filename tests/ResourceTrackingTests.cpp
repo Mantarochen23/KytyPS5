@@ -7,6 +7,7 @@
 #include "graphics/shader/recompiler/ir/passes/ShaderInfoCollection.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderStoreCapability.h"
 #include "SrtWalkerTestMemory.h"
+#include "common/ports.h"
 
 #include <array>
 #include <bit>
@@ -10048,6 +10049,10 @@ void TestSrtRootedBufferDescriptor() {
 } // namespace
 
 int main(int argc, char **argv) {
+  // These cases check the mapping words of the layout without the canonical-resources port;
+  // that port's layout is checked by resource_materialization_tests and, on the GPU, by
+  // shader_recompiler_compute_tests --canonical-equivalence-only.
+  Config::SetDisabledPorts({"canonical-resources"});
   try {
     // Optional substring filter, for running a group when an unrelated test aborts.
     const std::string_view filter = argc > 1 ? std::string_view(argv[1]) : std::string_view{};

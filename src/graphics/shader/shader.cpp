@@ -635,6 +635,9 @@ void BuildStageStaticKey(const ShaderComputeInputInfo& info, std::vector<uint32_
 		key.push_back(static_cast<uint32_t>(info.group_id[i]));
 	}
 	key.push_back(static_cast<uint32_t>(info.tg_size_en));
+	// Follows from lds_size_dwords and the device limit (also in the store header); in the key so
+	// the key alone says which shared-memory storage the module was built for.
+	key.push_back(static_cast<uint32_t>(info.lds_storage));
 }
 
 ShaderParams PrepareProgram(const HW::VertexShaderInfo& regs, const HW::Context& context,

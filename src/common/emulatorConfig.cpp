@@ -547,4 +547,8 @@ const std::filesystem::path& GetRegisteredShaderDumpFolder() {
 	return g_config != nullptr ? g_config->dump_registered_shaders_folder : none;
 }
 
+uint32_t WarmUpBudgetSeconds() {
+	return g_config != nullptr ? g_config->warmup_budget_s : 0u;
+}
+
 } // namespace Config

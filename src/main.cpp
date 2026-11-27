@@ -176,7 +176,10 @@ static void PrintUsage() {
 	         "                                       on. 0 = wait for ever. Default: 0.\n"
 	         "  --async-lookahead <0|1>              The scan of submitted commands also reads compute user\n"
 	         "                                       data, so shaders whose resources follow from it are\n"
-	         "                                       built before their dispatch is reached. Default: 1.\n");
+	         "                                       built before their dispatch is reached. Default: 1.\n"
+	         "  --warmup-budget-s <n>                Start the title after n seconds of loading the shader\n"
+	         "                                       store (first-used first); the rest loads in the\n"
+	         "                                       background. 0 = load all first. Default: 0.\n");
 }
 
 static bool NextArg(int argc, char* argv[], int& index, std::string& out) {
@@ -631,6 +634,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 		} else if (arg == "--async-lookahead") {
 			if (!ParseUint32(value, options.config.async_lookahead)) {
 				::printf("invalid async lookahead value: %s\n", value.c_str());
+				return false;
+			}
+		} else if (arg == "--warmup-budget-s") {
+			if (!ParseUint32(value, options.config.warmup_budget_s)) {
+				::printf("invalid warmup budget value: %s\n", value.c_str());
 				return false;
 			}
 		} else {

@@ -53,6 +53,14 @@ struct ResourceSpecialization {
 	bool operator==(const ResourceSpecialization&) const = default;
 };
 
+// Word of flattened_srt where an indirect root's mapping starts, from its indirect_mapping_offset
+// (a header slot under the canonical layout, see IndirectMappingHeader); UINT32_MAX if outside.
+inline uint32_t IndirectMappingStart(uint32_t mapping_offset, std::span<const uint32_t> flat) {
+	if ((mapping_offset & IndirectMappingHeader) == 0u) return mapping_offset;
+	const auto slot = mapping_offset & ~IndirectMappingHeader;
+	return slot < flat.size() ? flat[slot] : UINT32_MAX;
+}
+
 uint64_t BufferBindingSize(const BufferResource& resource, const ShaderBufferResource& descriptor);
 
 // Extracts the descriptor/SRT value graph before resource specialization. The returned plan owns
