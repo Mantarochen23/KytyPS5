@@ -2,7 +2,9 @@
 """Deterministic tests for tools/bringup/triage.py.
 
 Each finding is checked with a small hand-written log; the excerpt test checks a
-2,000-line masked cut of a real run. No emulator or run data is needed."""
+2,000-line masked cut of a real run. No emulator or run data is needed. All
+shader ids below are 0xaaaa... pseudonyms, never real hashes.
+"""
 import json
 import os
 import re
@@ -43,13 +45,17 @@ def sections(text):
     result = {}
     current = None
     for line in text.splitlines():
-        m = re.match(r'^\[([A-Z-]+)\]$', line)
+        m = re.match(r'^\[([A-Z][A-Z -]*)\]$', line)
         if m:
             current = m.group(1)
             result[current] = []
         elif current and line.startswith('  ') and line.strip():
             result[current].append(line[2:])
     return result
+
+
+ALL_SECTIONS = ('TIMELINE', 'STALLS', 'QUEUES', 'SHADERS', 'ASYNC',
+                'BUILD RATE', 'PARKED', 'HOLES', 'STORE', 'REJECTIONS', 'LEDGER')
 
 
 class TriageTests(unittest.TestCase):
@@ -64,6 +70,22 @@ class TriageTests(unittest.TestCase):
         self.assertEqual(f['last_frame_t'], 12.0)
         self.assertEqual([(g['start'], g['seconds']) for g in f['gaps']], [(2.0, 4.0), (7.0, 5.0)])
         self.assertTrue(sections(out)['TIMELINE'][0].startswith('@12.0 s: 5 frames, last frame @12.0 s'))
+        self.assertIsNone(f['loading_gap'])           # no 20 s gap here
+
+    def test_verdict_leads_with_frames_after_loading_gap(self):
+        text = ('@@T 1\n\t flip_arg = 1\n@@T 2\n\t flip_arg = 2\n'
+                '@@T 30\n\t flip_arg = 3\n@@T 31\n\t flip_arg = 4\n')
+        out, data = run_triage(text)
+        f = data['findings']['timeline']
+        self.assertEqual(f['loading_gap'], dict(start=2.0, end=30.0, seconds=28.0, frame=3))
+        self.assertEqual([(a, b, c) for a, b, c in
+                          ((r['t'], r['frame'], r['gap']) for r in f['frames_after_loading'])],
+                         [(30.0, 3, 28.0), (31.0, 4, 1.0)])
+        first = data['verdict'][0]
+        self.assertTrue(first.startswith('after loading gap 2.0-30.0 s (28.0 s):'))
+        self.assertIn('#3 @30.0 s gap 28.0 s', first)
+        self.assertIn('#4 @31.0 s gap 1.0 s', first)
+        self.assertTrue(out.split('VERDICT:\n', 1)[1].splitlines()[0].endswith(first))
 
     def test_stalls(self):
         text = ("@@T 20\n[stall] no frame for 5.0 s (frame 9): render thread in 'cp-blocked' "
@@ -121,6 +143,20 @@ class TriageTests(unittest.TestCase):
         self.assertEqual((s['render_built']['total_ms'], s['render_built']['worst_ms']), (100, 70))
         self.assertIn('render-thread builds: 1, 100 ms total, 70 ms worst', '\n'.join(sections(out)['SHADERS']))
 
+    def test_translated_times_counts_emitted_only(self):
+        h = '0xaaaa000000000001'
+        text = ('@@T 1\nShaderRecompiler CS translation end: hash=%s outcome=emitted\n'
+                '@@T 2\nShaderRecompiler CS translation end: hash=%s outcome=served from store\n'
+                '@@T 3\nShaderRecompiler CS translation end: hash=%s outcome=served from store\n'
+                '@@T 4\nShaderRecompiler CS translation end: hash=%s outcome=emitted\n') % (h, h, h, h)
+        out, data = run_triage(text)
+        s = data['findings']['shaders']
+        self.assertEqual([(o['outcome'], o['count']) for o in s['outcomes']],
+                         [('emitted', 2), ('served from store', 2)])
+        self.assertEqual(len(s['repeated']), 1)
+        self.assertEqual((s['repeated'][0]['count'], s['repeated'][0]['times']), (2, [1.0, 4.0]))
+        self.assertIn('%s translated 2 times (emitted only)' % h, '\n'.join(sections(out)['SHADERS']))
+
     def test_async(self):
         tail = ('stages: requested {req}, translating 0, translated 2 (failed 0), '
                 'module-compiling 0 of 1 jobs, modules ready 1 (speculative 0, lost 0, failed 0), '
@@ -142,6 +178,94 @@ class TriageTests(unittest.TestCase):
         self.assertEqual(a['stages_parsed']['module_compiling_total'], 1)
         self.assertIn('final stages @52.0 s:', '\n'.join(sections(out)['ASYNC']))
 
+    def _busy_line(self):
+        return ('Async: 0 translating, 0 compiling, 0 waiting (oldest 0 s), 0 pipelines, '
+                '0 queued, 0 skipped/2s, 0/0 redrawn; workers 1/1 busy, 1.0 jobs/s, '
+                'pump 0.0 ms (worst 0.0 ms, 0 applied, 0 backlog); stages: requested 0, '
+                'translating 0, translated 0 (failed 0), module-compiling 0 of 0 jobs, '
+                'modules ready 0 (speculative 0, lost 0, failed 0), pipeline-compiling 0 of 0 '
+                'jobs, pipelines ready 0 (failed 0), expired 0, wanted 0')
+
+    def test_build_rate_serial_flag(self):
+        parts = []
+        for w in range(5):
+            base = w * 60
+            parts += ['@@T %d' % (base + 1), self._busy_line(),
+                      '@@T %d' % (base + 2),
+                      'ShaderRecompiler CS translation end: hash=0xaaaa000000000001 outcome=emitted',
+                      '@@T %d' % (base + 4),
+                      'ShaderRecompiler CS translation end: hash=0xaaaa000000000002 outcome=emitted']
+        out, data = run_triage('\n'.join(parts) + '\n')
+        br = data['findings']['build_rate']
+        self.assertTrue(br['serial_build'])
+        self.assertEqual(br['serial_windows'], 5)
+        self.assertEqual(len(br['windows']), 5)
+        self.assertEqual([w['modules'] for w in br['windows']], [2] * 5)
+        self.assertEqual([w['median'] for w in br['windows']], [2.0] * 5)
+        self.assertEqual([w['busy'] for w in br['windows']], [1] * 5)
+        self.assertIn('serial build: True', '\n'.join(sections(out)['BUILD RATE']))
+
+    def test_build_rate_parallel_is_not_serial(self):
+        parts = []
+        for w in range(5):
+            base = w * 60
+            parts += ['@@T %d' % (base + 1), self._busy_line().replace('workers 1/1', 'workers 8/12'),
+                      '@@T %d' % (base + 2),
+                      'ShaderRecompiler CS translation end: hash=0xaaaa000000000001 outcome=emitted',
+                      '@@T %d' % (base + 4),
+                      'ShaderRecompiler CS translation end: hash=0xaaaa000000000002 outcome=emitted']
+        _, data = run_triage('\n'.join(parts) + '\n')
+        br = data['findings']['build_rate']
+        self.assertFalse(br['serial_build'])
+        self.assertEqual(br['serial_windows'], 0)
+
+    def test_build_lines_totals_and_largest(self):
+        text = ('@@T 5\n'
+                '[build] cs hash=0xaaaa000000000003 words=437492 translate=31ms plan=2ms emit=90ms '
+                'module=410ms pipeline=3320ms queue-wait=12ms total=3865ms where=worker reason=dispatch\n'
+                '[build] cs hash=0xaaaa000000000004 words=10 translate=1ms plan=0ms emit=2ms '
+                'module=3ms pipeline=4ms queue-wait=0ms total=10ms where=worker reason=dispatch\n')
+        out, data = run_triage(text)
+        br = data['findings']['build_rate']
+        self.assertEqual(br['totals'], dict(translate=32, emit=92, module=413, pipeline=3324))
+        self.assertEqual([(r['hash'], r['total']) for r in br['largest']],
+                         [('0xaaaa000000000003', 3865), ('0xaaaa000000000004', 10)])
+        joined = '\n'.join(sections(out)['BUILD RATE'])
+        self.assertIn('translate 32 emit 92 module 413 pipeline 3324', joined)
+        self.assertIn('0xaaaa000000000003 @5.0 s total 3865 ms', joined)
+
+    def test_parked(self):
+        text = ('@@T 5\n[park] thread \'\' (id 16) parked for good: pc=0x0000000000001234 '
+                '= mod+0x1234 access=2 address=0x0000000000000000\n'
+                '@@T 6\n[park] 1 guest threads parked\n')
+        out, data = run_triage(text)
+        p = data['findings']['parked']
+        self.assertEqual(len(p['threads']), 1)
+        self.assertEqual((p['threads'][0]['id'], p['threads'][0]['module'], p['threads'][0]['t']),
+                         (16, 'mod+0x1234', 5.0))
+        self.assertEqual(p['summary'], [[6.0, 1]])
+        joined = '\n'.join(sections(out)['PARKED'])
+        self.assertIn('thread 16 parked at mod+0x1234', joined)
+        self.assertIn('1 guest threads parked', joined)
+
+    def test_holes(self):
+        text = ('@@T 10\n'
+                '!!! SHADER DISPATCH SKIP (resource materialization failed) shader=0xaaaa000000000003; '
+                'rendering is incomplete\n'
+                '!!! SHADER DISPATCH SKIP (resource materialization failed) shader=0xaaaa000000000004; '
+                'rendering is incomplete\n'
+                'shader resource specialization failed: atomic image descriptor 12 uses unsupported format 5\n'
+                'shader resource specialization failed: atomic image descriptor 13 uses unsupported format 6\n')
+        out, data = run_triage(text)
+        holes = data['findings']['holes']
+        by_reason = {h['reason']: h for h in holes}
+        self.assertEqual(by_reason['resource materialization failed; rendering is incomplete']['shaders'], 2)
+        self.assertEqual(by_reason['resource materialization failed; rendering is incomplete']['holes'], 2)
+        norm_key = 'shader resource specialization failed: atomic image descriptor N uses unsupported format N'
+        self.assertEqual(by_reason[norm_key]['holes'], 2)
+        joined = '\n'.join(sections(out)['HOLES'])
+        self.assertIn('descriptor N uses unsupported format N', joined)
+
     def test_store(self):
         text = ('@@T 60\n'
                 'Shader cache: loaded per stage: programs with modules vs=1 ps=2 cs=3 gs=0 ls=0 hs=0 tes=0; '
@@ -155,7 +279,29 @@ class TriageTests(unittest.TestCase):
         self.assertEqual(s['failed_programs'], 1)
         self.assertEqual(s['last_store'], ['[store] written=1 pending=0 failed=0', 61.0])
         self.assertEqual((s['lookups']['hit'], s['lookups']['miss'], s['lookups']['t']), (80, 20, 60.0))
-        self.assertIn('lookups: hit=80 miss=20', '\n'.join(sections(out)['STORE']))
+        self.assertIn('lookups: total=100 hit=80 distinct-miss=? miss-key=? miss-absent=?',
+                      '\n'.join(sections(out)['STORE']))
+
+    def test_store_lookups_distinct_miss_and_miss_groups(self):
+        text = ('@@T 60\n'
+                '[store] lookups=6126448 hit=5198309 miss-key=798238 miss-absent=129815 distinct-miss=1381\n'
+                '@@T 61\n[store] miss #4 key stage=PS hash=0xaaaa000000000001: nearest module '
+                '0xaaaa000000000002 of 3: samplers count 7 vs 10 (+2 more)\n'
+                '@@T 62\n[store] miss #5 key stage=PS hash=0xaaaa000000000005: nearest module '
+                '0xaaaa000000000002 of 3: samplers count 8 vs 11 (+2 more)\n'
+                '@@T 63\n[store] written=1409 pending=0 failed=0 flushed=1409\n')
+        out, data = run_triage(text)
+        s = data['findings']['store']
+        self.assertEqual((s['lookups']['lookups'], s['lookups']['hit'], s['lookups']['distinct-miss']),
+                         (6126448, 5198309, 1381))
+        self.assertEqual((s['lookups']['miss-key'], s['lookups']['miss-absent']), (798238, 129815))
+        self.assertEqual(len(s['miss_fields']), 1)
+        self.assertEqual((s['miss_fields'][0]['field'], s['miss_fields'][0]['count'],
+                          s['miss_fields'][0]['shaders']), ('samplers count', 2, 2))
+        joined = '\n'.join(sections(out)['STORE'])
+        self.assertIn('distinct-miss=1381', joined)
+        self.assertIn('miss field samplers count: 2 lines, 2 distinct shaders', joined)
+        self.assertIn('distinct miss', data['verdict'][0])
 
     def test_store_without_lookups(self):
         out, data = run_triage('@@T 1\n[store] written=0 pending=0 failed=0\n')
@@ -193,25 +339,62 @@ class TriageTests(unittest.TestCase):
     def test_absent_sections_say_no_data(self):
         out, data = run_triage('@@T 1\nnothing interesting here\n')
         found = sections(out)
-        for name in ('TIMELINE', 'STALLS', 'QUEUES', 'SHADERS', 'ASYNC', 'STORE', 'REJECTIONS', 'LEDGER'):
+        for name in ALL_SECTIONS:
             self.assertEqual(found[name], ['no data'], name)
         self.assertIn('  no data', out.split('VERDICT:\n', 1)[1].split('FINDINGS:', 1)[0])
         self.assertEqual(out.strip().splitlines()[-1], 'no fatal block')
+        self.assertEqual(data['parse_errors'], 0)
+
+    def test_one_section_failure_does_not_hide_the_rest(self):
+        with open(TRIAGE) as f:
+            source = f.read()
+        broken = source.replace('def lines_parked():\n',
+                                "def lines_parked():\n    raise ValueError('boom')\n", 1)
+        self.assertNotEqual(broken, source)
+        with tempfile.TemporaryDirectory() as d:
+            script = os.path.join(d, 'broken_triage.py')
+            log = os.path.join(d, 'snippet.log')
+            with open(script, 'w') as f:
+                f.write(broken)
+            with open(log, 'w') as f:
+                f.write('@@T 1\n[park] 2 guest threads parked\n\t flip_arg = 1\n'
+                        '[store] written=0 pending=0 failed=0\n')
+            p = subprocess.run([sys.executable, script, log], stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, universal_newlines=True)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            found = sections(p.stdout)
+            self.assertEqual(found['PARKED'], ['section failed: boom'])
+            self.assertTrue(found['STORE'])
+            self.assertTrue(found['TIMELINE'])
+            self.assertIn('VERDICT:', p.stdout)
+
+    def test_garbage_lines_never_crash(self):
+        with tempfile.TemporaryDirectory() as d:
+            log = os.path.join(d, 'snippet.log')
+            with open(log, 'wb') as f:
+                f.write(b'@@T 1\n\xff\xfe random \x00 bytes\n[store] written=x pending=? failed=0\n'
+                        b'!!! \x00\x01 ???\n\t flip_arg = 1\n')
+            out, data = run_triage_path(log, os.path.join(d, 'triage.json'))
+            found = sections(out)
+            for name in ALL_SECTIONS:
+                self.assertTrue(found[name], name)
+            self.assertTrue(data['verdict'])
 
     def test_run_ender_is_last(self):
         out, _ = run_triage('@@T 1\n--- Error ---\nsome error\n')
         self.assertIn('[RUN-ENDER]\nFATAL:\n  --- Error ---', out)
-        self.assertEqual(re.findall(r'^\[([A-Z-]+)\]$', out, re.M)[-1], 'RUN-ENDER')
+        self.assertEqual(re.findall(r'^\[([A-Z][A-Z -]*)\]$', out, re.M)[-1], 'RUN-ENDER')
 
     def test_excerpt(self):
         out, data = run_triage_path(EXCERPT, os.path.join(tempfile.mkdtemp(), 'triage.json'))
         with open(EXCERPT, 'rb') as f:
             self.assertEqual(sum(1 for _ in f), 2000)
-        for name in ('timeline', 'stalls', 'queues', 'shaders', 'async', 'store', 'rejections', 'ledger'):
-            self.assertTrue(data['findings'][name], name)
+        for name in ('timeline', 'stalls', 'queues', 'shaders', 'async', 'build_rate',
+                     'parked', 'holes', 'store', 'rejections', 'ledger'):
+            self.assertIn(name, data['findings'], name)
         self.assertTrue(data['verdict'])
         self.assertEqual(len(data['verdict']), 6)
-        for name in ('TIMELINE', 'STALLS', 'QUEUES', 'SHADERS', 'ASYNC', 'STORE', 'REJECTIONS', 'LEDGER'):
+        for name in ALL_SECTIONS:
             self.assertTrue(sections(out)[name], name)
         with open(EXCERPT, 'rb') as f:
             for line in f:

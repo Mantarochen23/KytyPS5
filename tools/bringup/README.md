@@ -79,26 +79,44 @@ The script refuses to start while another sandboxed run holds the GPU.
     python3 tools/bringup/triage.py <run>/kyty.log --json <run>/triage.json > <run>/triage.txt
     python3 -m unittest discover -s tools/bringup/tests
 
-`triage.txt` starts with a numbered `VERDICT` (the longest stall and what it waited on, the largest frame
-gap, the slowest shader, repeated translations, store misses, the longest memory wait), then a `FINDINGS`
-block with one section per subject:
+`triage.txt` starts with a numbered `VERDICT`. It leads with the frame timeline after the loading phase:
+the first frame gap >= 20 s ends loading, and every frame presented after it is listed with its time and
+the gap before it. The rest of the verdict is the longest stall and what it waited on, the largest frame
+gap, the slowest shader, repeated translations, store distinct misses and the longest memory wait. Then
+comes a `FINDINGS` block with one section per subject:
 
-- `TIMELINE`: frames per 10 s, last frame, every gap >= 3 s (start, length).
+- `TIMELINE`: frames per 10 s, last frame, every gap >= 3 s (start, length), the first gap >= 20 s and the
+  frames after it.
 - `STALLS`: for each no-frame gap, the render-thread phase sequence with seconds and the shader it waited
   on per phase.
 - `QUEUES`: per queue, the longest single-shader suspension and which shader; every memory wait >= 5 s with
   address, compare, wanted/seen values, polls and time.
 - `SHADERS`: translation outcomes per stage, the 20 slowest by summed phase `elapsed_ms` with their slowest
   phase, shaders translated more than once, and render-thread build totals/worst from `Async STALL:`.
+  A "translated N times" entry counts real builds only (`outcome=emitted*`); `served from store` lines are
+  reported as outcomes but are not translations.
 - `ASYNC`: peak queued/waiting, min and median jobs/s while queued is non-zero, worst pump, final stages.
-- `STORE`: cache load numbers, the last `[store]` line, and `lookups` hit/miss (absent today: `no data`).
+- `BUILD RATE`: one row per 60 s window with modules finished (CS `translation end` emitted), the median
+  interval between them and the peak workers busy from `Async:`. A `serial build` is flagged when the median
+  interval is over 1 s with at most one worker busy for five consecutive windows. With `[build]` lines it
+  also totals translate/emit/module/pipeline ms and lists the ten largest builds by total. These lines are
+  optional; their absence leaves only the summary.
+- `PARKED`: each `[park] thread .. parked for good` line as thread id, pc as module+offset and time, plus the
+  `[park] N guest threads parked` summaries.
+- `HOLES`: dispatch skips and failed stages grouped by failure text with digits normalised, with the count
+  of holes and of distinct shaders in each group.
+- `STORE`: cache load numbers, the last `[store]` line, `lookups` total/hit/distinct-miss (plus the
+  miss-key/miss-absent split), and `[store] miss #..` lines grouped by the field that differed.
 - `REJECTIONS`: failure classes as before, plus the count of `!!! SHADER SKIP` lines.
 - `LEDGER`: registered/used per stage and minimum lead time from `[shader-reg]`.
 - `RUN-ENDER`: the fatal block, unchanged, last.
 
 A section with no source lines prints `no data`, not zeros. The same numbers are in `triage.json` under
-`verdict` and `findings`. Times are the `@@T` seconds in the run. `tools/bringup/tests/` holds hand-written
-snippets per section, the absent case, and a 2,000-line masked excerpt used as a regression run.
+`verdict` and `findings`. Times are the `@@T` seconds in the run. Parsing is defensive: a line that cannot
+be parsed is skipped (counted as `parse_errors` in the JSON), and each section is isolated so a failure
+prints `section failed: <error>` in that section while the others still appear; the exit code stays 0.
+`tools/bringup/tests/` holds hand-written snippets per section, the absent case, the section-isolation and
+garbage-line cases, and a 2,000-line masked excerpt used as a regression run.
 
 ## The loop
 
