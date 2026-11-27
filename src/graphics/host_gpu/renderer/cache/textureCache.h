@@ -7,7 +7,6 @@
 #include "common/slotVector.h"
 #include "common/smallVector.h"
 #include "graphics/host_gpu/pageManager.h"
-#include "graphics/host_gpu/rangeSet.h"
 #include "graphics/host_gpu/regionManager.h"
 #include "graphics/host_gpu/renderer/cache/multiLevelPageTable.h"
 #include "graphics/host_gpu/renderer/cache/resolveStamp.h"
@@ -81,7 +80,6 @@ public:
 	                                        uint32_t packed_clear);
 	void               InvalidateMemory(uint64_t address, uint64_t size);
 	void               InvalidateMemoryFromGPU(uint64_t address, uint64_t size);
-	void               InvalidateMemoryFromGPU(const RangeSet& ranges);
 	// A content change can alter image discovery even when no registered image overlaps it.
 	void TouchResolutionGeneration(uint64_t address, uint64_t size);
 	// Writes a copy into whole levels of one layer of a GPU-written image straight into it, and
@@ -302,9 +300,6 @@ private:
 	void                      TouchImage(Image& image);
 	void                      TouchResolutionGenerationLocked(
 	    uint64_t address, uint64_t size,
-	    Common::FrameCost::Counter site = Common::FrameCost::Counter::CacheBumpOther);
-	void                      TouchResolutionGenerationLocked(
-	    const RangeSet& ranges,
 	    Common::FrameCost::Counter site = Common::FrameCost::Counter::CacheBumpOther);
 	// Returns the ranges whose discovery state changed after `generation`, together with one
 	// coherent generation that covers the returned records. ImageHeap is the sole consumer.

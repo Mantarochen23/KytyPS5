@@ -849,11 +849,10 @@ void RenderExecutor::FindBuffers(std::span<PreparedBindings* const> stages) {
 					}
 				}
 			}
-			const auto& candidates = *table.candidates;
 			auto found = std::ranges::find_if(m_runtime_buffer_tables, [&](const auto& entry) {
 				return entry.module_id == prepared.runtime->module->id &&
 				       entry.root_resource == table.root_resource &&
-				       entry.candidate_key == candidates.key && entry.reads_key == reads_key;
+				       entry.candidate_key == table.candidate_key && entry.reads_key == reads_key;
 			});
 			if (found == m_runtime_buffer_tables.end()) {
 				constexpr size_t MaxCachedRuntimeTables = 64;
@@ -869,7 +868,7 @@ void RenderExecutor::FindBuffers(std::span<PreparedBindings* const> stages) {
 				}
 				found = m_runtime_buffer_tables.emplace(
 				    m_runtime_buffer_tables.end(), RuntimeBufferTableCacheEntry {
-					                                       .candidate_key = candidates.key,
+				                                       .candidate_key = table.candidate_key,
 				                                       .module_id = prepared.runtime->module->id,
 				                                       .root_resource = table.root_resource,
 				                                       .reads_key = reads_key,
@@ -882,13 +881,14 @@ void RenderExecutor::FindBuffers(std::span<PreparedBindings* const> stages) {
 			if (rebuild) {
 				Common::FrameCost::Add(Common::FrameCost::Counter::TableRebuilds);
 				Common::FrameCost::Add(Common::FrameCost::Counter::TableCandidates,
-				                       candidates.entries.size());
-				EXIT_IF(candidates.class_index.size() != candidates.entries.size());
-				std::vector<uint32_t> table_words(candidates.entries.size() * 4u, 0u);
+				                       table.entries.size());
+				EXIT_IF(table.class_index.size() != table.entries.size());
+				std::vector<uint32_t> table_words(table.entries.size() * 4u, 0u);
 				std::vector<PreparedBindings::BufferSource> sources;
-				sources.reserve(candidates.entries.size());
+				sources.reserve(table.entries.size());
 				RangeSet              candidate_ranges;
-				for (const auto& value: candidates.entries) {
+				RangeSet              backing_ranges;
+				for (const auto& value: table.entries) {
 					const auto descriptor = DecodeNativeDescriptor<ShaderBufferResource>(value);
 					const auto address    = descriptor.Base48();
 					auto dependency_size = ShaderRecompiler::IR::BufferBindingSize(metadata, descriptor);
@@ -902,13 +902,9 @@ void RenderExecutor::FindBuffers(std::span<PreparedBindings* const> stages) {
 				}
 				// Registered before anything is resolved, and the generation read here: a map, unmap
 				// or buffer replacement from now on, on any thread, leaves this build stale.
-				RangeSet write_ranges;
-				if (metadata.written) {
-					write_ranges = m_context.IntersectMappedRanges(candidate_ranges);
-				}
 				auto state = cache.RegisterRuntimeTable(std::move(candidate_ranges));
 				const auto build_generation = state->BackingGeneration();
-				for (const auto& value: candidates.entries) {
+				for (const auto& value: table.entries) {
 					sources.push_back(resolve_source(metadata, value, true));
 				}
 				// Discovery can merge earlier buffer owners. Obtain only after the whole candidate set has
@@ -921,6 +917,7 @@ void RenderExecutor::FindBuffers(std::span<PreparedBindings* const> stages) {
 					if (source.address == 0 || source.size == 0) continue;
 					auto [buf, off] = cache.ObtainBuffer(source.address, source.size, false,
 					                                     texel_sync, source.id, false);
+					backing_ranges.Add(buf->CpuAddress(), buf->Size());
 					if (texel_sync && !aliased_counted &&
 					    m_context.GetTextureCache().FindImageFromRange(source.address, source.size)) {
 						aliased_counted = true;
@@ -931,7 +928,7 @@ void RenderExecutor::FindBuffers(std::span<PreparedBindings* const> stages) {
 					const uint32_t byte_offset = static_cast<uint32_t>(host_bda & 3u);
 					const uint32_t byte_size = static_cast<uint32_t>(
 					    std::min<uint64_t>(source.size + byte_offset, UINT32_MAX));
-					const uint32_t cls = candidates.class_index[j] & 0x00ffffffu;
+					const uint32_t cls = table.class_index[j] & 0x00ffffffu;
 					table_words[j * 4u + 0u] = static_cast<uint32_t>(aligned_bda);
 					table_words[j * 4u + 1u] = static_cast<uint32_t>(aligned_bda >> 32u);
 					table_words[j * 4u + 2u] = byte_size;
@@ -945,7 +942,7 @@ void RenderExecutor::FindBuffers(std::span<PreparedBindings* const> stages) {
 				std::memcpy(replacement->Mapped().data(), table_words.data(),
 				            table_words.size() * sizeof(uint32_t));
 				replacement->Flush(0, table_words.size() * sizeof(uint32_t));
-				state->SetWriteRanges(std::move(write_ranges));
+				state->SetWriteRanges(m_context.IntersectMappedRanges(backing_ranges));
 				auto retired = std::move(found->buffer);
 				found->buffer = std::move(replacement);
 				found->state  = std::move(state);

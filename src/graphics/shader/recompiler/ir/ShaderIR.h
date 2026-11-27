@@ -765,12 +765,12 @@ struct ScanCacheEntry {
 	std::array<uint32_t, 8> root             = {};
 	uint32_t                root_dword_count = 0;
 	uint64_t                content_hash     = 0;
-	std::shared_ptr<MemoryChangeStamp> content_stamp;
 	std::vector<uint32_t>   children;
 	std::vector<uint32_t>   mapping;
 	// Runtime-table scans cache all normalized candidates separately from the class-only children.
 	// Empty for an ordinary descriptor table.
-	std::shared_ptr<RuntimeBufferTableCandidates> runtime_candidates;
+	std::vector<uint32_t>   runtime_candidates;
+	std::vector<uint32_t>   runtime_classes;
 
 	// Everything except the table bytes; a match with other bytes is a stale entry to replace.
 	[[nodiscard]] bool SameInputs(const ScanCacheEntry& other) const {

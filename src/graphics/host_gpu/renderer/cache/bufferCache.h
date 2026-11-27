@@ -95,11 +95,6 @@ public:
 			return true;
 		}
 		[[nodiscard]] const RangeSet& WriteRanges() const noexcept { return m_write_ranges; }
-		bool BeginMark(uint64_t command_tick) noexcept {
-			if (m_write_ranges.Empty() || m_last_mark_tick == command_tick) return false;
-			m_last_mark_tick = command_tick;
-			return true;
-		}
 		// Render thread only; set once the backing buffers are known, after registration.
 		void SetWriteRanges(RangeSet ranges) { m_write_ranges = std::move(ranges); }
 
@@ -107,7 +102,6 @@ public:
 		RangeSet             m_dependencies;
 		RangeSet             m_write_ranges;
 		std::atomic<uint64_t> m_backing_generation {1};
-		uint64_t              m_last_mark_tick = UINT64_MAX; // Render thread only.
 	};
 
 	class BdaTableValidator {

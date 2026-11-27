@@ -935,9 +935,7 @@ void BufferCache::InvalidateRuntimeTables(uint64_t vaddr, uint64_t size) {
 }
 
 void BufferCache::MarkRuntimeTableWritten(const std::shared_ptr<RuntimeTableState>& state) {
-	if (state == nullptr || !state->BeginMark(m_scheduler.CurrentTick())) return;
-	Common::FrameCost::Add(Common::FrameCost::Counter::TableMarks);
-	Common::FrameCost::Add(Common::FrameCost::Counter::TableMarkRanges);
+	if (state == nullptr) return;
 	state->WriteRanges().ForEach([&](uint64_t begin, uint64_t end) {
 		const auto size = end - begin;
 		// FindBuffers/PrepareBda has already uploaded CPU-owned bytes. This transition only
@@ -947,11 +945,8 @@ void BufferCache::MarkRuntimeTableWritten(const std::shared_ptr<RuntimeTableStat
 		m_gpu_modified_ranges.Add(begin, size);
 		NoteWrite(begin, size);
 		ForgetColorMetadataChecks(begin, size);
+		m_texture_cache.InvalidateMemoryFromGPU(begin, size);
 	});
-	// Resolve all real image overlaps under one cache lock and one generation bump. The exact
-	// candidate ranges, rather than their much wider backing buffers, keep unrelated descriptor
-	// tables and image-heap entries out of GPU ownership.
-	m_texture_cache.InvalidateMemoryFromGPU(state->WriteRanges());
 }
 
 bool BufferCache::IsRegionGpuModified(uint64_t vaddr, uint64_t size) {

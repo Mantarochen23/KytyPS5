@@ -668,7 +668,7 @@ static std::vector<SkipTaint::Use> ComputeBufferUses(const ShaderStageRuntime& s
 		if (table.root_resource >= metadata.size()) continue;
 		const auto& meta = metadata[table.root_resource];
 		if (!meta.written) continue;
-		for (const auto& entry: table.candidates->entries) {
+		for (const auto& entry: table.entries) {
 			const auto descriptor = DecodeNativeDescriptor<ShaderBufferResource>(entry);
 			auto       size       = ShaderRecompiler::IR::BufferBindingSize(meta, descriptor);
 			if (descriptor.NumRecords() == UINT32_MAX) size = std::min<uint64_t>(size, 256u << 20u);

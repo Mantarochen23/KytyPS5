@@ -22,7 +22,7 @@ struct PageStamp {
 // Says whether guest memory a memo entry read has changed since, without reading it. A stamp stays
 // current until a write is seen over its page (CPU fault, host I/O into the page, unmap); bytes only
 // the GPU holds are reported by GpuHolds, since reading them downloads new content.
-class ReadStamps: public ShaderRecompiler::IR::MemoryChangeSource {
+class ReadStamps {
 public:
 	// Watches the pages of the range and appends their stamps. False, with nothing appended, when a
 	// page cannot be proven tracked (unmapped, image-backed, written too often).
@@ -31,11 +31,6 @@ public:
 	virtual bool Unchanged(std::span<const PageStamp> stamps) = 0;
 	// True when the range holds GPU-written bytes that have not been downloaded.
 	virtual bool GpuHolds(uint64_t address, uint64_t size) = 0;
-	// General memo implementations need not expose an opaque stamp. The renderer's guest watch does,
-	// so large runtime tables can retain their enumeration outside the general memo.
-	std::shared_ptr<ShaderRecompiler::IR::MemoryChangeStamp> Track(uint64_t, uint64_t) override {
-		return {};
-	}
 
 protected:
 	~ReadStamps() = default;

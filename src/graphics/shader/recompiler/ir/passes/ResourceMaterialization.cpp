@@ -752,24 +752,22 @@ struct DescriptorValueHash {
 };
 
 void SetRuntimeTableKey(ResourceSnapshot::IndirectBufferTable& table) {
-	auto& candidates = *table.candidates;
-	if (candidates.key != std::array<uint64_t, 2> {}) return;
-	XXH3_state_t hash_state;
-	XXH3_128bits_reset(&hash_state);
-	for (size_t i = 0; i < candidates.entries.size(); ++i) {
-		const auto& entry = candidates.entries[i];
+	std::vector<uint32_t> words;
+	words.reserve(table.entries.size() * 10u);
+	for (size_t i = 0; i < table.entries.size(); ++i) {
+		const auto& entry = table.entries[i];
 		ShaderBufferResource descriptor;
 		if (DecodeBufferDescriptor(entry, descriptor) && descriptor.Base48() != 0 &&
 		    descriptor.NumRecords() != 0) {
-			candidates.has_live_range = true;
+			table.has_live_range = true;
 		}
-		XXH3_128bits_update(&hash_state, entry.dwords.data(), entry.dwords.size() * sizeof(uint32_t));
-		XXH3_128bits_update(&hash_state, &entry.dword_count, sizeof(entry.dword_count));
-		const auto cls = i < candidates.class_index.size() ? candidates.class_index[i] : 0u;
-		XXH3_128bits_update(&hash_state, &cls, sizeof(cls));
+		words.insert(words.end(), entry.dwords.begin(), entry.dwords.end());
+		words.push_back(entry.dword_count);
+		const auto cls = i < table.class_index.size() ? table.class_index[i] : 0u;
+		words.push_back(cls);
 	}
-	const auto key = XXH3_128bits_digest(&hash_state);
-	candidates.key = {key.low64, key.high64};
+	const auto key = XXH3_128bits(words.data(), words.size() * sizeof(uint32_t));
+	table.candidate_key = {key.low64, key.high64};
 }
 
 std::array<uint32_t, 4> BufferClassKeyOf(const DescriptorValue& value, const BufferResource& base) {
@@ -853,25 +851,24 @@ bool MaterializeIndirectDescriptor(const ResourcePlan& program, uint32_t source_
 				// Promote to a runtime-indexed BDA table: keep all existing ordinals (1..K) intact
 				// while collapsing specialization children down to one exemplar per buffer class.
 				runtime_table_mode = true;
-				runtime_table.candidates->entries.assign(
+				runtime_table.entries.assign(
 				    descriptors.begin() + static_cast<std::ptrdiff_t>(children_begin),
 				    descriptors.end());
 				descriptors.resize(children_begin);
 				specializations.resize(children_begin);
-				runtime_table.candidates->class_index.reserve(
-				    runtime_table.candidates->entries.size() + 1u);
-				for (const auto& existing: runtime_table.candidates->entries) {
+				runtime_table.class_index.reserve(runtime_table.entries.size() + 1u);
+				for (const auto& existing: runtime_table.entries) {
 					const auto cls = intern_runtime_class(existing);
 					if (cls == UINT32_MAX) return UINT32_MAX;
-					runtime_table.candidates->class_index.push_back(cls);
+					runtime_table.class_index.push_back(cls);
 				}
 			}
 			if (runtime_table_mode) {
 				const auto cls = intern_runtime_class(candidate);
 				if (cls == UINT32_MAX) return UINT32_MAX;
-				runtime_table.candidates->entries.push_back(candidate);
-				runtime_table.candidates->class_index.push_back(cls);
-				const auto ordinal = static_cast<uint32_t>(runtime_table.candidates->entries.size());
+				runtime_table.entries.push_back(candidate);
+				runtime_table.class_index.push_back(cls);
+				const auto ordinal = static_cast<uint32_t>(runtime_table.entries.size());
 				interned.emplace(candidate, ordinal);
 				return ordinal;
 			}
@@ -1050,19 +1047,20 @@ bool MaterializeIndirectDescriptor(const ResourcePlan& program, uint32_t source_
 				if (!ReadScalarTable(table_base, table_size, 0u, runtime, heap_words))
 					return read_failed("image heap read", 0u, 0u, table_base, 0u, heap_words.size() * sizeof(uint32_t));
 			}
-			// Large flat tables are read once instead of one guest-memory call per row. Build the
-			// geometry key before that read: a current host change stamp can replay the prior scan
-			// without touching the table bytes at all.
-			const bool bulk_candidate = !image_heap && pointer == nullptr && count > 16u &&
-			                            table_size >= 4u && table_size <= (uint64_t {64} << 20u);
+			// Large flat tables are read once instead of one guest-memory call per row.
 			bool bulk_table = false;
+			if (!image_heap && pointer == nullptr && count > 16u && table_size >= 4u &&
+			    table_size <= (uint64_t {64} << 20u)) {
+				heap_words.resize(table_size / 4u);
+				bulk_table = ReadScalarTable(table_base, table_size, 0u, runtime, heap_words);
+			}
 			const auto mapping_offset = snapshot.flattened_srt.size();
 			// The scan of an unchanged table gives the same candidates and mapping again: every
 			// input (the table geometry, the root descriptor and the bytes) is part of the key.
 			ScanCacheEntry  cache_key;
 			ScanCacheEntry* cache_slot = nullptr;
 			const bool      cache_eligible =
-			    allow_scan_cache && bulk_candidate && descriptors.size() == children_begin;
+			    allow_scan_cache && bulk_table && descriptors.size() == children_begin;
 			bool cache_hit = false;
 			if (cache_eligible) {
 				cache_key.source_index     = source_index;
@@ -1076,26 +1074,14 @@ bool MaterializeIndirectDescriptor(const ResourcePlan& program, uint32_t source_
 				cache_key.read_dwords      = read_dwords;
 				cache_key.root             = descriptors[resource_index].dwords;
 				cache_key.root_dword_count = descriptors[resource_index].dword_count;
+				cache_key.content_hash =
+				    XXH3_64bits(heap_words.data(), heap_words.size() * sizeof(uint32_t));
 				for (auto& entry: program.scan_cache) {
 					if (entry.SameInputs(cache_key)) {
 						cache_slot = &entry;
-						cache_hit  = entry.content_stamp != nullptr && entry.content_stamp->Unchanged();
+						cache_hit  = entry.content_hash == cache_key.content_hash;
 						break;
 					}
-				}
-				if (!cache_hit && runtime.memory_changes != nullptr) {
-					// Arm before reading, so a concurrent write makes the replacement stamp stale.
-					cache_key.content_stamp = runtime.memory_changes->Track(table_base, table_size);
-				}
-			}
-			if (bulk_candidate && !cache_hit) {
-				heap_words.resize(table_size / 4u);
-				bulk_table = ReadScalarTable(table_base, table_size, 0u, runtime, heap_words);
-				if (cache_eligible && bulk_table && cache_key.content_stamp == nullptr) {
-					cache_key.content_hash =
-					    XXH3_64bits(heap_words.data(), heap_words.size() * sizeof(uint32_t));
-					cache_hit = cache_slot != nullptr &&
-					            cache_slot->content_hash == cache_key.content_hash;
 				}
 			}
 			if (cache_hit) {
@@ -1114,9 +1100,18 @@ bool MaterializeIndirectDescriptor(const ResourcePlan& program, uint32_t source_
 				snapshot.flattened_srt.insert(snapshot.flattened_srt.end(),
 				                              cache_slot->mapping.begin(),
 				                              cache_slot->mapping.end());
-				if (cache_slot->runtime_candidates != nullptr) {
+				if (!cache_slot->runtime_candidates.empty()) {
 					runtime_table_mode = true;
-					runtime_table.candidates = cache_slot->runtime_candidates;
+					const auto& values = cache_slot->runtime_candidates;
+					for (size_t at = 0; at + ScanCacheEntry::ChildWords <= values.size();
+					     at += ScanCacheEntry::ChildWords) {
+						DescriptorValue value;
+						std::copy_n(values.begin() + static_cast<std::ptrdiff_t>(at),
+						            value.dwords.size(), value.dwords.begin());
+						value.dword_count = values[at + value.dwords.size()];
+						runtime_table.entries.push_back(value);
+					}
+					runtime_table.class_index = cache_slot->runtime_classes;
 				}
 			} else {
 				snapshot.flattened_srt.resize(mapping_offset + 2u, 0u);
@@ -1172,9 +1167,6 @@ bool MaterializeIndirectDescriptor(const ResourcePlan& program, uint32_t source_
 					snapshot.flattened_srt[mapping_offset + 1u + mapping_word] = ordinal;
 				}
 			}
-			if (!cache_hit && runtime_table_mode) {
-				Common::FrameCost::Add(Common::FrameCost::Counter::TableEnumerations);
-			}
 			if (cache_eligible && !cache_hit) {
 				if (cache_slot == nullptr) {
 					if (program.scan_cache.size() >= ScanCacheEntry::MaxEntries)
@@ -1192,7 +1184,12 @@ bool MaterializeIndirectDescriptor(const ResourcePlan& program, uint32_t source_
 				                             static_cast<std::ptrdiff_t>(mapping_offset),
 				                         snapshot.flattened_srt.end());
 				if (runtime_table_mode) {
-					cache_key.runtime_candidates = runtime_table.candidates;
+					for (const auto& value: runtime_table.entries) {
+						cache_key.runtime_candidates.insert(cache_key.runtime_candidates.end(),
+						                                    value.dwords.begin(), value.dwords.end());
+						cache_key.runtime_candidates.push_back(value.dword_count);
+					}
+					cache_key.runtime_classes = runtime_table.class_index;
 				}
 				*cache_slot = std::move(cache_key);
 			}
@@ -1207,8 +1204,7 @@ bool MaterializeIndirectDescriptor(const ResourcePlan& program, uint32_t source_
 				root.indirect_search_iterations = 0u;
 				if (runtime_table_mode) {
 					const uint32_t header[3] = {
-					    0u, 0u,
-					    static_cast<uint32_t>(runtime_table.candidates->entries.size() + 1u)};
+					    0u, 0u, static_cast<uint32_t>(runtime_table.entries.size() + 1u)};
 					snapshot.flattened_srt.insert(
 					    snapshot.flattened_srt.begin() + static_cast<std::ptrdiff_t>(mapping_offset),
 					    std::begin(header), std::end(header));
@@ -1316,7 +1312,7 @@ bool MaterializeIndirectDescriptor(const ResourcePlan& program, uint32_t source_
 		root.indirect_search_iterations = std::bit_width(key_count);
 		if (runtime_table_mode) {
 			const uint32_t header[3] = {
-			    0u, 0u, static_cast<uint32_t>(runtime_table.candidates->entries.size() + 1u)};
+			    0u, 0u, static_cast<uint32_t>(runtime_table.entries.size() + 1u)};
 			snapshot.flattened_srt.insert(
 			    snapshot.flattened_srt.begin() + static_cast<std::ptrdiff_t>(mapping_offset),
 			    std::begin(header), std::end(header));
@@ -1445,14 +1441,12 @@ bool SortCanonicalChildren(std::vector<Spec>& specs, std::vector<DescriptorValue
 			}
 			for (auto& table: *runtime_tables) {
 				if (table.root_resource != root) continue;
-				if (table.candidates->canonicalized) continue;
-				for (auto& cls: table.candidates->class_index) {
+				for (auto& cls: table.class_index) {
 					if (cls >= new_of_old.size()) {
 						return SpecializationFail("canonical order: runtime class ordinal out of range");
 					}
 					cls = new_of_old[cls];
 				}
-				table.candidates->canonicalized = true;
 			}
 		} else if (!RemapOrdinals(flat, specs[root].indirect_mapping_offset,
 		                          specs[root].indirect_search_iterations, heap, new_of_old)) {
@@ -2429,7 +2423,7 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 		for (const auto& table: snapshot.indirect_buffer_tables) {
 			const auto& resource = program.info.buffers[table.root_resource];
 			if (!resource.written) continue;
-			for (const auto& entry: table.candidates->entries) {
+			for (const auto& entry: table.entries) {
 				if (BufferWriteOverlaps(resource, entry, reads))
 					return SpecializationFail("buffer write overlaps its descriptor selection");
 			}

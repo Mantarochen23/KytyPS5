@@ -46,7 +46,6 @@ struct SrtRuntime {
 	std::span<const uint32_t> workgroup_counts;
 	uint64_t                  indirect_args_address = 0;
 	ImageHeapSource*          image_heap            = nullptr;
-	MemoryChangeSource*       memory_changes        = nullptr;
 	// Also derive ResourceSnapshot::legacy_hash (diagnostics of the canonical-resources port).
 	bool                      legacy_hash           = false;
 };

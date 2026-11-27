@@ -3,7 +3,6 @@
 
 #include <array>
 #include <cstdint>
-#include <memory>
 #include <utility>
 #include <vector>
 
@@ -16,31 +15,6 @@ struct DescriptorValue {
 	bool operator==(const DescriptorValue& other) const {
 		return dword_count == other.dword_count && dwords == other.dwords;
 	}
-};
-
-// Immutable after one materialization finishes. The scan cache, materialization memo and active
-// snapshot share this payload, so replaying a table does not allocate or copy thousands of values.
-struct RuntimeBufferTableCandidates {
-	std::array<uint64_t, 2>      key {};
-	bool                         has_live_range = false;
-	bool                         canonicalized = false;
-	std::vector<DescriptorValue> entries;
-	std::vector<uint32_t>        class_index;
-};
-
-// Opaque watch over guest memory used while materializing resources. A valid stamp proves the
-// watched bytes are unchanged without reading or hashing them again.
-class MemoryChangeStamp {
-public:
-	virtual ~MemoryChangeStamp() = default;
-	[[nodiscard]] virtual bool Unchanged() const = 0;
-};
-
-class MemoryChangeSource {
-public:
-	virtual ~MemoryChangeSource() = default;
-	[[nodiscard]] virtual std::shared_ptr<MemoryChangeStamp> Track(uint64_t address,
-	                                                              uint64_t size) = 0;
 };
 
 enum class UniformFillKind { None, Buffer, Image };
@@ -66,8 +40,10 @@ struct ResourceSnapshot {
 		uint32_t                     header_word = 0;
 		// Address-free identity of the normalized candidates and their specialization classes.
 		// The renderer uses both halves, plus the module/root identity, as its persistent BDA-table key.
-			std::shared_ptr<RuntimeBufferTableCandidates> candidates =
-			    std::make_shared<RuntimeBufferTableCandidates>();
+		std::array<uint64_t, 2>      candidate_key {};
+		bool                         has_live_range = false;
+		std::vector<DescriptorValue> entries;
+		std::vector<uint32_t>        class_index;
 	};
 
 	std::vector<DescriptorValue>     buffers;
