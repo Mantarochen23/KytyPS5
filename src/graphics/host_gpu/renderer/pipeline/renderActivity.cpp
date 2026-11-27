@@ -98,11 +98,13 @@ void RenderStallReporter::Run() {
 				const auto state = hold.Read(raw_ns);
 				Log::WriteToConsoleAndLog(fmt::format(
 				    "[clock-hold] ended after {:.1f} s ({}); total held {:.1f} s in {} holds; the "
-				    "guest clock continues from where it stopped\n",
+				    "guest clock continues from where it stopped; guest time reads that returned "
+				    "an unchanged value (zero deltas) so far: {}\n",
 				    static_cast<double>(ended_ns) / 1e9,
 				    progressed ? "a frame was recorded"
 				        : "the render thread is no longer busy with shaders",
-				    static_cast<double>(state.completed_ns) / 1e9, state.holds));
+				    static_cast<double>(state.completed_ns) / 1e9, state.holds,
+				    hold.RepeatedReads()));
 			}
 		}
 		if (m_report_parked && Common::GuestPark::Global().Count() != 0 &&

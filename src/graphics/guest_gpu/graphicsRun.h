@@ -61,6 +61,8 @@ private:
 		bool                      blocked         = false;
 		bool                      prefetched      = false;
 		uint64_t                  flip_request_id = 0;
+		// The guest thread that submitted the commands (for the report of a refused dispatch).
+		DispatchSubmitter         submitter;
 	};
 
 	void              Enqueue(Submission submission);
