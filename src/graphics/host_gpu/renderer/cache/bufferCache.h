@@ -95,9 +95,15 @@ public:
 			return true;
 		}
 		[[nodiscard]] const RangeSet& WriteRanges() const noexcept { return m_write_ranges; }
-		bool BeginMark(uint64_t command_tick) noexcept {
-			if (m_write_ranges.Empty() || m_last_mark_tick == command_tick) return false;
-			m_last_mark_tick = command_tick;
+		// One mark per command buffer, unless GPU ownership was released (a readback, even one
+		// queued in this same command buffer) since the last mark.
+		bool BeginMark(uint64_t command_tick, uint64_t release_epoch) noexcept {
+			if (m_write_ranges.Empty() ||
+			    (m_last_mark_tick == command_tick && m_last_mark_epoch == release_epoch)) {
+				return false;
+			}
+			m_last_mark_tick  = command_tick;
+			m_last_mark_epoch = release_epoch;
 			return true;
 		}
 		// Render thread only; set once the backing buffers are known, after registration.
@@ -108,6 +114,7 @@ public:
 		RangeSet             m_write_ranges;
 		std::atomic<uint64_t> m_backing_generation {1};
 		uint64_t              m_last_mark_tick = UINT64_MAX; // Render thread only.
+		uint64_t              m_last_mark_epoch = 0;
 	};
 
 	class BdaTableValidator {
@@ -256,6 +263,9 @@ private:
 	BufferMap                                         m_buffers;
 	PageTable                                         m_page_table;
 	RangeSet                                          m_gpu_modified_ranges;
+	// Bumped whenever GPU ownership of a range is given up (render thread / GPU thread, under the same
+	// serialization as m_gpu_modified_ranges).
+	uint64_t                                          m_ownership_release_epoch = 0;
 	std::vector<std::weak_ptr<RuntimeTableState>>     m_runtime_tables;
 	std::mutex                                        m_runtime_tables_mutex;
 	// Render-thread state; see WriteStamp.
