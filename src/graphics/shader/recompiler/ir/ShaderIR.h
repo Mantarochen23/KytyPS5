@@ -767,6 +767,10 @@ struct ScanCacheEntry {
 	uint64_t                content_hash     = 0;
 	std::vector<uint32_t>   children;
 	std::vector<uint32_t>   mapping;
+	// Runtime-table scans cache all normalized candidates separately from the class-only children.
+	// Empty for an ordinary descriptor table.
+	std::vector<uint32_t>   runtime_candidates;
+	std::vector<uint32_t>   runtime_classes;
 
 	// Everything except the table bytes; a match with other bytes is a stale entry to replace.
 	[[nodiscard]] bool SameInputs(const ScanCacheEntry& other) const {

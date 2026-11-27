@@ -751,6 +751,25 @@ struct DescriptorValueHash {
 	}
 };
 
+void SetRuntimeTableKey(ResourceSnapshot::IndirectBufferTable& table) {
+	std::vector<uint32_t> words;
+	words.reserve(table.entries.size() * 10u);
+	for (size_t i = 0; i < table.entries.size(); ++i) {
+		const auto& entry = table.entries[i];
+		ShaderBufferResource descriptor;
+		if (DecodeBufferDescriptor(entry, descriptor) && descriptor.Base48() != 0 &&
+		    descriptor.NumRecords() != 0) {
+			table.has_live_range = true;
+		}
+		words.insert(words.end(), entry.dwords.begin(), entry.dwords.end());
+		words.push_back(entry.dword_count);
+		const auto cls = i < table.class_index.size() ? table.class_index[i] : 0u;
+		words.push_back(cls);
+	}
+	const auto key = XXH3_128bits(words.data(), words.size() * sizeof(uint32_t));
+	table.candidate_key = {key.low64, key.high64};
+}
+
 std::array<uint32_t, 4> BufferClassKeyOf(const DescriptorValue& value, const BufferResource& base) {
 	ShaderBufferResource descriptor;
 	if (!DecodeBufferDescriptor(value, descriptor) || descriptor.Type() != 0u) {
@@ -1081,6 +1100,19 @@ bool MaterializeIndirectDescriptor(const ResourcePlan& program, uint32_t source_
 				snapshot.flattened_srt.insert(snapshot.flattened_srt.end(),
 				                              cache_slot->mapping.begin(),
 				                              cache_slot->mapping.end());
+				if (!cache_slot->runtime_candidates.empty()) {
+					runtime_table_mode = true;
+					const auto& values = cache_slot->runtime_candidates;
+					for (size_t at = 0; at + ScanCacheEntry::ChildWords <= values.size();
+					     at += ScanCacheEntry::ChildWords) {
+						DescriptorValue value;
+						std::copy_n(values.begin() + static_cast<std::ptrdiff_t>(at),
+						            value.dwords.size(), value.dwords.begin());
+						value.dword_count = values[at + value.dwords.size()];
+						runtime_table.entries.push_back(value);
+					}
+					runtime_table.class_index = cache_slot->runtime_classes;
+				}
 			} else {
 				snapshot.flattened_srt.resize(mapping_offset + 2u, 0u);
 			}
@@ -1135,7 +1167,7 @@ bool MaterializeIndirectDescriptor(const ResourcePlan& program, uint32_t source_
 					snapshot.flattened_srt[mapping_offset + 1u + mapping_word] = ordinal;
 				}
 			}
-			if (cache_eligible && !cache_hit && !runtime_table_mode) {
+			if (cache_eligible && !cache_hit) {
 				if (cache_slot == nullptr) {
 					if (program.scan_cache.size() >= ScanCacheEntry::MaxEntries)
 						program.scan_cache.clear();
@@ -1151,6 +1183,14 @@ bool MaterializeIndirectDescriptor(const ResourcePlan& program, uint32_t source_
 				cache_key.mapping.assign(snapshot.flattened_srt.begin() +
 				                             static_cast<std::ptrdiff_t>(mapping_offset),
 				                         snapshot.flattened_srt.end());
+				if (runtime_table_mode) {
+					for (const auto& value: runtime_table.entries) {
+						cache_key.runtime_candidates.insert(cache_key.runtime_candidates.end(),
+						                                    value.dwords.begin(), value.dwords.end());
+						cache_key.runtime_candidates.push_back(value.dword_count);
+					}
+					cache_key.runtime_classes = runtime_table.class_index;
+				}
 				*cache_slot = std::move(cache_key);
 			}
 
@@ -2371,6 +2411,7 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 		                           &snapshot.indirect_buffer_tables))
 			return false;
 	}
+	for (auto& table: snapshot.indirect_buffer_tables) SetRuntimeTableKey(table);
 	if (validate_buffer_keys) {
 		// Only the resolved destinations can write. Check after all indirect children exist.
 		for (uint32_t i = 0; i < snapshot.buffers.size(); ++i) {

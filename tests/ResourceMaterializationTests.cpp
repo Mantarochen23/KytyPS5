@@ -2022,10 +2022,28 @@ void TestIndirectBufferCandidateBound() {
               snap_a.indirect_buffer_tables[0].class_index.size() ==
                   MaxIndirectBufferCandidates + 200u,
           "runtime table must retain all distinct live buffer descriptors and class indices");
+	    const auto key_a = snap_a.indirect_buffer_tables[0].candidate_key;
+	    const auto cached_scan = std::ranges::find_if(plan.scan_cache, [](const auto &entry) {
+	      return !entry.runtime_candidates.empty();
+	    });
+	    Check(cached_scan != plan.scan_cache.end() &&
+	              cached_scan->runtime_classes.size() == MaxIndirectBufferCandidates + 200u,
+	          "runtime table materialization did not retain its normalized scan result");
+	    ResourceSnapshot snap_cached;
+	    ResourceSpecialization spec_cached;
+	    Check(run_rows(MaxIndirectBufferCandidates + 200u,
+	                   MaxIndirectBufferCandidates + 200u, 4u, &error, &snap_cached,
+	                   &spec_cached) &&
+	              spec_cached == spec_a &&
+	              snap_cached.indirect_buffer_tables[0].candidate_key == key_a &&
+	              snap_cached.indirect_buffer_tables[0].entries ==
+	                  snap_a.indirect_buffer_tables[0].entries,
+	          "an unchanged runtime table did not replay the cached candidates exactly");
 
     const bool ok_b = run_rows(MaxIndirectBufferCandidates + 1500u,
                                MaxIndirectBufferCandidates + 1500u, 4u, &error, &snap_b, &spec_b);
-    Check(ok_b && error.empty() && spec_a == spec_b,
+	    Check(ok_b && error.empty() && spec_a == spec_b &&
+	              snap_b.indirect_buffer_tables[0].candidate_key != key_a,
           "adding more distinct buffers of existing classes must keep identical specialization");
   }
   // Over 4,096 distinct buffer classes (strides) still refuses with a clear diagnostic.
