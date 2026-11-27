@@ -106,7 +106,7 @@ Gauge& Owner(std::string_view name) {
 
 std::vector<Entry> Snapshot() {
 	std::vector<Entry> entries;
-	std::scoped_lock   lock(g_mutex);
+	std::scoped_lock   lock(Mutex());
 	entries.reserve(Owners().size());
 	for (const auto& [name, gauge]: Owners()) {
 		entries.push_back({name, gauge->Bytes(), gauge->Items()});
