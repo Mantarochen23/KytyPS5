@@ -520,6 +520,10 @@ uint32_t AsyncComputeWaitMs() {
 	return g_config != nullptr ? g_config->async_compute_wait_ms : 0u;
 }
 
+uint32_t DeferNewTargetsOnStallMs() {
+	return g_config != nullptr ? g_config->defer_new_targets_on_stall_ms : 0u;
+}
+
 uint32_t MemLimitGb() {
 	return g_config != nullptr ? g_config->mem_limit_gb : 0u;
 }

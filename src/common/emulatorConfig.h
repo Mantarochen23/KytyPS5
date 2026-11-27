@@ -171,6 +171,10 @@ struct ConfigOptions {
 	// --async-compute-wait-ms: a compute dispatch whose shader is not ready suspends its queue at
 	// most this long, then is skipped for this use while the build goes on. 0 = wait for ever.
 	uint32_t                 async_compute_wait_ms      = 0;
+	// --defer-new-targets-on-stall-ms: once no frame was recorded for this long, a draw into a
+	// target that was not seen redrawn is skipped while its shaders build, like a draw into a
+	// redrawn one, instead of building them on the render thread. 0 = never.
+	uint32_t                 defer_new_targets_on_stall_ms = 0;
 	// --async-lookahead: the scan of submitted commands also reads the compute user data, so that
 	// shaders whose resources follow from it are built before their dispatch is reached.
 	uint32_t                 async_lookahead            = 1;
@@ -328,6 +332,7 @@ bool     GuestFaultReportOnlyEnabled();
 uint32_t GuestClockHoldMs();
 const std::filesystem::path& GetRegisteredShaderDumpFolder();
 uint32_t AsyncComputeWaitMs();
+uint32_t DeferNewTargetsOnStallMs();
 bool     AsyncLookaheadEnabled();
 uint32_t AsyncSpeculativeModulesMode();
 uint32_t WarmUpBudgetSeconds();

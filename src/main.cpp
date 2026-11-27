@@ -175,6 +175,11 @@ static void PrintUsage() {
 	         "                                       suspends its queue at most n ms, then is skipped for this\n"
 	         "                                       use (its outputs stay as they were) while the build goes\n"
 	         "                                       on. 0 = wait for ever. Default: 0.\n"
+	         "  --defer-new-targets-on-stall-ms <n>  Bring-up: once no frame was recorded for n ms, a draw\n"
+	         "                                       into a target not seen redrawn is skipped while its\n"
+	         "                                       shaders build instead of building them on the render\n"
+	         "                                       thread (what it draws may be missing). 0 = never.\n"
+	         "                                       Default: 0.\n"
 	         "  --async-lookahead <0|1>              The scan of submitted commands also reads compute user\n"
 	         "                                       data, so shaders whose resources follow from it are\n"
 	         "                                       built before their dispatch is reached. Default: 1.\n"
@@ -660,6 +665,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 		} else if (arg == "--async-compute-wait-ms") {
 			if (!ParseUint32(value, options.config.async_compute_wait_ms)) {
 				::printf("invalid async compute wait value: %s\n", value.c_str());
+				return false;
+			}
+		} else if (arg == "--defer-new-targets-on-stall-ms") {
+			if (!ParseUint32(value, options.config.defer_new_targets_on_stall_ms)) {
+				::printf("invalid defer new targets on stall value: %s\n", value.c_str());
 				return false;
 			}
 		} else if (arg == "--async-lookahead") {
