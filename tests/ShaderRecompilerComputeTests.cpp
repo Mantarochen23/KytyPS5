@@ -6841,7 +6841,7 @@ public:
       ImageHeapTestAccess::RetryEveryDraw(heap, filtered.slots[40]);
       auto resolves = ImageHeapTestAccess::ResolveCalls(heap);
       const auto fast_rebinds = ImageHeapTestAccess::FastRebinds(heap);
-      const auto visited = ImageHeapTestAccess::EntriesVisited(heap);
+      auto visited = ImageHeapTestAccess::EntriesVisited(heap);
       const auto skipped = ImageHeapTestAccess::EntriesSkipped(heap);
       Require(name, "unchanged discovery", acquire(sampled), "the view was declined");
       draw();
@@ -6871,6 +6871,7 @@ public:
               ImageHeapTestAccess::ResolveCalls(heap) > resolves,
               "dropped journal records left a resident entry unchecked");
       resolves = ImageHeapTestAccess::ResolveCalls(heap);
+      visited  = ImageHeapTestAccess::EntriesVisited(heap);
       TextureCacheTestAccess::TouchResolution(textures, texture(1), 0x1000u);
       Require(name, "generation discovery", acquire(sampled), "the view was declined");
       draw();
