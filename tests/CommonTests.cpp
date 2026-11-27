@@ -13,6 +13,8 @@
 #include "common/stringUtils.h"
 #include "common/threads.h"
 #include "common/virtualMemory.h"
+#include "graphics/host_gpu/renderer/cache/hotReadbackTable.h"
+#include "graphics/host_gpu/renderer/cache/recentGpuWrites.h"
 #include "libs/libs.h"
 
 #include <chrono>
@@ -1016,6 +1018,52 @@ TEST(FrameCost, ReadbackSiteScopesAndArchFormattingSplitProducers) {
 	                          "gpu_tdim=6.00 gpu_icount=7.00)"),
 	          std::string::npos)
 	    << lines.arch;
+}
+
+TEST(ReadbackBatchTables, HotTableEvictsOldestAndExpiresStaleTicks) {
+	using namespace Libs::Graphics;
+	HotReadbackTable table;
+	for (uint64_t i = 0; i < MaxHotReadbackEntries; ++i) {
+		table.Note(0x10000ull + i * 0x4000ull, 0x4000ull, i + 10u);
+	}
+	EXPECT_EQ(table.Size(), MaxHotReadbackEntries);
+	// Refresh oldest entry so the second entry becomes oldest.
+	table.Note(0x10000ull, 0x8000ull, 1000u);
+	table.Note(0x9000000ull, 0x4000ull, 1001u);
+	EXPECT_EQ(table.Size(), MaxHotReadbackEntries);
+	uint64_t tick = 0;
+	EXPECT_TRUE(table.TickOf(0x10000ull, tick));
+	EXPECT_EQ(tick, 1000u);
+	EXPECT_FALSE(table.TickOf(0x14000ull, tick));
+
+	size_t kept = 0;
+	table.ForEachHot(1001u + HotReadbackTicks, [&](uint64_t, uint64_t) { ++kept; });
+	// Only entries at tick >= 1001 survive; tick 1000 is older than HotReadbackTicks.
+	EXPECT_EQ(kept, 1u);
+	EXPECT_EQ(table.Size(), 1u);
+}
+
+TEST(ReadbackBatchTables, RecentWriteRingDedupesNewestAndSplitsFinished) {
+	using namespace Libs::Graphics;
+	RecentGpuWriteRing ring;
+	ring.Note(0x20000ull, 0u, 1u);
+	ring.Note(0x20000ull, RecentWriteMaxBytes + 1u, 1u);
+	EXPECT_EQ(ring.Size(), 0u);
+
+	ring.Note(0x20100ull, 0x80ull, 5u);
+	ring.Note(0x20100ull, 0x80ull, 7u); // same span refreshes tick without adding an entry
+	EXPECT_EQ(ring.Size(), 1u);
+	ring.Note(0x30000ull, 0x100ull, 12u);
+	EXPECT_EQ(ring.Size(), 2u);
+
+	std::vector<std::tuple<uint64_t, uint64_t, bool>> seen;
+	ring.ForEachNewest(10u, [&](uint64_t addr, uint64_t size, bool finished) {
+		seen.emplace_back(addr, size, finished);
+		return true;
+	});
+	ASSERT_EQ(seen.size(), 2u);
+	EXPECT_EQ(seen[0], std::make_tuple(0x30000ull, TRACKER_PAGE_SIZE, false));
+	EXPECT_EQ(seen[1], std::make_tuple(0x20000ull, TRACKER_PAGE_SIZE, true));
 }
 
 } // namespace

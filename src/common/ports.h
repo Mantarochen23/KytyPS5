@@ -30,6 +30,7 @@ enum class Port : uint32_t {
 	GpuDrawIndirectCount, // keep multi-draw indirect counts on the GPU via vkCmdDraw[Indexed]IndirectCount
 	InPlaceReadback, // read finished GPU writes in place from host-visible device memory (resizable BAR)
 	DetachedReadback, // read back submitted buffer data via a detached submit without flushing the open command buffer
+	BatchedReadback, // co-download hot readback buffers and recent finished small GPU writes during forced sync readbacks
 	Count
 };
 
@@ -63,6 +64,7 @@ inline constexpr PortInfo PORTS[] = {
     {Port::GpuDrawIndirectCount, "gpu-draw-indirect-count", "this tree (readback1)", false, false},
     {Port::InPlaceReadback, "inplace-readback", "CarRamRod-963/KytyPS5@4c4300d87d", false, false},
     {Port::DetachedReadback, "detached-readback", "upstream PR 1254 (NeySlim)", false, false},
+    {Port::BatchedReadback, "batched-readback", "upstream PR 2093 (MrBigBritches)", false, false},
 };
 static_assert(std::size(PORTS) == static_cast<size_t>(Port::Count));
 

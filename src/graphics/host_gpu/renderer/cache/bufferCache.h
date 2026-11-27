@@ -9,8 +9,10 @@
 #include "graphics/host_gpu/memoryTracker.h"
 #include "graphics/host_gpu/rangeSet.h"
 #include "graphics/host_gpu/renderer/cache/faultManager.h"
+#include "graphics/host_gpu/renderer/cache/hotReadbackTable.h"
 #include "graphics/host_gpu/renderer/cache/loopGuardReport.h"
 #include "graphics/host_gpu/renderer/cache/multiLevelPageTable.h"
+#include "graphics/host_gpu/renderer/cache/recentGpuWrites.h"
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
 
 #include <array>
@@ -260,7 +262,39 @@ private:
 	[[nodiscard]] bool SynchronizeBufferFromImage(Buffer& buffer, uint64_t vaddr, uint64_t size);
 	// Synchronous downloads publish before returning; asynchronous callers wait before reuse.
 	template <bool async>
-	[[nodiscard]] bool DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t size);
+	[[nodiscard]] bool DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t size,
+	                                        BufferId main_id = {});
+	struct PendingDownload {
+		std::vector<vk::BufferCopy> copies;
+		uint64_t                    total_size     = 0;
+		uint64_t                    buffer_address = 0;
+		uint64_t                    offset         = 0;
+		uint8_t*                    mapped         = nullptr;
+		std::shared_ptr<Buffer>     temporary;
+	};
+	struct BatchedDownload {
+		Buffer*         buffer = nullptr;
+		PendingDownload pending;
+		uint64_t        unmark_address = 0;
+		uint64_t        unmark_size    = 0;
+	};
+	[[nodiscard]] PendingDownload CollectDownloadCopies(const Buffer& buffer, uint64_t vaddr,
+	                                                    uint64_t size);
+	void                          ReserveDownloadMemory(std::span<PendingDownload* const> items);
+	void                          RecordDownload(vk::CommandBuffer native, const Buffer& buffer,
+	                                             const PendingDownload& pending);
+	void                          PublishDownload(const PendingDownload& pending);
+	[[nodiscard]] BufferId        FindHotBuffer(uint64_t address, uint64_t size);
+	[[nodiscard]] uint64_t        EstimateDownloadBytes(uint64_t address, uint64_t size) const;
+	void                          CollectHotDownloads(BufferId main_id, uint64_t& budget,
+	                                                  std::vector<BatchedDownload>& batch);
+	void                          CollectRecentWrites(RangeSet& claimed, uint64_t& budget,
+	                                                  std::vector<BatchedDownload>& batch);
+	void                          CollectRecentPiece(uint64_t address, uint64_t size,
+	                                                 uint64_t& budget,
+	                                                 std::vector<BatchedDownload>& batch);
+	void                          NoteHotReadback(uint64_t address, uint64_t size);
+	void                          NoteRecentWrite(uint64_t address, uint64_t size);
 	// Reads the GPU-dirty bytes of [vaddr, size) of a host-readable buffer straight from its
 	// mapping into guest memory, after waiting only for the submission that holds the buffer's
 	// latest GPU write (not for the work queued behind it).
@@ -314,6 +348,8 @@ private:
 	std::array<StreamCopy, 1u << STREAM_COPY_BITS>    m_stream_copies {};
 	uint64_t                                          m_draw_window = 0;
 	TextureCache&                                     m_texture_cache;
+	HotReadbackTable                                  m_hot_readbacks;
+	RecentGpuWriteRing                                m_recent_writes;
 	uint64_t                                          m_total_used_memory  = 0;
 	uint64_t m_trigger_gc_memory  = 1ull * 1024 * 1024 * 1024;
 	uint64_t m_critical_gc_memory = 2ull * 1024 * 1024 * 1024;
