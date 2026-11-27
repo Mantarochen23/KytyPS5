@@ -47,6 +47,8 @@ struct PortInfo {
 	// other shader's output alone: not part of the store identity. Instead each stored failure
 	// remembers which such ports were on, and is retried when one is on that was not.
 	bool        widens_translation;
+	// Off unless named by --enable-port: for a port nobody has run on a GPU yet.
+	bool        default_off = false;
 };
 
 inline constexpr PortInfo PORTS[] = {
@@ -62,18 +64,20 @@ inline constexpr PortInfo PORTS[] = {
     {Port::ImageHeapIncremental, "image-heap-incremental", "upstream PR 1289 (NeySlim)", false, false},
     {Port::RuntimeTableCache, "runtime-table-cache", "this tree (table1)", false, false},
     {Port::BarrierTracker, "barrier-tracker", "CarRamRod-963/KytyPS5@f80443cf88", false, false},
-    {Port::GpuIndirectThreadDim, "gpu-indirect-thread-dim", "this tree (readback1)", false, false},
+    {Port::GpuIndirectThreadDim, "gpu-indirect-thread-dim", "this tree (readback1)", false, false, true},
     {Port::GpuDrawIndirectCount, "gpu-draw-indirect-count", "this tree (readback1)", false, false},
-    {Port::InPlaceReadback, "inplace-readback", "CarRamRod-963/KytyPS5@4c4300d87d", false, false},
-    {Port::DetachedReadback, "detached-readback", "upstream PR 1254 (NeySlim)", false, false},
-    {Port::BatchedReadback, "batched-readback", "upstream PR 2093 (MrBigBritches)", false, false},
+    {Port::InPlaceReadback, "inplace-readback", "CarRamRod-963/KytyPS5@4c4300d87d", false, false, true},
+    {Port::DetachedReadback, "detached-readback", "upstream PR 1254 (NeySlim)", false, false, true},
+    {Port::BatchedReadback, "batched-readback", "upstream PR 2093 (MrBigBritches)", false, false, true},
 };
 static_assert(std::size(PORTS) == static_cast<size_t>(Port::Count));
 
 // Checks a comma-separated list of port names ("all" names every port) and appends them to out.
 inline bool ParseDisabledPorts(std::string_view text, std::vector<std::string>& out);
 // Sets the disabled ports; the names must have passed ParseDisabledPorts.
-inline void SetDisabledPorts(const std::vector<std::string>& names);
+// Ports with default_off are off unless named in `enabled`; naming a port in `names` turns it off.
+inline void SetDisabledPorts(const std::vector<std::string>& names,
+                             const std::vector<std::string>& enabled = {});
 
 inline bool PortEnabled(Port port);
 // Bit i: PORTS[i] is enabled and affects_codegen. 0 when every such port is off. Selects the store file.
@@ -89,7 +93,16 @@ namespace PortsDetail {
 
 inline constexpr uint32_t AllPorts = (1u << static_cast<uint32_t>(Port::Count)) - 1u;
 
-inline std::atomic<uint32_t> g_enabled {AllPorts};
+// The ports on when no option is given: every port except those marked default_off.
+inline constexpr uint32_t DefaultPorts() {
+	uint32_t mask = AllPorts;
+	for (const auto& port: PORTS) {
+		if (port.default_off) mask &= ~(1u << static_cast<uint32_t>(port.port));
+	}
+	return mask;
+}
+
+inline std::atomic<uint32_t> g_enabled {DefaultPorts()};
 
 inline const PortInfo* FindPort(std::string_view name) {
 	const auto* found = std::ranges::find(PORTS, name, &PortInfo::name);
@@ -115,8 +128,14 @@ inline bool ParseDisabledPorts(std::string_view text, std::vector<std::string>& 
 	return true;
 }
 
-inline void SetDisabledPorts(const std::vector<std::string>& names) {
-	uint32_t enabled = PortsDetail::AllPorts;
+inline void SetDisabledPorts(const std::vector<std::string>& names,
+                             const std::vector<std::string>& enabled_names) {
+	uint32_t enabled = PortsDetail::DefaultPorts();
+	for (const auto& name: enabled_names) {
+		if (const auto* port = PortsDetail::FindPort(name)) {
+			enabled |= 1u << static_cast<uint32_t>(port->port);
+		}
+	}
 	for (const auto& name: names) {
 		if (const auto* port = PortsDetail::FindPort(name)) {
 			enabled &= ~(1u << static_cast<uint32_t>(port->port));

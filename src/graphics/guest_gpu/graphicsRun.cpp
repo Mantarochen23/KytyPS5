@@ -1162,7 +1162,11 @@ void CommandProcessor::SetNumInstances(uint32_t num_instances) {
 
 uint32_t CommandProcessor::NumInstances() {
 	if (m_num_instances_count_addr != 0) {
-		const uint32_t raw_count = *reinterpret_cast<const uint32_t*>(m_num_instances_count_addr);
+		// The count is read long after the draw: the guest may have unmapped it since.
+		const bool mapped =
+		    m_renderer.IsMapped(m_num_instances_count_addr, sizeof(uint32_t));
+		const uint32_t raw_count =
+		    mapped ? *reinterpret_cast<const uint32_t*>(m_num_instances_count_addr) : 0u;
 		const uint32_t draw_count = std::min(raw_count, m_num_instances_max_count);
 		m_num_instances_count_addr = 0;
 		if (draw_count != 0) {
@@ -1454,7 +1458,10 @@ void CommandProcessor::DispatchIndirect(uint64_t args_addr, uint32_t mode, const
 		constexpr uint32_t DISPATCH_INITIATOR_ORDERED_APPEND_ENABLE = 1u << 3u;
 		const bool args_gpu_modified =
 		    m_renderer.GetBufferCache().IsRegionGpuModified(args_addr, sizeof(vk::DispatchIndirectCommand));
-		if (Config::PortEnabled(Config::Port::GpuIndirectThreadDim) && args_gpu_modified &&
+		// The GPU pass that divides the counts also applies the group-count limits: without the
+		// guard the counts would reach the device unchecked, so the CPU path (which judges them) runs.
+		if (Config::PortEnabled(Config::Port::GpuIndirectThreadDim) &&
+		    Config::PortEnabled(Config::Port::DispatchGuard) && args_gpu_modified &&
 		    (mode & DISPATCH_INITIATOR_ORDERED_APPEND_ENABLE) == 0 &&
 		    m_renderer.GetTextureCache().WriteBackTick(args_addr, sizeof(vk::DispatchIndirectCommand)) == 0) {
 			DispatchOrigin origin {};

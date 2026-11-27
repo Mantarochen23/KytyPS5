@@ -222,7 +222,10 @@ static void PrintUsage() {
 	         "                                       into a target not seen redrawn is skipped while its\n"
 	         "                                       shaders build instead of building them on the render\n"
 	         "                                       thread (what it draws may be missing). 0 = never.\n"
-	         "                                       Default: 0.\n");
+	         "                                       Default: 0.\n"
+	         "  --enable-port <names>                Turn on ported changes that are off by default\n"
+	         "                                       (comma-separated names, or all). Marked in the\n"
+	         "                                       [ports] start-up line as disabled until named.\n");
 }
 
 static bool NextArg(int argc, char* argv[], int& index, std::string& out) {
@@ -747,6 +750,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 		} else if (arg == "--defer-new-targets-on-stall-ms") {
 			if (!ParseUint32(value, options.config.defer_new_targets_on_stall_ms)) {
 				::printf("invalid defer new targets on stall value: %s\n", value.c_str());
+				return false;
+			}
+		} else if (arg == "--enable-port") {
+			if (!Config::ParseDisabledPorts(value, options.config.enabled_ports)) {
+				::printf("unknown port in --enable-port: %s\n", value.c_str());
 				return false;
 			}
 		} else {

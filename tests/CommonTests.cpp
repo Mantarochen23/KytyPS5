@@ -646,6 +646,26 @@ TEST(Ports, DisablePortParsesNamesAndSelectsTheShaderStore) {
 	Config::SetDisabledPorts({});
 }
 
+TEST(Ports, DefaultOffPortsNeedEnablePort) {
+	Config::SetDisabledPorts({});
+	EXPECT_TRUE(Config::PortEnabled(Config::Port::BarrierTracker));
+	EXPECT_TRUE(Config::PortEnabled(Config::Port::GpuDrawIndirectCount));
+	EXPECT_FALSE(Config::PortEnabled(Config::Port::GpuIndirectThreadDim));
+	EXPECT_FALSE(Config::PortEnabled(Config::Port::InPlaceReadback));
+	EXPECT_FALSE(Config::PortEnabled(Config::Port::DetachedReadback));
+	EXPECT_FALSE(Config::PortEnabled(Config::Port::BatchedReadback));
+	std::vector<std::string> on;
+	ASSERT_TRUE(Config::ParseDisabledPorts("inplace-readback", on));
+	Config::SetDisabledPorts({}, on);
+	EXPECT_TRUE(Config::PortEnabled(Config::Port::InPlaceReadback));
+	EXPECT_FALSE(Config::PortEnabled(Config::Port::DetachedReadback));
+	std::vector<std::string> off;
+	ASSERT_TRUE(Config::ParseDisabledPorts("inplace-readback", off));
+	Config::SetDisabledPorts(off, on);
+	EXPECT_FALSE(Config::PortEnabled(Config::Port::InPlaceReadback));
+	Config::SetDisabledPorts({});
+}
+
 namespace {
 
 TEST(MemAccount, ProcStatusFieldsAreKilobytes) {
