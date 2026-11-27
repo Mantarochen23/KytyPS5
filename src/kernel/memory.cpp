@@ -9,6 +9,7 @@
 #include "common/virtualMemory.h"
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
+#include "kernel/physicalCoverage.h"
 #include "libs/errno.h"
 #include "libs/libs.h"
 #include "loader/systemContent.h"
@@ -696,6 +697,9 @@ private:
 	// Track backing ownership while a transaction changes views before publishing VirtualRanges.
 	// Names, protections and memory types live only in VirtualRanges. Physical offsets may alias.
 	std::map<uint64_t, Mapping> m_mappings;
+	// How many of m_mappings cover each physical byte (kept with every insert and erase), so
+	// ReclaimAutomatic does not have to visit every mapping.
+	PhysicalCoverage m_coverage;
 };
 
 class FlexibleMemory {
@@ -1148,13 +1152,11 @@ void PhysicalMemory::ReclaimAutomatic(uint64_t start, uint64_t size) {
 		automatic = true;
 	}
 	if (automatic) {
-		for (const auto& [vaddr, mapping]: m_mappings) {
-			const auto first = std::max(start, mapping.start_addr);
-			const auto last  = std::min(end, mapping.start_addr + mapping.size);
-			if (first < last) {
-				RemoveFreeRange(m_automatic_free, first, last - first);
-			}
-		}
+		// What other mappings still cover stays allocated. Same result as intersecting the range
+		// with every mapping, without visiting them.
+		m_coverage.ForEachCovered(start, size, [&](uint64_t first, uint64_t last) {
+			RemoveFreeRange(m_automatic_free, first, last - first);
+		});
 	}
 }
 
@@ -1200,6 +1202,7 @@ bool PhysicalMemory::Map(uint64_t vaddr, uint64_t phys_addr, size_t len) {
 	}
 
 	m_mappings.emplace_hint(next, vaddr, Mapping {phys_addr, len});
+	m_coverage.Add(phys_addr, len);
 	RemoveFreeRange(m_automatic_free, phys_addr, len);
 	return true;
 }
@@ -1296,6 +1299,7 @@ bool PhysicalMemory::Unmap(uint64_t vaddr, uint64_t size) {
 	while (first != last) {
 		const auto removed = first->second;
 		first              = m_mappings.erase(first);
+		m_coverage.Remove(removed.start_addr, removed.size);
 		ReclaimAutomatic(removed.start_addr, removed.size);
 	}
 	return true;
