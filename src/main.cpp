@@ -194,7 +194,14 @@ static void PrintUsage() {
 	         "  --fault-storm-hold <n>               Frames a marked page stays unwatched. Default: 60.\n"
 	         "  --max-spirv-words <n>                Refuse any emitted or stored shader module larger than\n"
 	         "                                       n SPIR-V words before it reaches the driver. 0 = off.\n"
-	         "                                       Default: 2000000.\n");
+	         "                                       Default: 2000000.\n"
+	         "  --materialize-memo-entries <n>       Resource materializations each shader program remembers\n"
+	         "                                       (by user data, bases and the bytes it read). 1 = the\n"
+	         "                                       single-entry memo; 2 or more also remembers plans that\n"
+	         "                                       use the resident image heap. Default: 1.\n"
+	         "  --materialize-memo-stamps <n>        Write-watch the guest pages a remembered materialization\n"
+	         "                                       read, so a lookup reads none of them; a page written more\n"
+	         "                                       than n times is compared by its bytes. 0 = off. Default: 0.\n");
 }
 
 static bool NextArg(int argc, char* argv[], int& index, std::string& out) {
@@ -681,6 +688,17 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 		} else if (arg == "--max-spirv-words") {
 			if (!ParseUint32(value, options.config.max_spirv_words)) {
 				::printf("invalid max SPIR-V words value: %s\n", value.c_str());
+				return false;
+			}
+		} else if (arg == "--materialize-memo-entries") {
+			if (!ParseUint32(value, options.config.materialize_memo_entries) ||
+			    options.config.materialize_memo_entries == 0u) {
+				::printf("invalid materialize memo entries value: %s\n", value.c_str());
+				return false;
+			}
+		} else if (arg == "--materialize-memo-stamps") {
+			if (!ParseUint32(value, options.config.materialize_memo_stamps)) {
+				::printf("invalid materialize memo stamps value: %s\n", value.c_str());
 				return false;
 			}
 		} else {
