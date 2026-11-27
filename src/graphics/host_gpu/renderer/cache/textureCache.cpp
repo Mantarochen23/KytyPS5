@@ -711,6 +711,7 @@ void TextureCache::CopyImage(ImageId destination_id, ImageId source_id) {
 		m_buffer_cache.NoteTableRangeChanged(destination.info.data.address, destination.info.data.size);
 	}
 	destination.ClearBufferModified();
+	m_buffer_cache.NoteTableRangeChanged(destination.info.data.address, destination.info.data.size);
 }
 
 void TextureCache::CopyImageMip(ImageId destination_id, ImageId source_id, uint32_t mip,
@@ -1156,6 +1157,9 @@ void TextureCache::InitializeImage(ImageId id) {
 		}
 		UploadImage(image, *source, source_offset);
 		image.ClearBufferModified();
+		// The image now holds the buffer: the next write of a runtime table over it must flag the
+		// image again, which a group that still owns its ranges only does after its epoch moved.
+		m_buffer_cache.NoteTableRangeChanged(image.info.data.address, image.info.data.size);
 	}
 	image.RefreshComplete();
 }
