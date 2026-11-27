@@ -81,10 +81,6 @@ inline std::string PortsSummary();
 
 namespace PortsDetail {
 
-inline constexpr uint32_t AllPorts = (1u << static_cast<uint32_t>(Port::Count)) - 1u;
-
-inline std::atomic<uint32_t> g_enabled {AllPorts & ~DefaultOffPorts()};
-
 inline constexpr uint32_t DefaultOffPorts() {
 	uint32_t mask = 0;
 	for (const auto& port: PORTS) {
@@ -92,6 +88,10 @@ inline constexpr uint32_t DefaultOffPorts() {
 	}
 	return mask;
 }
+
+inline constexpr uint32_t AllPorts = (1u << static_cast<uint32_t>(Port::Count)) - 1u;
+
+inline std::atomic<uint32_t> g_enabled {AllPorts & ~DefaultOffPorts()};
 
 inline const PortInfo* FindPort(std::string_view name) {
 	const auto* found = std::ranges::find(PORTS, name, &PortInfo::name);
