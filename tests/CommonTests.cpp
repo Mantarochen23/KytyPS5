@@ -154,7 +154,7 @@ TEST(FaultReport, WorkerThreadFaultNamesModuleFunctionAndFrames) {
 		Common::FaultReport::RefreshModules();
 		Common::HostException::InstallHandler(ReportAndExit);
 		std::thread worker([] {
-			Common::FaultReport::SetThreadTag("fault test tag", "fault-test-worker");
+			Common::FaultReport::SetThreadTag("fault test tag", "fault-test-wrk");
 			Common::FaultReport::RegisterThreadStack();
 			KytyFaultReportTestNullWrite(nullptr);
 		});
@@ -172,7 +172,7 @@ TEST(FaultReport, WorkerThreadFaultNamesModuleFunctionAndFrames) {
 	::waitpid(child, &status, 0);
 	const size_t frames = CountOf(text.c_str(), " bt[") + CountOf(text.c_str(), " fp[");
 	EXPECT_TRUE(WIFEXITED(status) && WEXITSTATUS(status) == 0) << "status " << status;
-	EXPECT_NE(text.find("fault-test-worker"), std::string::npos) << text;
+	EXPECT_NE(text.find("fault-test-wrk"), std::string::npos) << text;
 	EXPECT_NE(text.find("doing: fault test tag"), std::string::npos) << text;
 	EXPECT_NE(text.find("common_tests+0x"), std::string::npos) << text;
 	EXPECT_NE(text.find("[KytyFaultReportTestNullWrite+0x"), std::string::npos) << text;

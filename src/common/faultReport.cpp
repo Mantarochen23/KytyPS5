@@ -404,11 +404,11 @@ void WriteHostContext(const Registers& regs, const Sink& sink) {
 		const auto* words = reinterpret_cast<const uint64_t*>(frame);
 		FormatAddress(words[1], where, sizeof(where));
 		Out(sink, " fp[%2d]   %016" PRIx64 " = %s\n", depth, words[1], where);
+		depth++;
 		if (words[0] <= frame) {
 			break;
 		}
 		frame = words[0];
-		depth++;
 	}
 	if (depth == 0) {
 		Out(sink, " (none)\n");
