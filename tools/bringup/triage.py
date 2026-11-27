@@ -63,6 +63,17 @@ skip_lines = 0; skip_t_first = None; skip_t_last = None
 ledger_lines = []; ledger_t = None
 frame_cost_lines = []
 module_index_warnings = []
+frame_holes_re = re.compile(
+    rb'^\[frame-holes\] frame=(\d+) draws skipped=(\d+) \(([^)]*)\) '
+    rb'dispatches skipped=(\d+) \(([^)]*)\) targets affected=(\d+)(?: \(([^)]*)\))?')
+frame_holes_frames = 0
+frame_holes_draws_total = 0
+frame_holes_dispatches_total = 0
+frame_holes_draw_reasons = collections.Counter()
+frame_holes_dispatch_reasons = collections.Counter()
+frame_holes_targets = collections.Counter()
+frame_holes_t_first = None
+frame_holes_t_last = None
 
 # diag2 findings. Every collection is bounded so a large log cannot grow memory
 # without limit; only the first/last examples and the largest builds are kept.
@@ -295,6 +306,25 @@ with open(path, 'rb') as f:
                             park_threads.append(dict(t=round(t, 1), id=int(pm.group(1)),
                                                      pc=pc, module=modoff))
                     continue
+                if line.startswith(b'[frame-holes]'):
+                    fm = frame_holes_re.match(line)
+                    if fm:
+                        frame_holes_frames += 1
+                        frame_holes_draws_total += int(fm.group(2))
+                        frame_holes_dispatches_total += int(fm.group(4))
+                        if frame_holes_t_first is None:
+                            frame_holes_t_first = round(t, 1)
+                        frame_holes_t_last = round(t, 1)
+                        for rk, rv in store_kv_re.findall(fm.group(3)):
+                            frame_holes_draw_reasons[rk.decode()] += int(rv)
+                        for rk, rv in store_kv_re.findall(fm.group(5)):
+                            frame_holes_dispatch_reasons[rk.decode()] += int(rv)
+                        if fm.group(7):
+                            for addr in re.findall(rb'0x[0-9a-fA-F]+', fm.group(7)):
+                                a = addr.decode().lower()
+                                if a in frame_holes_targets or len(frame_holes_targets) < 2000:
+                                    frame_holes_targets[a] += 1
+                    continue
                 if line.startswith(b'[frame] WARNING module-misses') or line.startswith(b'[module-index] BUG'):
                     module_index_warnings.append((round(t, 1), line.rstrip().decode(errors='replace')))
                 if line.startswith(b'[frame]'):
@@ -485,6 +515,16 @@ findings['parked'] = dict(threads=park_threads, summary=park_summary, t=round(t,
 findings['holes'] = [dict(reason=k, shaders=len(v['shaders']), holes=v['count'],
                           t_first=v['t_first'], t_last=v['t_last'], examples=v['examples'])
                      for k, v in sorted(holes.items(), key=lambda kv: -kv[1]['count'])]
+findings['frame_holes'] = dict(
+    incomplete_frames=frame_holes_frames,
+    draws_skipped=frame_holes_draws_total,
+    dispatches_skipped=frame_holes_dispatches_total,
+    draw_reasons=[dict(reason=k, count=v) for k, v in frame_holes_draw_reasons.most_common()],
+    dispatch_reasons=[dict(reason=k, count=v) for k, v in frame_holes_dispatch_reasons.most_common()],
+    top_targets=[dict(address=k, frames=v) for k, v in frame_holes_targets.most_common(10)],
+    t_first=frame_holes_t_first,
+    t_last=frame_holes_t_last,
+)
 
 failed_programs = None; cache_t = None
 for text, tt in cache_lines:
@@ -733,6 +773,24 @@ def lines_holes():
             for h in findings['holes']]
 
 
+def lines_frame_holes():
+    fh = findings['frame_holes']
+    if fh['incomplete_frames'] == 0:
+        return []
+    sec = ['@%s-%s s: %d incomplete frames; draws skipped=%d, dispatches skipped=%d' %
+           (fh['t_first'], fh['t_last'], fh['incomplete_frames'],
+            fh['draws_skipped'], fh['dispatches_skipped'])]
+    ranked = ([('draw:' + r['reason'], r['count']) for r in fh['draw_reasons']] +
+              [('dispatch:' + r['reason'], r['count']) for r in fh['dispatch_reasons']])
+    ranked.sort(key=lambda kv: (-kv[1], kv[0]))
+    if ranked:
+        sec.append('ranked reasons: ' + ', '.join('%s=%d' % (k, v) for k, v in ranked))
+    if fh['top_targets']:
+        sec.append('top targets (frames): ' +
+                   ', '.join('%s=%d' % (t_['address'], t_['frames']) for t_ in fh['top_targets'][:8]))
+    return sec
+
+
 def lines_store():
     sec = ['@%s s: %s' % (tt, x) for x, tt in cache_lines]
     if last_store: sec.append('@%s s: %s' % (last_store[1], last_store[0]))
@@ -785,6 +843,7 @@ for name, builder in (('TIMELINE', lines_timeline), ('STALLS', lines_stalls),
                       ('QUEUES', lines_queues), ('SHADERS', lines_shaders),
                       ('ASYNC', lines_async), ('BUILD RATE', lines_build_rate),
                       ('PARKED', lines_parked), ('FAULT COST', lines_fault_cost), ('HOLES', lines_holes),
+                      ('FRAME HOLES', lines_frame_holes),
                       ('STORE', lines_store), ('REJECTIONS', lines_rejections),
                       ('LEDGER', lines_ledger), ('FRAME COST', lines_frame_cost)):
     section(name, safe(name, builder))

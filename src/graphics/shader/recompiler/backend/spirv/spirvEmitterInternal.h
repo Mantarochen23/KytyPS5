@@ -136,8 +136,9 @@ struct EmitterState {
 	struct IndirectBufferRootPlan {
 		std::vector<IndirectBufferGroup> groups;
 		std::vector<uint32_t>            ordinal_groups;
-		uint32_t                         select_func = 0;
-		bool                             needs_lane  = false;
+		uint32_t                         select_func   = 0;
+		bool                             needs_lane    = false;
+		bool                             runtime_table = false;
 	};
 	std::unordered_map<uint32_t, IndirectBufferRootPlan> indirect_buffer_roots;
 	std::map<std::array<uint32_t, 11>, uint32_t>         indirect_buffer_class_helpers;
@@ -228,6 +229,7 @@ uint32_t TypePointer(EmitterState& state, spv::StorageClass storage_class, uint3
 uint32_t TypeFunction(EmitterState& state);
 uint32_t TypeStorageBufferElementPointer(EmitterState& state, uint32_t bits = 32);
 uint32_t TypePhysicalU32Pointer(EmitterState& state);
+uint32_t TypePhysicalU64Pointer(EmitterState& state);
 uint32_t TypePhysicalU32BufferPointer(EmitterState& state);
 uint32_t TypePushConstantElementPointer(EmitterState& state);
 uint32_t TypeU32ArrayPointer(EmitterState& state, spv::StorageClass storage_class, uint32_t dwords);
@@ -446,6 +448,7 @@ Prospero::BufferFormat StorageBufferFormat(const EmitterState& state, const IR::
 bool EmptyIndirectBufferCandidate(const EmitterState& state, uint32_t resource);
 
 uint32_t SharedIndirectBufferResource(const EmitterState& state, uint32_t resource);
+bool     IsRuntimeTableIndirectBuffer(const EmitterState& state, uint32_t resource);
 bool     UsesDynamicIndirectBufferSlots(const EmitterState& state, uint32_t resource);
 
 void EmitMemoryBindings(EmitterState& state);
@@ -463,11 +466,16 @@ struct MemoryResourceAccess {
 	uint32_t              byte_offset      = 0;
 	uint32_t              element_bits     = 32;
 	bool                  non_uniform      = false;
+	bool                  physical_address = false;
 	spv::MemoryAccessMask memory_access    = spv::MemoryAccessMaskNone;
 };
 
 uint32_t EmitIndirectResourceIndex(EmitterState& state, uint32_t key, uint32_t mapping_offset,
                                    uint32_t search_iterations, uint32_t default_resource);
+// Loads [bda_lo, bda_hi, byte_size, meta] for a runtime-table indirect buffer ordinal (1..M),
+// or uvec4(0) for ordinal 0 / out-of-range ordinals.
+uint32_t EmitLoadIndirectBufferTableEntry(EmitterState& state, uint32_t selected,
+                                          uint32_t mapping_offset);
 // Slot word of an image heap byte offset; offsets past the heap select the null element.
 uint32_t EmitImageHeapEntry(EmitterState& state, uint32_t key, uint32_t mapping_offset);
 // Kind position of a heap slot word's arm: the arm itself, or read from the heap's arm map under

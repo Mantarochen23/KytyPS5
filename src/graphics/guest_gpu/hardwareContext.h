@@ -934,6 +934,7 @@ public:
 	void SetPsShaderResource2(const PsShaderResource2& rsrc2) { m_ps.ps_regs.rsrc2 = rsrc2; }
 
 	void SetCsShader(const CsStageRegisters& cs_regs) { m_cs.cs_regs = cs_regs; }
+	void SetCsInfo(const ComputeShaderInfo& cs) { m_cs = cs; }
 	void SetCsWaveSize(uint8_t wave_size) { m_cs.cs_regs.wave_size = wave_size; }
 
 	void SetPsUserSgpr(uint32_t id, uint32_t value) { m_ps.ps_user_sgpr.value[id] = value; }

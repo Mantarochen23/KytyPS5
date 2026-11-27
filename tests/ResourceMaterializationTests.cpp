@@ -1850,7 +1850,7 @@ struct Heap final : ImageHeapSource {
 };
 
 // Buffer 0 from a table of V#s (user data 0..3), image 0 from a resident heap (user data 4..7).
-ResourcePlan TablePlan() {
+ResourcePlan TablePlan(bool indexed_buffer = false, bool formatted_buffer = false) {
   Program program;
   program.stage = Libs::Graphics::ShaderType::Compute;
   program.srt_plan_complete = true;
@@ -1870,11 +1870,14 @@ ResourcePlan TablePlan() {
     indirect.indirect_descriptor = DescriptorSource::IndirectDescriptor{
         .table_source = first == 0u ? 0u : 2u,
         .table_stride = image ? 32u : 16u,
-        .table_record_bytes = image ? 32u : 16u};
+        .table_record_bytes = image ? 32u : 16u,
+        .indexed = !image && indexed_buffer};
     program.descriptor_sources.push_back(indirect);
   }
   BufferResource buffer;
   buffer.source = 1u;
+  buffer.formatted = formatted_buffer;
+  buffer.read = true;
   program.info.buffers.push_back(buffer);
   ImageResource image;
   image.source = 3u;
@@ -1953,17 +1956,22 @@ void TestCanonicalSpecializationAcrossBoots() {
 
 void TestIndirectBufferCandidateBound() {
   Config::SetDisabledPorts({});
-  const auto plan = TablePlan();
-  const auto run_rows = [&](uint32_t row_count, uint32_t distinct_count, std::string *error,
-                            size_t *out_buffers) -> bool {
+  const auto plan = TablePlan(/*indexed_buffer=*/true, /*formatted_buffer=*/true);
+  const auto run_rows = [&](uint32_t row_count, uint32_t distinct_count, uint32_t distinct_classes,
+                            std::string *error, ResourceSnapshot *out_snapshot,
+                            ResourceSpecialization *out_spec) -> bool {
     Memory memory;
     const uint64_t base  = 0x0000100000000000ull;
     const uint64_t table = base + 0x10000u;
     for (uint32_t row = 0; row < row_count; ++row) {
-      const uint32_t id = row % distinct_count;
-      memory.Write(table + static_cast<uint64_t>(row) * 16u,
-                   Buffer(base + 0x1000000ull + static_cast<uint64_t>(id) * 0x1000u, 16u, 64u,
-                          BufferFormat::k32UInt));
+      const uint32_t id     = row % distinct_count;
+      const uint32_t cls    = id % distinct_classes;
+      const uint32_t stride = 4u + (cls % 1024u) * 4u;
+      auto           desc   = Buffer(base + 0x1000000ull + static_cast<uint64_t>(id) * 0x1000u,
+                                     stride, 64u, BufferFormat::k32UInt);
+      const uint32_t sel_w  = (cls / 1024u) < 4u ? (4u + (cls / 1024u)) : ((cls / 1024u) - 4u);
+      desc.dwords[3] = (desc.dwords[3] & ~0xfffu) | Libs::Graphics::DstSel(4, 5, 6, sel_w);
+      memory.Write(table + static_cast<uint64_t>(row) * 16u, desc);
     }
     Heap heap;
     heap.slots      = base + 0xdead0000u;
@@ -1980,34 +1988,69 @@ void TestIndirectBufferCandidateBound() {
     ResourceSnapshot snapshot;
     ResourceSpecialization specialization;
     const bool ok = MaterializeResources(plan, runtime, snapshot, specialization, error);
-    if (out_buffers != nullptr) *out_buffers = specialization.buffers.size();
+    if (out_snapshot != nullptr) *out_snapshot = std::move(snapshot);
+    if (out_spec != nullptr) *out_spec = std::move(specialization);
     return ok;
   };
 
-  // Within the bound: succeeds even when row count exceeds the bound via duplicates.
+  // Within the direct bound: succeeds in direct mode when duplicates keep distinct count <= 4095.
   {
     std::string error;
-    size_t buffers = 0u;
-    Check(run_rows(MaxIndirectBufferCandidates + 500u, 64u, &error, &buffers) && error.empty() &&
-              buffers == 65u,
-          "duplicate indirect buffer rows within distinct candidate bound should materialize");
+    ResourceSnapshot snapshot;
+    ResourceSpecialization spec;
+    Check(run_rows(MaxIndirectBufferCandidates + 500u, 64u, 1u, &error, &snapshot, &spec) &&
+              error.empty() && spec.buffers.size() == 65u &&
+              snapshot.indirect_buffer_tables.empty(),
+          "duplicate indirect buffer rows within direct candidate bound should materialize directly");
   }
-  // Over the bound: refuses with a clear, self-explaining diagnostic.
+  // Over 4,096 distinct buffers across a few classes: promotes to runtime-indexed BDA table mode
+  // with class-only specialization children, and adding more buffers of existing classes reuses the
+  // exact same specialization (zero recompilations).
   {
     std::string error;
-    size_t buffers = 0u;
-    const bool ok =
-        run_rows(MaxIndirectBufferCandidates + 1u, MaxIndirectBufferCandidates + 1u, &error, &buffers);
-    if (ok || error.find("buffer candidate bound") == std::string::npos ||
+    ResourceSnapshot snap_a, snap_b;
+    ResourceSpecialization spec_a, spec_b;
+    const bool ok_a = run_rows(MaxIndirectBufferCandidates + 200u,
+                               MaxIndirectBufferCandidates + 200u, 4u, &error, &snap_a, &spec_a);
+    Check(ok_a && error.empty(), "over-4096 indirect buffers should promote to runtime table mode");
+    Check(IsIndirectBufferRuntimeTable(spec_a.buffers[0].indirect_mapping_offset),
+          "promoted root must set IndirectBufferRuntimeTable flag");
+    Check(spec_a.buffers.size() == 5u,
+          "runtime-table specialization must keep only root + 4 distinct classes");
+    Check(snap_a.indirect_buffer_tables.size() == 1u &&
+              snap_a.indirect_buffer_tables[0].entries.size() == MaxIndirectBufferCandidates + 200u &&
+              snap_a.indirect_buffer_tables[0].class_index.size() ==
+                  MaxIndirectBufferCandidates + 200u,
+          "runtime table must retain all distinct live buffer descriptors and class indices");
+
+    const bool ok_b = run_rows(MaxIndirectBufferCandidates + 1500u,
+                               MaxIndirectBufferCandidates + 1500u, 4u, &error, &snap_b, &spec_b);
+    Check(ok_b && error.empty() && spec_a == spec_b,
+          "adding more distinct buffers of existing classes must keep identical specialization");
+  }
+  // Over 4,096 distinct buffer classes (strides) still refuses with a clear diagnostic.
+  {
+    std::string error;
+    const bool ok = run_rows(MaxIndirectBufferCandidates + 1u, MaxIndirectBufferCandidates + 1u,
+                             MaxIndirectBufferCandidates + 1u, &error, nullptr, nullptr);
+    if (ok || error.find("buffer class bound") == std::string::npos ||
         error.find("limit=4096") == std::string::npos) {
-      std::fprintf(stderr, "TestIndirectBufferCandidateBound overflow: ok=%d error=%s\n", ok,
+      std::fprintf(stderr, "TestIndirectBufferCandidateBound class overflow: ok=%d error=%s\n", ok,
                    error.c_str());
-      Check(false, "indirect buffer table exceeding MaxIndirectBufferCandidates was not refused");
+      Check(false, "indirect buffer table exceeding distinct class bound was not refused");
     }
   }
 }
 
 } // namespace canonical_boots
+
+#include "common/frameCost.h"
+namespace Common::FrameCost {
+void Add(Counter, uint64_t) noexcept {}
+ScopedTimer::ScopedTimer(Counter duration) noexcept : m_duration(duration) {}
+ScopedTimer::~ScopedTimer() = default;
+uint64_t ScopedTimer::Stop() noexcept { return 0; }
+} // namespace Common::FrameCost
 
 namespace Common {
 

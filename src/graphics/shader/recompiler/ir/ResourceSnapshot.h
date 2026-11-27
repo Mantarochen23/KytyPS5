@@ -31,11 +31,23 @@ struct UniformFill {
 };
 
 struct ResourceSnapshot {
-	std::vector<DescriptorValue> buffers;
-	std::vector<DescriptorValue> images;
-	std::vector<DescriptorValue> samplers;
-	std::vector<uint32_t>        flattened_srt;
-	std::vector<uint32_t>        user_data;
+	// Runtime-indexed table for an indirect buffer root whose distinct descriptors exceeded
+	// MaxIndirectBufferCandidates. Each entry maps a runtime buffer ordinal (1..entries.size()) to
+	// its live guest V# and its 1-based specialization class child ordinal.
+	struct IndirectBufferTable {
+		uint32_t                     root_resource = 0;
+		// Word index in flattened_srt holding [table_bda_lo, table_bda_hi, runtime_entry_count].
+		uint32_t                     header_word = 0;
+		std::vector<DescriptorValue> entries;
+		std::vector<uint32_t>        class_index;
+	};
+
+	std::vector<DescriptorValue>     buffers;
+	std::vector<DescriptorValue>     images;
+	std::vector<DescriptorValue>     samplers;
+	std::vector<uint32_t>            flattened_srt;
+	std::vector<uint32_t>            user_data;
+	std::vector<IndirectBufferTable> indirect_buffer_tables;
 	std::vector<std::pair<uint64_t, uint64_t>> specialization_reads;
 	UniformFill                 uniform_fill;
 	// With SrtRuntime::legacy_hash under the canonical-resources port: the hash of the
