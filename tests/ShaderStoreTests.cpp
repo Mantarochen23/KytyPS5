@@ -2,6 +2,8 @@
 #include "graphics/host_gpu/renderer/pipeline/shaderStoreCapability.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderStoreDiff.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderStoreFile.h"
+#include "graphics/host_gpu/renderer/pipeline/shaderStoreIdentity.h"
+#include "common/ports.h"
 #include "graphics/shader/shaderCompiler.h"
 
 #include <algorithm>
@@ -258,9 +260,82 @@ void TestCapabilityVersionBumped() {
 	      "older negative-cache generation no longer applies");
 }
 
+// Adding a port that only widens translation must not change the store file name; one that changes
+// generated code must. The name round-trips, and the record counter walks the frames.
+void TestStoreIdentityIgnoresWideningPorts() {
+	Config::SetDisabledPorts({});
+	const auto all_codegen = Config::ShaderPortMask();
+	for (const auto& port: Config::PORTS) {
+		const bool in_name = (all_codegen & (1u << static_cast<uint32_t>(port.port))) != 0;
+		Check(in_name == port.affects_codegen, "only code-affecting ports are in the store identity");
+		Check(!(port.affects_codegen && port.widens_translation), "a port is one kind");
+	}
+	const auto widening = Config::CapabilityPortMask();
+	Check(widening != 0u && (widening & all_codegen) == 0u, "widening ports are outside the identity");
+	// The file name with the two widening ports on or off is the same.
+	Config::SetDisabledPorts({"indirect-formatted-stores", "finite-buffer-descriptors"});
+	Check(Config::ShaderPortMask() == all_codegen && Config::CapabilityPortMask() != widening,
+	      "toggling widening ports leaves the identity and changes their mask");
+	Config::SetDisabledPorts({"wave64-lds-sync"});
+	Check(Config::ShaderPortMask() != all_codegen, "a code-affecting port still selects its own store");
+	Config::SetDisabledPorts({});
+
+	const auto name = ShaderStoreFileName("TITLE", 0x7fu, ".guard5");
+	ShaderStoreName parsed;
+	Check(name == "TITLE.ports7f.guard5.shaders" && ParseShaderStoreFileName(name, parsed) &&
+	          parsed.title == "TITLE" && parsed.ports == 0x7fu && parsed.suffix == ".guard5",
+	      "the store file name round-trips");
+	Check(ShaderStoreFileName("TITLE", 0, "") == "TITLE.shaders" &&
+	          ParseShaderStoreFileName("TITLE.shaders", parsed) && parsed.ports == 0,
+	      "no port mask, no part");
+	Check(!ParseShaderStoreFileName("TITLE.ports.shaders", parsed) &&
+	          !ParseShaderStoreFileName("TITLE.bak", parsed),
+	      "other files are not stores");
+	Check(Config::PortNamesOfMask(0) == "none" &&
+	          Config::PortNamesOfMask(widening) == "indirect-formatted-stores,finite-buffer-descriptors",
+	      "masks are named");
+
+	// Two frames of 3 and 5 bytes after a 4-byte header, and a torn third.
+	std::vector<uint8_t> file(4, 0);
+	const auto           frame = [&](uint32_t size) {
+		uint32_t zero = 0;
+		file.insert(file.end(), reinterpret_cast<uint8_t*>(&size), reinterpret_cast<uint8_t*>(&size) + 4);
+		file.insert(file.end(), reinterpret_cast<uint8_t*>(&zero), reinterpret_cast<uint8_t*>(&zero) + 4);
+		file.insert(file.end(), 8, 0);
+		file.insert(file.end(), size, 0xab);
+	};
+	frame(3);
+	frame(5);
+	Check(CountShaderStoreRecords(file, 4) == 2, "two whole frames are counted");
+	frame(9);
+	file.resize(file.size() - 1);
+	Check(CountShaderStoreRecords(file, 4) == 2, "a torn frame is not counted");
+	const auto path = std::filesystem::temp_directory_path() / "kyty-store-identity-test.shaders";
+	{
+		std::ofstream out(path, std::ios::binary);
+		out.write(reinterpret_cast<const char*>(file.data()), static_cast<std::streamsize>(file.size()));
+	}
+	Check(CountShaderStoreRecordsInFile(path, 4) == 2, "the file counter agrees");
+	std::filesystem::remove(path);
+}
+
+// A stored failure is retried when a widening port is on that was off when it was stored, kept when
+// the same or fewer are on, and a failure from before the field (no ports) is retried once.
+void TestFailureValidityFollowsWideningPorts() {
+	const auto v = kTranslatorCapabilityVersion;
+	Check(FailureCacheApplies(v, 0u, 0u), "no widening port then or now: applies");
+	Check(FailureCacheApplies(v, 3u, 3u) && FailureCacheApplies(v, 3u, 1u),
+	      "the same or fewer widening ports: applies");
+	Check(!FailureCacheApplies(v, 1u, 3u) && !FailureCacheApplies(v, 0u, 2u),
+	      "a widening port that was off then: retried");
+	Check(!FailureCacheApplies(v - 1u, 3u, 3u), "an older translator generation never applies");
+}
+
 } // namespace
 
 int main() {
+	TestStoreIdentityIgnoresWideningPorts();
+	TestFailureValidityFollowsWideningPorts();
 	TestKeyIgnoresGuestAddresses();
 	TestDurableAppendAndReload();
 	TestMissDescriptions();

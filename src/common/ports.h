@@ -31,20 +31,26 @@ struct PortInfo {
 	Port        port;
 	const char* name;
 	const char* source;
-	// The port changes generated shader code: its state selects the shader store file.
-	bool        shader_code;
+	// The port changes the code generated for a shader the translator already accepted without it
+	// (it takes a different path for the same input): its state is part of the shader store identity
+	// (the store file name). Off for a port that cannot change an accepted shader's output.
+	bool        affects_codegen;
+	// The port lets the translator accept shaders it rejected without the port and leaves every
+	// other shader's output alone: not part of the store identity. Instead each stored failure
+	// remembers which such ports were on, and is retried when one is on that was not.
+	bool        widens_translation;
 };
 
 inline constexpr PortInfo PORTS[] = {
-    {Port::Wave64OverLimit32, "wave64-over-limit-32", "upstream PR 2567", true},
-    {Port::Wave64LdsSync, "wave64-lds-sync", "Senaxx/KytyPS5@86151b7251", true},
-    {Port::GuestLaneNumber, "guest-lane-number", "lordra9-svg/KytyPS5@85c70d0416", true},
-    {Port::GpuSelectedWrites, "gpu-selected-writes", "wololo-wololo/VIcky-Blue@d134910670", true},
-    {Port::DispatchGuard, "dispatch-guard", "wololo-wololo/VIcky-Blue@841cb9cac2", false},
-    {Port::LargeMemoryBudget, "large-memory-budget", "wololo-wololo/VIcky-Blue@26d53f0fb", false},
-    {Port::CanonicalResources, "canonical-resources", "this tree (shader store reuse across boots)", true},
-    {Port::IndirectFormattedStores, "indirect-formatted-stores", "local matfail2", true},
-    {Port::FiniteBufferDescriptors, "finite-buffer-descriptors", "local matfail2", true},
+    {Port::Wave64OverLimit32, "wave64-over-limit-32", "upstream PR 2567", true, false},
+    {Port::Wave64LdsSync, "wave64-lds-sync", "Senaxx/KytyPS5@86151b7251", true, false},
+    {Port::GuestLaneNumber, "guest-lane-number", "lordra9-svg/KytyPS5@85c70d0416", true, false},
+    {Port::GpuSelectedWrites, "gpu-selected-writes", "wololo-wololo/VIcky-Blue@d134910670", true, false},
+    {Port::DispatchGuard, "dispatch-guard", "wololo-wololo/VIcky-Blue@841cb9cac2", false, false},
+    {Port::LargeMemoryBudget, "large-memory-budget", "wololo-wololo/VIcky-Blue@26d53f0fb", false, false},
+    {Port::CanonicalResources, "canonical-resources", "this tree (shader store reuse across boots)", true, false},
+    {Port::IndirectFormattedStores, "indirect-formatted-stores", "local matfail2", false, true},
+    {Port::FiniteBufferDescriptors, "finite-buffer-descriptors", "local matfail2", false, true},
 };
 static_assert(std::size(PORTS) == static_cast<size_t>(Port::Count));
 
@@ -54,8 +60,12 @@ inline bool ParseDisabledPorts(std::string_view text, std::vector<std::string>& 
 inline void SetDisabledPorts(const std::vector<std::string>& names);
 
 inline bool PortEnabled(Port port);
-// Bit i: PORTS[i] is enabled and changes shader code. 0 when every such port is off.
+// Bit i: PORTS[i] is enabled and affects_codegen. 0 when every such port is off. Selects the store file.
 inline uint32_t ShaderPortMask();
+// Bit i: PORTS[i] is enabled and widens_translation.
+inline uint32_t CapabilityPortMask();
+// Port names of the bits set in mask, comma separated ("none" for 0).
+inline std::string PortNamesOfMask(uint32_t mask);
 // "[ports] enabled: a,b disabled: c" for the start-up log.
 inline std::string PortsSummary();
 
@@ -106,9 +116,27 @@ inline bool PortEnabled(Port port) {
 inline uint32_t ShaderPortMask() {
 	uint32_t mask = 0;
 	for (const auto& port: PORTS) {
-		if (port.shader_code && PortEnabled(port.port)) mask |= 1u << static_cast<uint32_t>(port.port);
+		if (port.affects_codegen && PortEnabled(port.port)) mask |= 1u << static_cast<uint32_t>(port.port);
 	}
 	return mask;
+}
+
+inline uint32_t CapabilityPortMask() {
+	uint32_t mask = 0;
+	for (const auto& port: PORTS) {
+		if (port.widens_translation && PortEnabled(port.port)) mask |= 1u << static_cast<uint32_t>(port.port);
+	}
+	return mask;
+}
+
+inline std::string PortNamesOfMask(uint32_t mask) {
+	std::string names;
+	for (const auto& port: PORTS) {
+		if ((mask & (1u << static_cast<uint32_t>(port.port))) == 0) continue;
+		if (!names.empty()) names += ',';
+		names += port.name;
+	}
+	return names.empty() ? std::string("none") : names;
 }
 
 inline std::string PortsSummary() {

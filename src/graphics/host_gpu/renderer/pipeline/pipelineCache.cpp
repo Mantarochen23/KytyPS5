@@ -292,13 +292,13 @@ std::filesystem::path ShaderStorePath() {
 	if (title_id.empty()) {
 		return {};
 	}
-	// Ported fixes that change shader code keep their programs in a store of their own
-	// (common/ports.h), and a non-zero loop-guard limit selects its own file as well, so a
-	// store never mixes programs built with different ports or with and without the guard.
-	const auto ports = Config::ShaderPortMask();
+	// Ported fixes that change the code of shaders the translator already accepted keep their
+	// programs in a store of their own (common/ports.h affects_codegen), and a non-zero loop-guard
+	// limit selects its own file as well, so a store never mixes programs built with different
+	// such ports or with and without the guard. A port that only widens what translates is not
+	// in the name: it cannot change a stored module, and stored failures carry its state.
 	return std::filesystem::path("_PipelineCache") /
-	       (title_id + (ports != 0 ? fmt::format(".ports{:x}", ports) : std::string {}) +
-	        ShaderStoreSuffix(Config::LoopGuardLimit()) + ".shaders");
+	       ShaderStoreFileName(title_id, Config::ShaderPortMask(), ShaderStoreSuffix(Config::LoopGuardLimit()));
 }
 
 bool GraphicsPipelineKey::operator==(const GraphicsPipelineKey& other) const {
