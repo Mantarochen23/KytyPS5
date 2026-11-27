@@ -36,8 +36,9 @@ enum class Record : uint8_t { Module, GraphicsPipeline, TessellationLayout, Fail
 
 // Explicit store format version. Bump manually only when recompiler output, SPIR-V profile, or
 // store record layout changes so rebuilds across branches keep reusing compatible warm stores.
-// 5: CompiledShaderInfo::subgroup_size, 6: KeyIndex, 7: compute keys hold lds_storage
-constexpr uint64_t kShaderStoreFormatVersion = 7;
+// 5: CompiledShaderInfo::subgroup_size, 6: KeyIndex, 7: compute keys hold lds_storage,
+// 8: modules with calls (their callee code)
+constexpr uint64_t kShaderStoreFormatVersion = 8;
 
 // What every record depends on besides its own fields.
 std::vector<uint8_t> StoreHeader(const GraphicContext& graphics) {
@@ -55,9 +56,9 @@ template <class S, class Key> void IoKey(S& io, Key& key) {
 }
 
 template <class S, class Module> void IoModule(S& io, Module& stage) {
-	// The handle comes from the SPIR-V; stored programs have no function code.
+	// The handle comes from the SPIR-V. Function code: the callee code of a module with calls.
 	auto& [id, handle, info, specialization, function_code, rect_parameters, mesh_task] = stage;
-	IoAll(io, id, info, specialization, rect_parameters, mesh_task);
+	IoAll(io, id, info, specialization, function_code, rect_parameters, mesh_task);
 }
 
 } // namespace
@@ -308,10 +309,19 @@ PipelineCache::LoadRecordStatus PipelineCache::LoadRecord(std::span<const uint8_
 				return LoadRecordStatus::Failed;
 			}
 			const auto [program, inserted] = m_program_cache.try_emplace(std::move(key));
-			if (inserted &&
+			// A module with calls keeps the plan of its callee code; it loads at the first use
+			// that links the same code.
+			const bool calls = !module.function_code.empty();
+			if (inserted && !calls &&
 			    !ShaderRecompiler::IR::LoadResourcePlan(plan, program->second.resource_plan)) {
 				m_program_cache.erase(program);
 				return LoadRecordStatus::Failed;
+			}
+			if (calls) {
+				program->second.call_plans.insert_or_assign(
+				    XXH3_64bits(module.function_code.data(),
+				                module.function_code.size() * sizeof(uint32_t)),
+				    std::move(plan));
 			}
 			if (keep_on_error) {
 				Common::RecoverableScope scope;
@@ -394,7 +404,7 @@ PipelineCache::LoadRecordStatus PipelineCache::LoadRecord(std::span<const uint8_
 }
 
 // Records are encoded here, since programs and modules change later.
-void PipelineCache::StoreModule(const ProgramKey& key, const Program& program,
+void PipelineCache::StoreModule(const ProgramKey& key, const std::vector<uint8_t>& plan,
                                 const ShaderModule& module, const std::vector<uint32_t>& spirv) {
 	if (!m_store) {
 		return;
@@ -402,7 +412,8 @@ void PipelineCache::StoreModule(const ProgramKey& key, const Program& program,
 	Writer record;
 	IoAll(record, Record::Module);
 	IoKey(record, key);
-	IoAll(record, ShaderRecompiler::IR::SaveResourcePlan(program.resource_plan));
+	auto plan_bytes = plan;
+	IoAll(record, plan_bytes);
 	IoModule(record, module);
 	IoAll(record, spirv);
 	m_store.Append(std::move(record.bytes));

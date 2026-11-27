@@ -273,6 +273,24 @@ std::span<const uint32_t> PipelineCache::Program::FunctionCode() const {
 	    : std::span<const uint32_t>{};
 }
 
+// Address-free: the callee code itself, wherever the guest placed it.
+static uint64_t CallCodeHash(std::span<const uint32_t> function_code) {
+	return XXH3_64bits(function_code.data(), function_code.size_bytes());
+}
+
+bool PipelineCache::Program::UseStoredCallPlan() {
+	const auto found = call_plans.find(CallCodeHash(FunctionCode()));
+	if (found == call_plans.end()) return false;
+	ShaderRecompiler::IR::ResourcePlan plan;
+	if (!ShaderRecompiler::IR::LoadResourcePlan(found->second, plan)) {
+		call_plans.erase(found);
+		return false;
+	}
+	resource_plan              = std::move(plan);
+	resource_plan.source_reads = call_source->reads;
+	return true;
+}
+
 bool PipelineCache::Program::RefreshCallSource(const ShaderRecompiler::IR::SrtRuntime& runtime) {
 	const auto revision = call_source->revision;
 	ShaderRecompiler::RefreshShaderSource(*call_source, runtime);
@@ -303,6 +321,8 @@ ShaderModule* PipelineCache::Program::FindModule(const ShaderRecompiler::IR::Srt
 		}
 		if constexpr (HasCalls) {
 			if (!std::ranges::equal(candidate.function_code, FunctionCode())) continue;
+		} else {
+			if (!candidate.function_code.empty()) continue;
 		}
 		return &candidate;
 	}
@@ -392,9 +412,16 @@ ShaderModule& PipelineCache::AddModule(Program& program, const ProgramKey& key,
 	            m_compiled[static_cast<size_t>(ShaderType::Local)],
 	            m_compiled[static_cast<size_t>(ShaderType::TessellationControl)],
 	            m_compiled[static_cast<size_t>(ShaderType::TessellationEvaluation)]);
-	// Programs with GPU-selected calls depend on their callees' current code.
-	if (program.call_source == nullptr) {
-		StoreModule(key, program, module, compiled.spirv);
+	// A module with GPU-selected calls is stored with its callee code and the plan of that code;
+	// a later run links the callees and takes it only for the same code (FindModule<true>).
+	const bool calls = program.call_source != nullptr;
+	if (calls && !std::ranges::equal(module.function_code, program.FunctionCode())) {
+		return module; // The callees changed while it was built: the plan is of other code.
+	}
+	if (calls || m_store) {
+		auto plan = ShaderRecompiler::IR::SaveResourcePlan(program.resource_plan);
+		StoreModule(key, plan, module, compiled.spirv);
+		if (calls) program.call_plans.insert_or_assign(CallCodeHash(module.function_code), std::move(plan));
 	}
 	return module;
 }
@@ -642,10 +669,38 @@ const ShaderModule* PipelineCache::GetProgramImpl(const ShaderParams& params, In
 		}
 		ShaderModule* module       = nullptr;
 		bool          materialized = true;
+		bool          linked_now   = false;
+		if (!cached.call_source && !cached.call_plans.empty()) {
+			// Loaded from the store with calls: link the callees as they are now.
+			finish_options();
+			auto source = ShaderRecompiler::PrepareShaderSource(params.code, options);
+			if (source.calls.empty() || source.unsupported_call_pc != UINT32_MAX) {
+				// Not a program with calls after all: its stored call modules never serve
+				// (FindModule<false> skips modules with function code).
+				cached.call_plans.clear();
+			} else {
+				linked_now = true;
+				ShaderRecompiler::RefreshShaderSource(source, runtime);
+				cached.call_source = std::make_unique<ShaderRecompiler::ShaderSource>(std::move(source));
+				cached.resource_plan.source_reads = cached.call_source->reads;
+				source_changed = !cached.UseStoredCallPlan();
+				if (!source_changed) {
+					module = cached.FindModule<true>(runtime, push_data, &materialized);
+					PipelineCacheLog("[store] linked cs hash=0x{:016x}: {} for the current callee code "
+					                 "({} callee sets stored)",
+					                 params.hash, module != nullptr ? "stored module" : "stored plan, no module",
+					                 cached.call_plans.size());
+				}
+			}
+		}
 		if (cached.call_source) {
-			source_changed = cached.RefreshCallSource(runtime);
-			if (!source_changed) module = cached.FindModule<true>(runtime, push_data, &materialized);
-		} else {
+			if (!linked_now) {
+				source_changed = cached.RefreshCallSource(runtime);
+				// Callees that changed to code built before (this run or a stored one) need no link.
+				if (source_changed && cached.UseStoredCallPlan()) source_changed = false;
+				if (!source_changed) module = cached.FindModule<true>(runtime, push_data, &materialized);
+			}
+		} else if (cached.call_plans.empty()) {
 			module = cached.FindModule<false>(runtime, push_data, &materialized);
 		}
 		if (module != nullptr) {

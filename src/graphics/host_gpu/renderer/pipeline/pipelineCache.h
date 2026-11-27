@@ -289,8 +289,14 @@ private:
 		bool                                         logged_neg_hit  = false;
 		std::string                                  failure_reason;
 
+		// Plans of the modules with calls, by CallCodeHash of their callee code (from the store or
+		// built this run); a program with calls loaded from the store has no call_source yet.
+		std::unordered_map<uint64_t, std::vector<uint8_t>> call_plans;
+
 		[[nodiscard]] std::span<const uint32_t> FunctionCode() const;
 		bool RefreshCallSource(const ShaderRecompiler::IR::SrtRuntime& runtime);
+		// Takes the plan stored for the current callee code; false if there is none.
+		bool UseStoredCallPlan();
 		template <bool HasCalls>
 		ShaderModule* FindModule(const ShaderRecompiler::IR::SrtRuntime& runtime,
 		                         ShaderRecompiler::IR::PushData::Window  push_data,
@@ -430,8 +436,8 @@ private:
 	enum class LoadRecordStatus : uint8_t { Loaded, EndOfStream, Failed };
 	void             WarmUp(const std::filesystem::path& path);
 	LoadRecordStatus LoadRecord(std::span<const uint8_t>& records, bool keep_on_error);
-	void StoreModule(const ProgramKey& key, const Program& program, const ShaderModule& module,
-	                 const std::vector<uint32_t>& spirv);
+	void StoreModule(const ProgramKey& key, const std::vector<uint8_t>& plan,
+	                 const ShaderModule& module, const std::vector<uint32_t>& spirv);
 	void StoreFailedProgram(const ProgramKey& key, std::string_view reason);
 	bool RecordIndexedKey(const ProgramKey& key, bool persist);
 	void StoreKeyIndex(const ProgramKey& key);
