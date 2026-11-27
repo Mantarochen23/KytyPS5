@@ -2,6 +2,7 @@
 
 #include "common/debugCounters.h"
 #include "common/emulatorConfig.h"
+#include "common/frameCost.h"
 #include "common/hostStats.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "imgui.h"
@@ -746,6 +747,7 @@ void DrawMemoryAndIo(const Snapshot& shown) {
 } // namespace
 
 void PerformanceOverlayRecordFlip(uint32_t guest_width, uint32_t guest_height) noexcept {
+	Common::FrameCost::FramePresented();
 	if (!Common::DebugCounters::Enabled()) {
 		return;
 	}

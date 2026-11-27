@@ -3,6 +3,7 @@
 #include "common/faultReport.h"
 #include "common/assert.h"
 #include "common/debugCounters.h"
+#include "common/frameCost.h"
 #include "common/emulatorConfig.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
@@ -487,7 +488,9 @@ void GuestGpu::DrainComputePrefetches() {
 	if (batch.empty()) {
 		return;
 	}
-	Common::LockGuard lock(m_renderer.GetMutex());
+	Common::FrameCost::ScopedTimer lock_wait(Common::FrameCost::Counter::LockWaitNs);
+	Common::LockGuard              lock(m_renderer.GetMutex());
+	lock_wait.Stop();
 	auto&             cache = m_renderer.GetPipelineCache();
 	for (const auto& req: batch) {
 		cache.PrefetchComputeProgram(req.cs_regs, req.dispatch_thread_dimensions, false, nullptr, true);
@@ -518,6 +521,7 @@ void GuestGpu::ThreadRun(void* data) {
 				gpu->m_processing = false;
 				gpu->m_idle.Signal();
 				RenderActivity::Note("cp-no-work", 0, "-", "nothing submitted");
+				Common::FrameCost::ScopedTimer idle(Common::FrameCost::Counter::IdleNs);
 				gpu->m_work_available.Wait(&gpu->m_queue_mutex);
 			}
 			if (gpu->m_stopping && gpu->m_commands.empty() && gpu->m_submission_count == 0) {
@@ -586,6 +590,9 @@ void GuestGpu::ThreadRun(void* data) {
 						                         ? "every queue waits for a shader or pipeline"
 						                         : "a queue waits on guest memory or a flip");
 						if (!gpu->m_async_ready && !gpu->m_prefetch_pending) {
+							Common::FrameCost::ScopedTimer wait(
+							    all_waiting_on_shaders ? Common::FrameCost::Counter::IdleNs
+							                           : Common::FrameCost::Counter::GuestMemoryWaitNs);
 							gpu->m_work_available.WaitFor(&gpu->m_queue_mutex, wait_us);
 						}
 						gpu->m_async_ready = false;
@@ -779,7 +786,9 @@ void CommandProcessor::SuspendOrSkipDispatch() {
 		                                           .count());
 		const auto step = g_current_execution->m_shader_wait.NotReady(limit, now);
 		if (step.action == FlowPlan::WaitAction::Skip) {
-			Common::LockGuard lock(m_renderer.GetMutex());
+			Common::FrameCost::ScopedTimer lock_wait(Common::FrameCost::Counter::LockWaitNs);
+			Common::LockGuard              lock(m_renderer.GetMutex());
+			lock_wait.Stop();
 			m_renderer.GetPipelineCache().NoteDispatchSkipped(step.waited_ms);
 			m_renderer.GetRenderExecutor().TaintSkippedDispatch();
 			return;
@@ -971,7 +980,9 @@ void CommandProcessor::PrefetchComputeShaders(std::span<const uint32_t> commands
 	if (discovered.empty()) {
 		return;
 	}
-	Common::LockGuard lock(m_renderer.GetMutex());
+	Common::FrameCost::ScopedTimer lock_wait(Common::FrameCost::Counter::LockWaitNs);
+	Common::LockGuard              lock(m_renderer.GetMutex());
+	lock_wait.Stop();
 	auto&             cache         = m_renderer.GetPipelineCache();
 	const bool        async_compute = IsAsyncComputeQueue();
 	for (const auto& req: discovered) {

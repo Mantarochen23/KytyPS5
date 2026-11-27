@@ -61,6 +61,7 @@ jobs_samples = []; worst_pump = (0.0, 0.0); pump_peak = (0.0, 0.0); stages_tail 
 cache_lines = []; last_store = None; store_lookups = None
 skip_lines = 0; skip_t_first = None; skip_t_last = None
 ledger_lines = []; ledger_t = None
+frame_cost_lines = []
 
 # diag2 findings. Every collection is bounded so a large log cannot grow memory
 # without limit; only the first/last examples and the largest builds are kept.
@@ -293,6 +294,10 @@ with open(path, 'rb') as f:
                             park_threads.append(dict(t=round(t, 1), id=int(pm.group(1)),
                                                      pc=pc, module=modoff))
                     continue
+                if line.startswith(b'[frame]'):
+                    if len(frame_cost_lines) < 2000:
+                        frame_cost_lines.append((round(t, 1), line.rstrip().decode(errors='replace')))
+                    continue
                 if line.startswith(b'[build]'):
                     add_build(line, t)
                     continue
@@ -502,6 +507,7 @@ for line in ledger_lines:
     if m and int(m.group(2)):
         lead[m.group(1)] = dict(n=int(m.group(2)), min=int(m.group(3)) if m.group(3) else None)
 findings['ledger'] = dict(registered=registered, used=used, lead=lead, t=ledger_t)
+findings['frame_cost'] = [dict(t=tt, line=line) for tt, line in frame_cost_lines]
 
 stages_text = stages_tail or ''
 def stages_dict(tail):
@@ -762,6 +768,10 @@ def lines_ledger():
             '@%s s lead time min ms: %s' % (ledger_t, ' '.join('%s=%s' % (s, v['min']) for s, v in sorted(lead.items())))]
 
 
+def lines_frame_cost():
+    return ['@%s s: %s' % (tt, line) for tt, line in frame_cost_lines]
+
+
 print("VERDICT:")
 if not verdict: print("  no data")
 for i, line in enumerate(verdict, 1): print("  %d. %s" % (i, line))
@@ -771,7 +781,7 @@ for name, builder in (('TIMELINE', lines_timeline), ('STALLS', lines_stalls),
                       ('ASYNC', lines_async), ('BUILD RATE', lines_build_rate),
                       ('PARKED', lines_parked), ('FAULT COST', lines_fault_cost), ('HOLES', lines_holes),
                       ('STORE', lines_store), ('REJECTIONS', lines_rejections),
-                      ('LEDGER', lines_ledger)):
+                      ('LEDGER', lines_ledger), ('FRAME COST', lines_frame_cost)):
     section(name, safe(name, builder))
 
 
