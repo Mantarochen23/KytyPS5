@@ -1296,6 +1296,8 @@ bool RenderExecutor::DispatchDirectLocked(CommandBuffer& buffer, uint32_t thread
 		vk_buffer.dispatch(thread_group_x, thread_group_y, thread_group_z);
 	}
 	graphics.breadcrumbs.EndOp(graphics, vk_buffer, marker_id);
+	m_context.GetBufferCache().RecordPendingWrites(program.has_address_writes ||
+	                                               program.info.uses_dma);
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::Dispatches);
 	Common::FrameCost::Add(Common::FrameCost::Counter::Dispatches);
 	if (program.info.bvh) {
@@ -1558,6 +1560,8 @@ bool RenderExecutor::DispatchIndirectLocked(CommandBuffer& buffer, uint64_t args
 	}
 	vk_buffer.dispatchIndirect(indirect_buffer, indirect_offset);
 	graphics.breadcrumbs.EndOp(graphics, vk_buffer, marker_id);
+	m_context.GetBufferCache().RecordPendingWrites(program.has_address_writes ||
+	                                               program.info.uses_dma);
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::Dispatches);
 	Common::FrameCost::Add(Common::FrameCost::Counter::Dispatches);
 	if (program.info.bvh) {

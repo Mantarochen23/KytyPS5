@@ -1436,6 +1436,11 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 	}
 	occlusion_queries.End(vk_buffer, occlusion_query);
 	graphics.breadcrumbs.EndOp(graphics, vk_buffer, marker_id);
+	m_context.GetBufferCache().RecordPendingWrites(
+	    std::any_of(stages.begin(), stages.end(), [](const PreparedBindings* stage) {
+		    const auto& program = stage->runtime->module->info;
+		    return program.has_address_writes || program.info.uses_dma;
+	    }));
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::Draws);
 	Common::FrameCost::Add(Common::FrameCost::Counter::Draws);
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::DrawInstances, draw.instance_count);

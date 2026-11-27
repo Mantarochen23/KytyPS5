@@ -193,6 +193,9 @@ public:
 	// GPU thread, between commands (every write marked so far is recorded): the buffers written
 	// since the last boundary take the current tick as the tick of their latest write.
 	void                   NoteCommandBoundary();
+	// Called after recording a draw or dispatch: the ranges bound for writing, and any address
+	// writes (which can reach untracked ranges), belong to the current command buffer.
+	void                   RecordPendingWrites(bool address_writes = false);
 	[[nodiscard]] std::shared_ptr<RuntimeTableState> RegisterRuntimeTable(
 	    RangeSet dependencies, RangeSet write_ranges = {});
 	// Called only for backing-lifetime changes, not ordinary guest writes.
@@ -262,6 +265,12 @@ private:
 	// mapping into guest memory, after waiting only for the submission that holds the buffer's
 	// latest GPU write (not for the work queued behind it).
 	[[nodiscard]] bool        ReadBackInPlace(Buffer& buffer, uint64_t vaddr, uint64_t size);
+	// GPU writes of the current command buffer, and bound writes not recorded yet.
+	void                      MarkUnsubmittedWrite(uint64_t vaddr, uint64_t size);
+	[[nodiscard]] bool        HasPendingWrite(uint64_t vaddr, uint64_t size) const;
+	[[nodiscard]] bool        HasUnsubmittedWrite(uint64_t vaddr, uint64_t size) const;
+	[[nodiscard]] bool        CanDownloadDetached(uint64_t                        buffer_address,
+	                                              std::span<const vk::BufferCopy> copies);
 	void                      NoteOpenWrite(Buffer& buffer, BufferId id);
 	void                      NoteOpenWritesInRange(uint64_t vaddr, uint64_t size);
 	static constexpr uint64_t MaxInPlaceReadback = uint64_t {512} << 10u;
@@ -278,6 +287,9 @@ private:
 	BufferMap                                         m_buffers;
 	PageTable                                         m_page_table;
 	RangeSet                                          m_gpu_modified_ranges;
+	RangeSet                                          m_unsubmitted_writes;
+	RangeSet                                          m_pending_writes;
+	uint64_t                                          m_unsubmitted_tick = 0;
 	// Bumped whenever GPU ownership of a range is given up (render thread / GPU thread, under the same
 	// serialization as m_gpu_modified_ranges).
 	uint64_t                                          m_ownership_release_epoch = 0;
