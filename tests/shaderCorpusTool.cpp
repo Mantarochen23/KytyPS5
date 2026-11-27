@@ -932,19 +932,34 @@ void WriteSpirvProfiles(const Options& options, const std::vector<Json>& results
 		profile["loops"]        = results[module.result_index].value("loops", 0u);
 		output << profile.dump() << '\n';
 
-		std::string top = "none";
-		uint64_t top_words = 0;
-		for (const auto& [name, value]: profile["attributed_words"].items()) {
-			if (name != "other" && value["words"].get<uint64_t>() > top_words) {
-				top       = name;
-				top_words = value["words"].get<uint64_t>();
-			}
+		const auto category_words = [&](const char* name) {
+			const auto& attributed = profile["attributed_words"];
+			return attributed.contains(name) ? attributed[name]["words"].get<uint64_t>() : 0u;
+		};
+		std::string opcode_summary;
+		for (size_t i = 0; i < std::min(size_t {3}, profile["opcode_histogram"].size()); i++) {
+			const auto& opcode = profile["opcode_histogram"][i];
+			if (!opcode_summary.empty()) opcode_summary += '/';
+			opcode_summary += opcode["name"].get<std::string>() + ":" +
+			                  std::to_string(opcode["words"].get<uint64_t>());
 		}
+		const double repeat_share = profile["repeated_sequences"].empty()
+		                                ? 0.0
+		                                : profile["repeated_sequences"][0]["module_share_percent"]
+		                                      .get<double>();
 		std::printf("SPIRV_PROFILE rank=%zu words=%" PRIu64 " blocks=%u loops=%u functions=%" PRIu64
-		            " top=%s top_words=%" PRIu64 "\n",
+		            " categories=reg:%" PRIu64 ",resource:%" PRIu64 ",indirect:%" PRIu64
+		            ",bounds:%" PRIu64 ",wave:%" PRIu64 ",control:%" PRIu64
+		            ",types:%" PRIu64 ",debug:%" PRIu64 ",other:%" PRIu64
+		            " opcodes=%s repeat_share=%.2f\n",
 		            rank + 1, module.words, profile["blocks"].get<uint32_t>(),
 		            profile["loops"].get<uint32_t>(), profile["functions"].get<uint64_t>(),
-		            top.c_str(), top_words);
+		            category_words("function_register_load_store"),
+		            category_words("resource_access_helpers"),
+		            category_words("indirect_descriptor_search"), category_words("bounds_checks"),
+		            category_words("wave_lane_emulation"), category_words("phi_merge_scaffolding"),
+		            category_words("constants_types"), category_words("debug_names"),
+		            category_words("other"), opcode_summary.c_str(), repeat_share);
 	}
 }
 
