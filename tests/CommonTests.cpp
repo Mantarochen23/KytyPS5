@@ -166,9 +166,13 @@ extern "C" __attribute__((noinline, used)) void KytyFaultReportTestNullWrite(vol
 TEST(FaultReport, WorkerThreadFaultNamesModuleFunctionAndFrames) {
 	EXPECT_EXIT(
 	    {
+		    (void)!::write(2, "child start\n", 12);
 		    Common::FaultReport::RefreshModules();
-		    Common::HostException::InstallHandler(ReportAndExit);
+		    (void)!::write(2, "refreshed\n", 10);
+		    const bool installed = Common::HostException::InstallHandler(ReportAndExit);
+		    (void)!::write(2, installed ? "installed\n" : "not installed\n", installed ? 10 : 14);
 		    std::thread worker([] {
+			    (void)!::write(2, "worker\n", 7);
 			    Common::FaultReport::SetThreadTag("fault test tag", "fault-test-worker");
 			    Common::FaultReport::RegisterThreadStack();
 			    KytyFaultReportTestNullWrite(nullptr);
