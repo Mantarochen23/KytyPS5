@@ -18,6 +18,7 @@
 #include "graphics/host_gpu/renderer/colorRenderTarget.h"
 #include "graphics/host_gpu/renderer/debug.h"
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
+#include "graphics/host_gpu/renderer/pipeline/frameHoles.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
 #include "graphics/host_gpu/renderer/render.h"
@@ -804,6 +805,20 @@ static void AcquireVertexBuffers(CommandBuffer& buffer, const ShaderVertexInputI
 	}
 }
 
+static std::vector<uint64_t> CollectDrawTargetAddresses(const HW::Context& context) {
+	std::vector<uint64_t> addrs;
+	const uint32_t        mask = context.GetRenderTargetMask();
+	for (uint32_t slot = 0; slot < RENDER_COLOR_ATTACHMENTS_MAX; ++slot) {
+		if (render_target_mask_slot(mask, slot) == 0u) continue;
+		const auto addr = context.GetRenderTarget(slot).base.addr;
+		if (addr != 0) addrs.push_back(addr);
+	}
+	const auto& depth = context.GetDepthRenderTarget();
+	const auto  zaddr = depth.z_write_base_addr != 0 ? depth.z_write_base_addr : depth.z_read_base_addr;
+	if (zaddr != 0) addrs.push_back(zaddr);
+	return addrs;
+}
+
 static bool GetDrawTopology(const HW::UserConfig& ucfg, vk::PrimitiveTopology& topology) {
 
 	topology = vk::PrimitiveTopology::ePointList;
@@ -943,6 +958,8 @@ bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCal
 
 	if (targets.color_count == 0 && !targets.depth.image_id && !state.ps_active) {
 		LogFramebufferSkip(draw.Name(), targets.depth, buffer, draw.index_count, 0);
+		FrameHoles::NoteDrawSkip(FrameHoles::DrawSkipReason::NoTargets,
+		                         CollectDrawTargetAddresses(buffer.GetRegisters()));
 		return false;
 	}
 
@@ -1395,6 +1412,8 @@ bool RenderExecutor::DrawIndex(CommandBuffer& buffer, const DrawIndexArgs& args)
 	}
 
 	if (!DrawHasValidVertexShader(sh_ctx)) {
+		FrameHoles::NoteDrawSkip(FrameHoles::DrawSkipReason::NullShader,
+		                         CollectDrawTargetAddresses(buffer.GetRegisters()));
 		return true;
 	}
 
@@ -1422,6 +1441,8 @@ bool RenderExecutor::DrawIndex(CommandBuffer& buffer, const DrawIndexArgs& args)
 	DrawRenderState state {.indirect_offsets = args.indirect.offsets,
 	                       .indirect_draw    = args.indirect.address != 0};
 	if (!GetDrawTopology(ucfg, state.topology)) {
+		FrameHoles::NoteDrawSkip(FrameHoles::DrawSkipReason::UnsupportedStage,
+		                         CollectDrawTargetAddresses(buffer.GetRegisters()));
 		return true;
 	}
 
@@ -1488,6 +1509,8 @@ bool RenderExecutor::DrawAuto(CommandBuffer& buffer, const DrawAutoArgs& args) {
 	}
 
 	if (!DrawHasValidVertexShader(sh_ctx)) {
+		FrameHoles::NoteDrawSkip(FrameHoles::DrawSkipReason::NullShader,
+		                         CollectDrawTargetAddresses(buffer.GetRegisters()));
 		return true;
 	}
 
@@ -1513,6 +1536,8 @@ bool RenderExecutor::DrawAuto(CommandBuffer& buffer, const DrawAutoArgs& args) {
 	DrawRenderState state {.indirect_offsets = args.indirect.offsets,
 	                       .indirect_draw    = args.indirect.address != 0};
 	if (!GetDrawTopology(ucfg, state.topology)) {
+		FrameHoles::NoteDrawSkip(FrameHoles::DrawSkipReason::UnsupportedStage,
+		                         CollectDrawTargetAddresses(buffer.GetRegisters()));
 		ResetBindings();
 		return true;
 	}
@@ -1531,6 +1556,8 @@ bool RenderExecutor::DrawAuto(CommandBuffer& buffer, const DrawAutoArgs& args) {
 			     state.ps_input_info.input_num, sh_ctx.GetPs().ps_regs.data_addr,
 			     sh_ctx.GetVs().es_regs.data_addr, sh_ctx.GetVs().gs_regs.data_addr);
 		}
+		FrameHoles::NoteDrawSkip(FrameHoles::DrawSkipReason::RectNoExports,
+		                         CollectDrawTargetAddresses(buffer.GetRegisters()));
 		ResetBindings();
 		return true;
 	}

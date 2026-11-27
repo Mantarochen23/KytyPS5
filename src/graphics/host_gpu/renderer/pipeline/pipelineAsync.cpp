@@ -9,6 +9,7 @@
 #include "common/recoverable.h"
 #include "common/threads.h"
 #include "graphics/host_gpu/renderer/pipeline/asyncPlan.h"
+#include "graphics/host_gpu/renderer/pipeline/frameHoles.h"
 #include "graphics/host_gpu/renderer/pipeline/createStats.h"
 #include "graphics/host_gpu/renderer/pipeline/renderActivity.h"
 #include "graphics/host_gpu/renderer/pipeline/skippedDraws.h"
@@ -1088,11 +1089,24 @@ bool PipelineCache::EnsureGraphicsPipeline(const CommandBuffer&   command,
 			});
 		}, ShaderWorkers::Priority::Urgent, /*waited=*/true);
 	}
-	if (pipeline.failed) {
-		return false;
-	}
-	if (pipeline.pending) {
+	if (pipeline.failed || pipeline.pending) {
+		std::vector<uint64_t> addrs;
+		const auto&           ctx  = command.GetRegisters();
+		const uint32_t        mask = ctx.GetRenderTargetMask();
+		for (uint32_t slot = 0; slot < RENDER_COLOR_ATTACHMENTS_MAX; ++slot) {
+			if (render_target_mask_slot(mask, slot) == 0u) continue;
+			const auto addr = ctx.GetRenderTarget(slot).base.addr;
+			if (addr != 0) addrs.push_back(addr);
+		}
+		const auto& dt    = ctx.GetDepthRenderTarget();
+		const auto  zaddr = dt.z_write_base_addr != 0 ? dt.z_write_base_addr : dt.z_read_base_addr;
+		if (zaddr != 0) addrs.push_back(zaddr);
+		if (pipeline.failed) {
+			FrameHoles::NoteDrawSkip(FrameHoles::DrawSkipReason::PipelineFailed, addrs);
+			return false;
+		}
 		NoteDrawSkippedForShaders();
+		FrameHoles::NoteDrawSkip(FrameHoles::DrawSkipReason::PipelineBuilding, addrs);
 		return false;
 	}
 	return true;

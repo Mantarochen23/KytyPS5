@@ -21,6 +21,7 @@
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/renderer/pipeline/bufferProbe.h"
+#include "graphics/host_gpu/renderer/pipeline/frameHoles.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
@@ -671,7 +672,21 @@ static uint64_t SteadyNowMs() {
 	                                 .count());
 }
 
-void RenderExecutor::TaintSkippedDispatch() {
+static std::vector<uint64_t> WrittenAddresses(std::span<const SkipTaint::Use> uses) {
+	std::vector<uint64_t> addrs;
+	for (const auto& u: uses) {
+		if (u.written && u.base != 0) {
+			addrs.push_back(u.base);
+		}
+	}
+	return addrs;
+}
+
+void RenderExecutor::TaintSkippedDispatch(bool record_wait_hole) {
+	if (record_wait_hole) {
+		FrameHoles::NoteDispatchSkip(FrameHoles::DispatchSkipReason::Wait,
+		                             WrittenAddresses(m_pending_uses));
+	}
 	m_skip_taint.Taint(m_pending_uses, SteadyNowMs());
 	m_pending_uses.clear();
 }
@@ -820,6 +835,7 @@ bool RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 		LOGF("GraphicsRenderDispatchDirect: temporary: ignoring dispatch with null CS shader, "
 		     "groups=%ux%ux%u mode=%u\n",
 		     thread_group_x, thread_group_y, thread_group_z, mode);
+		FrameHoles::NoteDispatchSkip(FrameHoles::DispatchSkipReason::NullShader);
 		return true;
 	}
 
@@ -863,6 +879,9 @@ bool RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 	bool pending = false;
 	if (!m_context.GetPipelineCache().GetComputeProgram(cs_regs, input_info,
 	                                                    allow_async ? &pending : nullptr)) {
+		if (!pending) {
+			FrameHoles::NoteDispatchSkip(FrameHoles::DispatchSkipReason::FailedShader);
+		}
 		return !pending;
 	}
 	if (use_thread_dimensions) {
@@ -883,7 +902,9 @@ bool RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 		                       final_groups, mode, indirect_args,
 		                       indirect_args != 0 ? "indirect-threads" : "direct")) {
 			m_pending_uses = ComputeBufferUses(input_info.stage);
-			TaintSkippedDispatch();
+			FrameHoles::NoteDispatchSkip(FrameHoles::DispatchSkipReason::Refused,
+			                             WrittenAddresses(m_pending_uses));
+			TaintSkippedDispatch(/*record_wait_hole=*/false);
 			return true;
 		}
 	}
@@ -897,6 +918,9 @@ bool RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 	if (allow_async && !m_context.GetPipelineCache().EnsureComputePipeline(input_info, pending)) {
 		if (pending && Config::AsyncComputeWaitMs() != 0) {
 			m_pending_uses = ComputeBufferUses(input_info.stage);
+		} else if (!pending) {
+			FrameHoles::NoteDispatchSkip(FrameHoles::DispatchSkipReason::PipelineFailed,
+			                             WrittenAddresses(ComputeBufferUses(input_info.stage)));
 		}
 		return !pending;
 	}
@@ -909,6 +933,8 @@ bool RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 	                                                           sizeof(vk::DispatchIndirectCommand),
 	                                                           true, false}}
 	                           : std::vector<SkipTaint::Use> {})) {
+		FrameHoles::NoteDispatchSkip(FrameHoles::DispatchSkipReason::Tainted,
+		                             WrittenAddresses(ComputeBufferUses(input_info.stage)));
 		return true;
 	}
 
@@ -1080,6 +1106,7 @@ bool RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 	}
 	const auto& cs_regs = buffer.GetShaders().GetCs();
 	if (cs_regs.cs_regs.data_addr == 0) {
+		FrameHoles::NoteDispatchSkip(FrameHoles::DispatchSkipReason::NullShader);
 		return true;
 	}
 	ShaderComputeInputInfo input_info {};
@@ -1089,11 +1116,17 @@ bool RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 	bool pending = false;
 	if (!m_context.GetPipelineCache().GetComputeProgram(cs_regs, input_info,
 	                                                    allow_async ? &pending : nullptr)) {
+		if (!pending) {
+			FrameHoles::NoteDispatchSkip(FrameHoles::DispatchSkipReason::FailedShader);
+		}
 		return !pending;
 	}
 	if (allow_async && !m_context.GetPipelineCache().EnsureComputePipeline(input_info, pending)) {
 		if (pending && Config::AsyncComputeWaitMs() != 0) {
 			m_pending_uses = ComputeBufferUses(input_info.stage);
+		} else if (!pending) {
+			FrameHoles::NoteDispatchSkip(FrameHoles::DispatchSkipReason::PipelineFailed,
+			                             WrittenAddresses(ComputeBufferUses(input_info.stage)));
 		}
 		return !pending;
 	}
@@ -1101,6 +1134,8 @@ bool RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 	if (allow_async &&
 	    SkipOnTaintedInput(m_skip_taint, input_info.stage,
 	                       {{args_addr, sizeof(vk::DispatchIndirectCommand), true, false}})) {
+		FrameHoles::NoteDispatchSkip(FrameHoles::DispatchSkipReason::Tainted,
+		                             WrittenAddresses(ComputeBufferUses(input_info.stage)));
 		return true;
 	}
 	if (args_on_host) {
@@ -1108,7 +1143,9 @@ bool RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 		if (JudgeLargeDispatch(m_skip_taint, input_info.stage, cs_regs, input_info.threads_num,
 		                       final_groups, mode, args_addr, "indirect")) {
 			m_pending_uses = ComputeBufferUses(input_info.stage);
-			TaintSkippedDispatch();
+			FrameHoles::NoteDispatchSkip(FrameHoles::DispatchSkipReason::Refused,
+			                             WrittenAddresses(m_pending_uses));
+			TaintSkippedDispatch(/*record_wait_hole=*/false);
 			return true;
 		}
 	}

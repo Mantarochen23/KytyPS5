@@ -13,6 +13,7 @@
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/guest_gpu/tile.h"
 #include "graphics/host_gpu/renderer/image/imageInfo.h"
+#include "graphics/host_gpu/renderer/pipeline/frameHoles.h"
 #include "graphics/host_gpu/renderer/pipeline/skippedDraws.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
@@ -968,6 +969,7 @@ void FlipQueue::Cancel(VideoOutConfig& cfg) {
 void FlipQueue::Prepare(uint64_t request_id, Graphics::CommandBuffer& buffer) {
 	// The draws recorded before this flip are the ones its frame is made of.
 	const bool      incomplete = Graphics::TakeDrawsSkippedForShaders();
+	Graphics::FrameHoles::FlushFrame(Graphics::CurrentFrame() + 1u);
 	Graphics::NoteFrameFlipped();
 	VideoOutConfig* cfg        = nullptr;
 	uint64_t        generation = 0;

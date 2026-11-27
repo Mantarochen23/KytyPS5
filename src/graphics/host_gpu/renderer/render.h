@@ -154,7 +154,7 @@ public:
 	void ProcessPssr(CommandBuffer& buffer, const Pssr::Request& request);
 	// The dispatch that just returned false (shader work pending) is being skipped: what it would
 	// have written is tainted (--async-compute-wait-ms, skipTaint.h).
-	void TaintSkippedDispatch();
+	void TaintSkippedDispatch(bool record_wait_hole = true);
 
 	void PrepareBindings(const ShaderStageRuntime& runtime, PreparedBindings& prepared);
 	void                           FindBuffers(std::span<PreparedBindings* const> stages);
