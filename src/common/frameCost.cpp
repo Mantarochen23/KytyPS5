@@ -259,7 +259,8 @@ ReportLines FormatWindow(const std::array<uint64_t, CounterCount>& delta, double
 	    "coal={:.2f} quad_ex={:.2f} skip={:.2f}) "
 	    "calls_disp(dir={:.2f} ind={:.2f} ind_tdim={:.2f} guard={:.2f} oa_ex={:.2f} "
 	    "skip={:.2f} bvh={:.2f}) "
-	    "barriers_all={:.2f} "
+	    "barriers_all={:.2f} barriers(global={:.2f} buffer={:.2f} image={:.2f}) "
+	    "pass_breaks={:.2f} barriers_dropped={:.2f} "
 	    "draw_ns(n={} prog={:.0f} rt={:.0f} pipe={:.0f} bind={:.0f} commit={:.0f} rec={:.0f}) "
 	    "disp_ns(n={} prog={:.0f} pipe={:.0f} bind={:.0f} guard={:.0f} commit={:.0f} rec={:.0f})\n",
 	    wait_gpu_bg_ms, Milliseconds(delta, Counter::WaitReadbackNs, frames),
@@ -299,6 +300,9 @@ ReportLines FormatWindow(const std::array<uint64_t, CounterCount>& delta, double
 	    Mean(delta, Counter::DispatchesSkipped, frames),
 	    Mean(delta, Counter::BvhDispatches, frames),
 	    Mean(delta, Counter::BarriersAllCommands, frames),
+	    Mean(delta, Counter::BarriersGlobal, frames), Mean(delta, Counter::BarriersBuffer, frames),
+	    Mean(delta, Counter::BarriersImage, frames), Mean(delta, Counter::PassBreaks, frames),
+	    Mean(delta, Counter::BarriersDropped, frames),
 	    delta[static_cast<size_t>(Counter::DrawStepSamples)],
 	    NanosecondsPerCall(delta, Counter::DrawStepProgramsNs, Counter::DrawStepSamples),
 	    NanosecondsPerCall(delta, Counter::DrawStepTargetsNs, Counter::DrawStepSamples),

@@ -177,6 +177,13 @@ enum class Counter : uint8_t {
 	TableMarkRanges,
 	// Rebuilt tables of typed or image-synced buffers with a candidate range inside a registered image.
 	TableImageAliased,
+	// Barriers recorded by kind (global memory, buffer, image), render pass breaks, and barriers
+	// the barrier tracker did not record.
+	BarriersGlobal,
+	BarriersBuffer,
+	BarriersImage,
+	PassBreaks,
+	BarriersDropped,
 	Count
 };
 
