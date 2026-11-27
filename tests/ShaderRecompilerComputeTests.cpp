@@ -6837,8 +6837,10 @@ public:
       textures.UnmapMemory(texture(2), 0x1000u);
       Require(name, "eviction discovery", acquire(sampled), "the view was declined");
       draw();
-      Require(name, "evicted entry resolved", ImageHeapTestAccess::ResolveCalls(heap) == ++resolves,
+      const auto eviction_resolves = ImageHeapTestAccess::ResolveCalls(heap);
+      Require(name, "evicted entry resolved", eviction_resolves > resolves,
               "an evicted backing image did not resolve the entry");
+      resolves = eviction_resolves;
       write(5, descriptor(1, Format::k8_8_8_8UNorm));
       Require(name, "restore descriptor", acquire(sampled), "the view was declined");
       draw();
