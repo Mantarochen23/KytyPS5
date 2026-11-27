@@ -1401,6 +1401,9 @@ bool RenderExecutor::DrawIndex(CommandBuffer& buffer, const DrawIndexArgs& args)
 	Common::FrameCost::ScopedTimer lock_wait(Common::FrameCost::Counter::LockWaitNs);
 	Common::LockGuard              lock(m_context.GetMutex());
 	lock_wait.Stop();
+	if (!m_skip_catchup.Empty()) {
+		DrainSkippedDispatchesLocked(buffer);
+	}
 	if (args.index_count == 0 || (args.instance_count == 0 && args.indirect.address == 0)) {
 		return true;
 	}
@@ -1498,6 +1501,9 @@ bool RenderExecutor::DrawAuto(CommandBuffer& buffer, const DrawAutoArgs& args) {
 	Common::FrameCost::ScopedTimer lock_wait(Common::FrameCost::Counter::LockWaitNs);
 	Common::LockGuard              lock(m_context.GetMutex());
 	lock_wait.Stop();
+	if (!m_skip_catchup.Empty()) {
+		DrainSkippedDispatchesLocked(buffer);
+	}
 	if (args.indirect.address == 0 && (args.vertex_count == 0 || args.instance_count == 0)) {
 		return true;
 	}

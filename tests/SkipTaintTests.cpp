@@ -1,3 +1,4 @@
+#include "graphics/host_gpu/renderer/pipeline/skipCatchUp.h"
 #include "graphics/host_gpu/renderer/pipeline/skipTaint.h"
 
 #include <cstdio>
@@ -56,12 +57,56 @@ void TestTransitiveAndExpiry() {
 	Check(taint.Empty(), "expired ranges are dropped");
 }
 
+void TestCatchUpReplaysProducerBeforeConsumer() {
+	SkipTaint                     taint;
+	SkipCatchUp::Queue<uint32_t>  queue(5000);
+	const std::vector<Use>        prod_uses {{0x2000, 256, false, true}};
+	const std::vector<Use>        cons_uses {{0x2000, 256, true, false}, {0x3000, 256, false, true}};
+
+	// Producer skipped on wait; consumer skipped because it reads producer's tainted buffer.
+	taint.Taint(prod_uses, 100);
+	queue.Enqueue(1, 0xaaaa000000000001ull, prod_uses, 101u, 100);
+	Check(taint.ReadsTainted(cons_uses, 105), "consumer sees producer output tainted");
+	taint.Taint(cons_uses, 105);
+	queue.Enqueue(2, 0xaaaa000000000002ull, cons_uses, 102u, 105);
+	// Duplicate skip of same producer refreshes instead of growing the queue.
+	queue.Enqueue(1, 0xaaaa000000000001ull, prod_uses, 101u, 110);
+	Check(queue.Size() == 2, "duplicate key deduplicates");
+
+	// While producer shader is still pending, consumer is still waiting on producer.
+	auto none = queue.TakeReady(200, [](const auto&) { return SkipCatchUp::ProbeState::Pending; });
+	Check(none.empty() && queue.Size() == 2, "pending entries remain queued");
+
+	// Once producer & consumer shaders are ready, both replay in submission order and clear taint.
+	auto ready = queue.TakeReady(300, [](const auto&) { return SkipCatchUp::ProbeState::Ready; });
+	Check(ready.size() == 2 && ready[0].payload == 101u && ready[1].payload == 102u,
+	      "producer replays before consumer in FIFO order");
+	for (const auto& entry: ready) {
+		taint.ClearWritten(entry.uses);
+	}
+	Check(taint.Empty() && queue.Empty(), "replay clears taint and drains queue");
+	Check(queue.GetStats().replayed == 2, "replayed stat tracks replays");
+
+	// Superseded producer is dropped if a fresh dispatch already overwrote its outputs.
+	queue.Enqueue(3, 0xaaaa000000000003ull, prod_uses, 103u, 400);
+	queue.DropSuperseded({{0x2000, 512, false, true}});
+	Check(queue.Empty() && queue.GetStats().superseded == 1,
+	      "covering write supersedes stale queued producer");
+
+	// Permanently failed shader is dropped cleanly instead of retrying forever.
+	queue.Enqueue(4, 0xaaaa000000000004ull, prod_uses, 104u, 500);
+	auto failed = queue.TakeReady(600, [](const auto&) { return SkipCatchUp::ProbeState::Failed; });
+	Check(failed.empty() && queue.Empty() && queue.GetStats().dropped_failed == 1,
+	      "permanent failure drops queued entry");
+}
+
 } // namespace
 
 int main() {
 	TestFollowsData();
 	TestClearAndSplit();
 	TestTransitiveAndExpiry();
+	TestCatchUpReplaysProducerBeforeConsumer();
 	std::printf("SkipTaintTests: ok\n");
 	return 0;
 }

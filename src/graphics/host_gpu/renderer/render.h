@@ -7,6 +7,7 @@
 #include "graphics/host_gpu/renderer/dispatchGuard.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
+#include "graphics/host_gpu/renderer/pipeline/skipCatchUp.h"
 #include "graphics/host_gpu/renderer/pipeline/skipTaint.h"
 #include "graphics/host_gpu/renderer/renderTarget.h"
 #include "graphics/host_gpu/renderer/upscaler/upscaler.h"
@@ -171,6 +172,22 @@ private:
 	bool DrawIndex(CommandBuffer& buffer, const DrawIndexArgs& args);
 	bool DrawAuto(CommandBuffer& buffer, const DrawAutoArgs& args);
 
+	struct CapturedDispatch {
+		HW::ComputeShaderInfo cs_regs {};
+		uint32_t              groups[3]     = {0, 0, 0};
+		uint32_t              mode          = 0;
+		bool                  async_compute = false;
+		uint64_t              indirect_args = 0;
+		bool                  is_indirect   = false;
+	};
+
+	bool DispatchDirectLocked(CommandBuffer& buffer, uint32_t thread_group_x,
+	                          uint32_t thread_group_y, uint32_t thread_group_z, uint32_t mode,
+	                          bool async_compute, bool allow_async, uint64_t indirect_args);
+	bool DispatchIndirectLocked(CommandBuffer& buffer, uint64_t args_addr, uint32_t mode,
+	                            bool async_compute, bool allow_async);
+	void DrainSkippedDispatchesLocked(CommandBuffer& buffer);
+
 	struct GraphicsBindings {
 		std::array<PreparedBindings, 3> vertex;
 		PreparedBindings                pixel;
@@ -233,9 +250,12 @@ private:
 	vk::DescriptorSetLayout               m_pssr_descriptor_layout = nullptr;
 	vk::PipelineLayout                    m_pssr_pipeline_layout   = nullptr;
 	vk::Pipeline                          m_pssr_pipeline          = nullptr;
-	// Outputs of skipped dispatches, and the buffer use of the dispatch that last returned pending.
-	SkipTaint                             m_skip_taint;
-	std::vector<SkipTaint::Use>           m_pending_uses;
+	// Outputs of skipped dispatches, and the buffer use / state of the dispatch that last returned pending.
+	SkipTaint                                  m_skip_taint;
+	std::vector<SkipTaint::Use>                m_pending_uses;
+	std::optional<CapturedDispatch>            m_pending_dispatch;
+	SkipCatchUp::Queue<CapturedDispatch>       m_skip_catchup;
+	bool                                       m_replaying_catchup = false;
 	// Created by the first guarded indirect dispatch.
 	std::unique_ptr<DispatchArgsGuard>    m_dispatch_guard;
 	std::vector<UpscalerContext>          m_upscaler_contexts;
