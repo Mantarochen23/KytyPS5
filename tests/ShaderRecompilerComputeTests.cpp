@@ -7813,8 +7813,11 @@ public:
     ShaderModule module;
     module.id = 1;
     module.info.stage = ShaderType::Compute;
-    module.info.info.buffers.push_back({.read = true, .live = true});
+    module.info.info.buffers.push_back({.read = true, .written = true, .live = true});
+    module.info.bindings.descriptor_counts[static_cast<size_t>(
+        ShaderRecompiler::IR::DescriptorBindingKind::FlattenedSrt)] = 1;
     ShaderRecompiler::IR::ResourceSnapshot snapshot;
+    snapshot.flattened_srt.resize(3);
     auto &table = snapshot.indirect_buffer_tables.emplace_back();
     table.root_resource = 0;
     table.candidate_key = {1, 2};
@@ -7864,6 +7867,16 @@ public:
             bindings.indirect_tables[0].table_bda == rebuilt_bda &&
                 bindings.indirect_tables[0].state == rebuilt_state,
             "the rebuilt table did not become persistent");
+
+    const auto low_stamp = cache.WriteStamp(base, page);
+    const auto high_stamp = cache.WriteStamp(base + 2 * page, page);
+    executor.RebindBuffers(bindings);
+    Require(name, "cached write union",
+            cache.IsRegionGpuModified(base, page) &&
+                cache.IsRegionGpuModified(base + 2 * page, page) &&
+                cache.WriteStamp(base, page) > low_stamp &&
+                cache.WriteStamp(base + 2 * page, page) > high_stamp,
+            "a writable table did not preserve GPU ownership and write stamps for later reads");
 
     context.UnmapMemory(base, page);
     context.UnmapMemory(base + 2 * page, page);
