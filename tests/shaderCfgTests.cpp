@@ -1,5 +1,6 @@
 #include "common/emulatorConfig.h"
 #include "common/logging/log.h"
+#include "common/ports.h"
 #include "common/stringUtils.h"
 #include "common/subsystems.h"
 #include "common/threads.h"
@@ -14238,6 +14239,329 @@ void TestAtomicImageUint8Shader() {
   }
 }
 
+void TestIndirectFormattedStride16StoreShader() {
+  using F = Prospero::BufferFormat;
+  const auto make_desc = [](uint64_t base, uint32_t stride, uint32_t records, F fmt,
+                            uint32_t swizzle) {
+    return std::array<uint32_t, 4>{
+        static_cast<uint32_t>(base),
+        static_cast<uint32_t>((base >> 32u) & 0xffffu) | (stride << 16u),
+        records,
+        swizzle | (static_cast<uint32_t>(fmt) << 12u),
+    };
+  };
+  // Compute shader: GPU-selected key -> s_buffer_load_dwordx4 from a 16-byte-stride table V#
+  // (0x00005204) -> indexed buffer_store_format_xyzw into stride-16 formatted candidates.
+  const uint32_t shader[] = {
+      EncodeVop3Word0(0x182, 4),
+      EncodeVop3Word1(256u + 0u, 0, 0), // v_readfirstlane_b32 s4, v0
+      EncodeSop2(0x0e, 4, 4, 255),
+      0x00000007u,                      // s_and_b32 s4, s4, 7
+      EncodeSop2(0x1e, 4, 4, 132),      // s_lshl_b32 s4, s4, 4
+      EncodeSmem0(0x0a, 8, 0),
+      4u << 25u,                        // s_buffer_load_dwordx4 s[8:11], s[0:3], s4
+      0xbf8cc07fu,                      // s_waitcnt lgkmcnt(0)
+      EncodeMubuf0(0x07, 0, true),
+      EncodeMubuf1(1, 2, 0),            // buffer_store_format_xyzw v[1:4], v0, s[8:11], 0 idxen
+      EncodeSopp(0x01),                 // s_endpgm
+  };
+  alignas(16) std::array<std::array<uint32_t, 4>, 8> table_rows{{
+      make_desc(0x1004700000ull, 16u, 1024u, F::k8UInt, DstSel(4, 0, 0, 1)),
+      make_desc(0x1004710000ull, 16u, 1024u, F::k32Float, DstSel(4, 0, 0, 1)),
+      make_desc(0x1004720000ull, 16u, 1024u, F::k8_8_8_8UNorm, DstSel(4, 5, 6, 7)),
+      make_desc(0x1004730000ull, 16u, 1024u, F::k10_10_10_2UNorm, DstSel(4, 5, 6, 7)),
+      make_desc(0x1004740000ull, 16u, 1024u, F::k32_32_32_32Float, DstSel(4, 5, 6, 7)),
+      {0u, 0u, 0u, 0u},
+      {0u, 0u, 0u, 0u},
+      {0u, 0u, 0u, 0u},
+  }};
+  const auto table_addr = reinterpret_cast<uint64_t>(table_rows.data());
+  std::array<uint32_t, 4> user_data{
+      static_cast<uint32_t>(table_addr),
+      static_cast<uint32_t>((table_addr >> 32u) & 0xffffu) | (16u << 16u),
+      static_cast<uint32_t>(table_rows.size()),
+      0x00005204u,
+  };
+  auto options = MakeCompileOptions(ShaderType::Compute);
+  ShaderComputeInputInfo compute = *options.input_info.compute;
+  compute.thread_ids_num = 1u;
+  compute.threads_num[0] = 64u;
+  options.input_info.compute = &compute;
+  options.user_data = user_data;
+  const ShaderRecompiler::IR::SrtRuntime runtime{
+      .user_data = user_data, .read_specialization_memory = ReadHostTestMemory};
+
+  // Port OFF: materialization must fail with decoded diagnostic.
+  Config::SetDisabledPorts({"indirect-formatted-stores"});
+  {
+    auto translated = ShaderRecompiler::TranslateProgram(shader, options);
+    const auto plan = ShaderRecompiler::IR::ExtractResourcePlan(translated.program);
+    ShaderRecompiler::IR::ResourceSnapshot snapshot;
+    ShaderRecompiler::IR::ResourceSpecialization specialization;
+    std::string reason;
+    const bool ok = ShaderRecompiler::IR::MaterializeResources(plan, runtime, snapshot,
+                                                               specialization, &reason);
+    if (ok || reason.find("format=k8UInt(5)") == std::string::npos ||
+        reason.find("stride=16") == std::string::npos ||
+        reason.find("nearest=") == std::string::npos ||
+        reason.find("first_diff=") == std::string::npos) {
+      std::fprintf(stderr, "TestIndirectFormattedStride16StoreShader port-off: ok=%d reason=%s\n",
+                   ok, reason.c_str());
+      Check(false, "stride-16 formatted indirect store shader did not fail cleanly with port disabled");
+    }
+  }
+
+  // Port ON: full translate -> materialize -> SPIR-V emit -> Vulkan 1.3 spirv-val.
+  Config::SetDisabledPorts({});
+  const auto result = RecompileForTest(shader, options);
+  spvtools::SpirvTools tools(SPV_ENV_VULKAN_1_3);
+  Check(tools.Validate(result.spirv.data(), result.spirv.size()),
+        "stride-16 general formatted indirect store shader failed Vulkan 1.3 SPIR-V validation");
+}
+
+void TestFiniteBufferDescriptorShapesShader() {
+  const auto check_shape = [](const char *name, std::span<const uint32_t> code,
+                              std::span<const uint32_t> user_data,
+                              size_t expected_candidates) {
+    auto options = MakeCompileOptions(ShaderType::Compute);
+    ShaderComputeInputInfo compute = *options.input_info.compute;
+    compute.thread_ids_num = 1u;
+    compute.threads_num[0] = 64u;
+    options.input_info.compute = &compute;
+    options.user_data = user_data;
+
+    // Port OFF: must fail resource tracking with one-line self-explaining diagnostic.
+    Config::SetDisabledPorts({"finite-buffer-descriptors"});
+    bool failed = false;
+    std::string error;
+    try {
+      (void)ShaderRecompiler::TranslateProgram(code, options);
+    } catch (const std::runtime_error &e) {
+      failed = true;
+      error = e.what();
+    }
+    if (!failed ||
+        error.find("buffer descriptor is not a valid runtime value") == std::string::npos ||
+        error.find("bad_dword=") == std::string::npos ||
+        error.find("nearest=") == std::string::npos ||
+        error.find("first_diff=") == std::string::npos) {
+      std::fprintf(stderr, "TestFiniteBufferDescriptorShapesShader(%s) port-off: failed=%d err=%s\n",
+                   name, failed, error.c_str());
+      Check(false, name);
+    }
+
+    // Port ON: must track, materialize the expected candidate set, and emit valid Vulkan 1.3 SPIR-V.
+    Config::SetDisabledPorts({});
+    auto translated = ShaderRecompiler::TranslateProgram(code, options);
+    const auto plan = ShaderRecompiler::IR::ExtractResourcePlan(translated.program);
+    ShaderRecompiler::IR::ResourceSnapshot snapshot;
+    ShaderRecompiler::IR::ResourceSpecialization specialization;
+    const ShaderRecompiler::IR::SrtRuntime runtime{
+        .user_data = user_data, .read_specialization_memory = ReadHostTestMemory};
+    std::string mat_error;
+    if (!ShaderRecompiler::IR::MaterializeResources(plan, runtime, snapshot, specialization,
+                                                    &mat_error) ||
+        !mat_error.empty()) {
+      std::fprintf(stderr, "TestFiniteBufferDescriptorShapesShader(%s) mat failed: %s\n", name,
+                   mat_error.c_str());
+      Check(false, name);
+    }
+    if (specialization.buffers.size() != expected_candidates) {
+      std::fprintf(stderr, "TestFiniteBufferDescriptorShapesShader(%s): candidates=%zu expected=%zu\n",
+                   name, specialization.buffers.size(), expected_candidates);
+      Check(false, name);
+    }
+    const auto compiled =
+        ShaderRecompiler::CompileProgram(std::move(translated), options, specialization);
+    spvtools::SpirvTools tools(SPV_ENV_VULKAN_1_3);
+    Check(tools.Validate(compiled.spirv.data(), compiled.spirv.size()), name);
+  };
+
+  // Shared user data: s[0:3] = base V#, s[4:7] = alt V#, s[8:9] = SRT ptr.
+  alignas(16) std::array<uint32_t, 4> srt_buf{0x200000u, 0x00040010u, 256u, 0x00014004u};
+  const auto srt_addr = reinterpret_cast<uint64_t>(srt_buf.data());
+  const std::array<uint32_t, 12> user_data{
+      0x100000u, 0x00040010u, 256u, 0x00014004u,
+      0x180000u, 0x00040010u, 256u, 0x00014004u,
+      static_cast<uint32_t>(srt_addr), static_cast<uint32_t>(srt_addr >> 32u),
+      0x280000u, 0x00040010u,
+  };
+
+  // Shape 1: GetBufferResource->ReadFirstLane->SelectU32->IAdd32->GetUserData->ScalarReg
+  const uint32_t shape_rfl_sel_add[] = {
+      EncodeVop1(0x01, 2, 128 + 16),                 // v_mov_b32 v2, 16
+      EncodeVop2(0x25, 3, 0, 2),                     // v_add_nc_u32 v3, s0, v2
+      EncodeVop1(0x01, 4, 128 + 32),                 // v_mov_b32 v4, 32
+      EncodeVop2(0x25, 5, 0, 4),                     // v_add_nc_u32 v5, s0, v4
+      EncodeVopc(0xc2, 128 + 0, 0),                  // v_cmp_eq_u32 vcc, 0, v0
+      EncodeVop2(0x01, 6, 256 + 3, 5),               // v_cndmask_b32 v6, v3, v5, vcc
+      EncodeVop3Word0(0x182, 12),
+      EncodeVop3Word1(256u + 6u, 0, 0),              // v_readfirstlane_b32 s12, v6
+      EncodeSMovB32(13, 1),
+      EncodeSMovB32(14, 2),
+      EncodeSMovB32(15, 3),
+      EncodeMubuf0(0x1c, 0, true),
+      EncodeMubuf1(1, 3, 0),                         // buffer_store_dword v1, v0, s[12:15], 0 idxen
+      EncodeSopp(0x01),
+  };
+  check_shape("Shape ReadFirstLane->SelectU32->IAdd32->GetUserData", shape_rfl_sel_add, user_data, 2u);
+
+  // Shape 2: GetBufferResource->ReadFirstLane->SelectU32->IAdd32->IAdd32->GetUserData
+  const uint32_t shape_rfl_sel_add2[] = {
+      EncodeVop1(0x01, 2, 128 + 16),                 // v_mov_b32 v2, 16
+      EncodeVop2(0x25, 3, 0, 2),                     // v_add_nc_u32 v3, s0, v2
+      EncodeVop2(0x25, 3, 128 + 32, 3),              // v_add_nc_u32 v3, 32, v3
+      EncodeVop2(0x25, 4, 0, 2),                     // v_add_nc_u32 v4, s0, v2
+      EncodeVop2(0x25, 4, 128 + 64, 4),              // v_add_nc_u32 v4, 64, v4
+      EncodeVopc(0xc2, 128 + 0, 0),                  // v_cmp_eq_u32 vcc, 0, v0
+      EncodeVop2(0x01, 5, 256 + 3, 4),               // v_cndmask_b32 v5, v3, v4, vcc
+      EncodeVop3Word0(0x182, 12),
+      EncodeVop3Word1(256u + 5u, 0, 0),              // v_readfirstlane_b32 s12, v5
+      EncodeSMovB32(13, 1),
+      EncodeSMovB32(14, 2),
+      EncodeSMovB32(15, 3),
+      EncodeMubuf0(0x1c, 0, true),
+      EncodeMubuf1(1, 3, 0),
+      EncodeSopp(0x01),
+  };
+  check_shape("Shape ReadFirstLane->SelectU32->IAdd32->IAdd32->GetUserData", shape_rfl_sel_add2,
+              user_data, 2u);
+
+  // Shape 3: GetBufferResource->ReadFirstLane->SelectU32->SelectU32->SelectU32->SelectU32->...
+  const uint32_t shape_rfl_sel_chain[] = {
+      EncodeVop1(0x01, 2, 0),                        // v_mov_b32 v2, s0
+      EncodeVopc(0xc2, 128 + 1, 0),                  // v_cmp_eq_u32 vcc, 1, v0
+      EncodeVop2(0x01, 2, 4, 2),                     // v_cndmask_b32 v2, s4, v2, vcc
+      EncodeVopc(0xc2, 128 + 2, 0),                  // v_cmp_eq_u32 vcc, 2, v0
+      EncodeVop2(0x01, 2, 10, 2),                    // v_cndmask_b32 v2, s10, v2, vcc
+      EncodeVopc(0xc2, 128 + 3, 0),                  // v_cmp_eq_u32 vcc, 3, v0
+      EncodeVop2(0x01, 2, 0, 2),                     // v_cndmask_b32 v2, s0, v2, vcc
+      EncodeVopc(0xc2, 128 + 4, 0),                  // v_cmp_eq_u32 vcc, 4, v0
+      EncodeVop2(0x01, 2, 4, 2),                     // v_cndmask_b32 v2, s4, v2, vcc
+      EncodeVop3Word0(0x182, 12),
+      EncodeVop3Word1(256u + 2u, 0, 0),              // v_readfirstlane_b32 s12, v2
+      EncodeSMovB32(13, 1),
+      EncodeSMovB32(14, 2),
+      EncodeSMovB32(15, 3),
+      EncodeMubuf0(0x1c, 0, true),
+      EncodeMubuf1(1, 3, 0),
+      EncodeSopp(0x01),
+  };
+  check_shape("Shape ReadFirstLane->SelectU32 chain (4+ selects)", shape_rfl_sel_chain, user_data,
+              3u);
+
+  // Shape 4: GetBufferResource->IAdd32->IAdd32->ReadConst->GetSrtResource (with carry into word1)
+  const uint32_t shape_add2_srt[] = {
+      EncodeSmem0(0x02, 16, 4), (125u << 25u),       // s_load_dwordx4 s[16:19], s[8:9], 0
+      0xbf8cc07fu,                                   // s_waitcnt lgkmcnt(0)
+      EncodeVop3Word0(0x182, 20),
+      EncodeVop3Word1(256u + 0u, 0, 0),              // v_readfirstlane_b32 s20, v0
+      EncodeSopc(0x00, 20, 128 + 0),                 // s_cmp_eq_u32 s20, 0
+      EncodeSop2(0x0a, 21, 128 + 16, 128 + 32),      // s_cselect_b32 s21, 16, 32
+      EncodeSop2(0x00, 12, 16, 128 + 64),            // s_add_u32 s12, s16, 64
+      EncodeSop2(0x00, 12, 12, 21),                  // s_add_u32 s12, s12, s21
+      EncodeSop2(0x04, 13, 17, 128 + 0),             // s_addc_u32 s13, s17, 0
+      EncodeSMovB32(14, 18),
+      EncodeSMovB32(15, 19),
+      EncodeMubuf0(0x1c, 0, true),
+      EncodeMubuf1(1, 3, 0),
+      EncodeSopp(0x01),
+  };
+  check_shape("Shape IAdd32->IAdd32->ReadConst->GetSrtResource", shape_add2_srt, user_data, 2u);
+
+  // Shape 5: GetBufferResource->ReadFirstLane->IAdd32->GetUserData->ScalarReg
+  const uint32_t shape_rfl_add[] = {
+      EncodeVopc(0xc2, 128 + 0, 0),                  // v_cmp_eq_u32 vcc, 0, v0
+      EncodeVop1(0x01, 2, 128 + 16),                 // v_mov_b32 v2, 16
+      EncodeVop2(0x01, 3, 128 + 32, 2),              // v_cndmask_b32 v3, 32, v2, vcc
+      EncodeVop2(0x25, 4, 0, 3),                     // v_add_nc_u32 v4, s0, v3
+      EncodeVop3Word0(0x182, 12),
+      EncodeVop3Word1(256u + 4u, 0, 0),              // v_readfirstlane_b32 s12, v4
+      EncodeSMovB32(13, 1),
+      EncodeSMovB32(14, 2),
+      EncodeSMovB32(15, 3),
+      EncodeMubuf0(0x1c, 0, true),
+      EncodeMubuf1(1, 3, 0),
+      EncodeSopp(0x01),
+  };
+  check_shape("Shape ReadFirstLane->IAdd32->GetUserData", shape_rfl_add, user_data, 2u);
+
+  // Shape 6: GetBufferResource->Phi->Phi->IAdd32->GetUserData->ScalarReg
+  const uint32_t shape_phi_phi_add[] = {
+      EncodeVop3Word0(0x182, 20),
+      EncodeVop3Word1(256u + 0u, 0, 0),              // v_readfirstlane_b32 s20, v0
+      EncodeSopc(0x00, 20, 128 + 0),                 // s_cmp_eq_u32 s20, 0
+      EncodeSopp(0x04, 2),                           // s_cbranch_scc0 +2 (to else1)
+      EncodeSop2(0x00, 12, 0, 128 + 16),             // s_add_u32 s12, s0, 16
+      EncodeSopp(0x02, 5),                           // s_branch +5 (to merge)
+      // else1:
+      EncodeSopc(0x00, 20, 128 + 1),                 // s_cmp_eq_u32 s20, 1
+      EncodeSopp(0x04, 2),                           // s_cbranch_scc0 +2 (to else2)
+      EncodeSop2(0x00, 12, 0, 128 + 32),             // s_add_u32 s12, s0, 32
+      EncodeSopp(0x02, 1),                           // s_branch +1 (to merge)
+      // else2:
+      EncodeSop2(0x00, 12, 0, 128 + 48),             // s_add_u32 s12, s0, 48
+      // merge:
+      EncodeSMovB32(13, 1),
+      EncodeSMovB32(14, 2),
+      EncodeSMovB32(15, 3),
+      EncodeMubuf0(0x1c, 0, true),
+      EncodeMubuf1(1, 3, 0),
+      EncodeSopp(0x01),
+  };
+  check_shape("Shape Phi->Phi->IAdd32->GetUserData", shape_phi_phi_add, user_data, 3u);
+
+  // Shape 7: GetBufferResource->GetUserData->ScalarReg (word0 is valid GetUserData, word2 selected)
+  const uint32_t shape_ud_word2_sel[] = {
+      EncodeVopc(0xc2, 128 + 0, 0),                  // v_cmp_eq_u32 vcc, 0, v0
+      EncodeVop1(0x01, 2, 128 + 64),                 // v_mov_b32 v2, 64
+      EncodeVop2(0x01, 3, 2, 2),                     // v_cndmask_b32 v3, s2, v2, vcc
+      EncodeVop3Word0(0x182, 14),
+      EncodeVop3Word1(256u + 3u, 0, 0),              // v_readfirstlane_b32 s14, v3
+      EncodeSMovB32(12, 0),
+      EncodeSMovB32(13, 1),
+      EncodeSMovB32(15, 3),
+      EncodeMubuf0(0x1c, 0, true),
+      EncodeMubuf1(1, 3, 0),
+      EncodeSopp(0x01),
+  };
+  check_shape("Shape GetUserData->ScalarReg with GPU-selected word2", shape_ud_word2_sel,
+              user_data, 2u);
+
+  // Truly non-finite GPU-computed address (base + thread_id) must still fail with exact leaf.
+  const uint32_t non_finite[] = {
+      EncodeVop2(0x25, 2, 0, 0),                     // v_add_nc_u32 v2, s0, v0
+      EncodeVop3Word0(0x182, 12),
+      EncodeVop3Word1(256u + 2u, 0, 0),              // v_readfirstlane_b32 s12, v2
+      EncodeSMovB32(13, 1),
+      EncodeSMovB32(14, 2),
+      EncodeSMovB32(15, 3),
+      EncodeMubuf0(0x1c, 0, true),
+      EncodeMubuf1(1, 3, 0),
+      EncodeSopp(0x01),
+  };
+  Config::SetDisabledPorts({});
+  auto options = MakeCompileOptions(ShaderType::Compute);
+  ShaderComputeInputInfo compute = *options.input_info.compute;
+  compute.thread_ids_num = 1u;
+  compute.threads_num[0] = 64u;
+  options.input_info.compute = &compute;
+  options.user_data = user_data;
+  bool non_finite_failed = false;
+  std::string non_finite_error;
+  try {
+    (void)ShaderRecompiler::TranslateProgram(non_finite, options);
+  } catch (const std::runtime_error &e) {
+    non_finite_failed = true;
+    non_finite_error = e.what();
+  }
+  Check(non_finite_failed &&
+            non_finite_error.find("bad_dword=0") != std::string::npos &&
+            non_finite_error.find("nearest=") != std::string::npos &&
+            non_finite_error.find("first_diff=non_finite_leaf(") != std::string::npos,
+        "non-finite GPU-offset buffer descriptor did not emit one-line diagnostic");
+}
+
 } // namespace
 } // namespace Libs::Graphics
 
@@ -14274,6 +14598,8 @@ int main(int argc, char** argv) {
   if (argc == 2 && std::strcmp(argv[1], "--matfail-only") == 0) {
     TestIndirectFormattedUInt8RawBoundsShader();
     TestAtomicImageUint8Shader();
+    TestIndirectFormattedStride16StoreShader();
+    TestFiniteBufferDescriptorShapesShader();
     std::puts("ShaderCfgTests (--matfail-only): all cases passed");
     return 0;
   }
@@ -14497,6 +14823,8 @@ int main(int argc, char** argv) {
   TestNewShaderRecompilerVop3LaneReadDestinationEncoding();
   TestIndirectFormattedUInt8RawBoundsShader();
   TestAtomicImageUint8Shader();
+  TestIndirectFormattedStride16StoreShader();
+  TestFiniteBufferDescriptorShapesShader();
 
   return PassBenchReport();
 }
