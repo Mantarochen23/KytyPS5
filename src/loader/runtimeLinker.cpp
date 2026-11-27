@@ -50,6 +50,7 @@
 #include <asm/prctl.h>
 #include <sys/syscall.h>
 #include <sys/uio.h>
+#include <ucontext.h>
 #include <unistd.h>
 #endif
 #endif
@@ -691,8 +692,36 @@ static void DumpFaultCode(RuntimeLinker* rt, const char* thread_name,
 	std::printf("[fault-code] wrote %s (%d regions)\n", path, depth + 1);
 }
 
+// The FP control state guest code faulted with, when it is not the one guest threads start with
+// (one line per thread; a fault in emulator code is not asked).
+static void CheckGuestFaultFpEnv(const Common::HostException::ExceptionInfo& info) {
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && !defined(__APPLE__)
+	const auto* context = static_cast<const ucontext_t*>(info.native_context);
+	if (context == nullptr || context->uc_mcontext.fpregs == nullptr) {
+		return;
+	}
+	const Common::FpEnv env {context->uc_mcontext.fpregs->mxcsr, context->uc_mcontext.fpregs->cwd};
+	if (Common::SameFpControl(env, Common::GuestFpEnv) ||
+	    Common::Singleton<RuntimeLinker>::Instance()->FindProgramByAddr(info.exception_address) ==
+	        nullptr ||
+	    !Common::FpControlFirstDeviation(Common::FpCheckSite::GuestFault, env)) {
+		return;
+	}
+	char where[256];
+	FormatModuleOffset(Common::Singleton<RuntimeLinker>::Instance(), info.exception_address, where,
+	                   sizeof(where));
+	std::printf("[fpenv] site=guest-fault thread=%d pc=%s mxcsr=0x%04x x87=0x%04x expected "
+	            "mxcsr=0x%04x x87=0x%04x (first on this thread)\n",
+	            Libs::LibKernel::PthreadGetthreadid(), where, env.mxcsr, env.control,
+	            Common::GuestFpEnv.mxcsr, Common::GuestFpEnv.control);
+#else
+	(void)info;
+#endif
+}
+
 bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exception_info) {
 	const auto* info = &exception_info;
+	CheckGuestFaultFpEnv(exception_info);
 
 	if (info->type == Common::HostException::ExceptionType::IllegalInstruction &&
 	    Loader::X64InstructionEmulator::TryEmulate(info->native_context)) {

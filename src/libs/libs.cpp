@@ -5,7 +5,10 @@
 #include "libs/errno.h"
 #include "loader/symbolDatabase.h"
 
+#include <atomic>
 #include <cctype>
+#include <cinttypes>
+#include <cmath>
 #include <cstdio>
 #include <mutex>
 #include <unordered_map>
@@ -201,6 +204,53 @@ const CallRing& GetThreadCallRing() {
 	            static_cast<unsigned long long>(args[2]), static_cast<unsigned long long>(args[3]),
 	            static_cast<unsigned long long>(args[4]), static_cast<unsigned long long>(args[5]),
 	            static_cast<unsigned long long>(result));
+}
+
+namespace {
+std::atomic<uint64_t>            g_float_return_calls {0};
+std::mutex                       g_float_return_mutex;
+std::unordered_map<const void*, uint64_t> g_float_return_logged;
+} // namespace
+
+uint64_t FloatReturnCalls() {
+	return g_float_return_calls.load(std::memory_order_relaxed);
+}
+
+[[gnu::noinline]] void NoteFloatReturn(const void* fn_key, const char* library, const char* function,
+                                       double value) {
+	const auto calls = g_float_return_calls.fetch_add(1, std::memory_order_relaxed) + 1;
+	if (value != 0.0 && std::isfinite(value)) {
+		return;
+	}
+	uint64_t count = 0;
+	{
+		std::scoped_lock lock(g_float_return_mutex);
+		count = ++g_float_return_logged[fn_key];
+	}
+	if (ShouldLogPowerOfTwo(count) && count <= 64) {
+		LOGF("[fp-return] thread=%d %s::%s returned %g (this result #%" PRIu64
+		     ", float-returning library calls so far %" PRIu64 ")\n",
+		     Common::Thread::GetThreadIdUnique(), library, function, value, count, calls);
+	}
+}
+
+[[gnu::noinline]] void ReportCallFpEnv(Common::FpCheckSite site, const char* library,
+                                       const char* function, Common::FpEnv env,
+                                       Common::FpEnv expected) {
+	// The entry just pushed is this call; the one before it is the previous library call.
+	const CallRecord* previous = nullptr;
+	t_call_ring.ForEachOldestFirst([&](const CallRecord& record, size_t index) {
+		if (index + 2 == t_call_ring.count) previous = &record;
+	});
+	LOGF("[fpenv] site=%s thread=%d mxcsr=0x%04" PRIx32 " x87=0x%04" PRIx32
+	     " expected mxcsr=0x%04" PRIx32 " x87=0x%04" PRIx32 " call=%s::%s previous=%s::%s@0x%" PRIx64
+	     " (first on this thread)\n",
+	     Common::FpCheckSiteName(site), Common::Thread::GetThreadIdUnique(), env.mxcsr,
+	     static_cast<uint32_t>(env.control), expected.mxcsr, static_cast<uint32_t>(expected.control),
+	     library, function,
+	     previous != nullptr && previous->library != nullptr ? previous->library : "none",
+	     previous != nullptr && previous->function != nullptr ? previous->function : "none",
+	     previous != nullptr ? previous->guest_ret_addr : 0);
 }
 
 void InitAll(Loader::SymbolDatabase* s) {
