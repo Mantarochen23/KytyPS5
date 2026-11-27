@@ -737,7 +737,6 @@ void RenderExecutor::DrainSkippedDispatchesLocked(CommandBuffer& buffer) {
 	if (m_replaying_catchup || m_skip_catchup.Empty()) {
 		return;
 	}
-	m_context.GetPipelineCache().PumpAsync();
 	const auto now = SteadyNowMs();
 	auto ready = m_skip_catchup.TakeReady(now, [this](const auto& entry) -> SkipCatchUp::ProbeState {
 		const auto&            cap = entry.payload;

@@ -1,4 +1,5 @@
 #include "common/frameCost.h"
+#include "graphics/host_gpu/renderer/pipeline/pipelineAsync.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderStoreCapability.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderStoreFile.h"

@@ -14752,9 +14752,9 @@ void TestIndirectBufferRuntimeTableCompilesAndValidates() {
 
   const auto compiled =
       ShaderRecompiler::CompileProgram(std::move(translated), options, specialization);
-  Check(compiled.info.info.uses_device_address,
+  Check(compiled.program.info.uses_device_address,
         "runtime-table indirect buffer shader must enable uses_device_address");
-  Check(compiled.info.bindings.descriptor_counts[static_cast<size_t>(
+  Check(compiled.program.bindings.descriptor_counts[static_cast<size_t>(
             ShaderRecompiler::IR::DescriptorBindingKind::Buffers)] == 0u,
         "runtime-table indirect buffer shader must consume zero storage buffer descriptor slots");
   spvtools::SpirvTools tools(SPV_ENV_VULKAN_1_3);
