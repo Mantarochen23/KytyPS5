@@ -11,6 +11,7 @@
 #include "graphics/host_gpu/renderer/renderTarget.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/host_gpu/renderer/pipeline/buildTiming.h"
+#include "graphics/host_gpu/renderer/pipeline/callSiteTable.h"
 #include "graphics/host_gpu/renderer/pipeline/flowPlan.h"
 #include "graphics/host_gpu/renderer/pipeline/materializationMemo.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderStoreDiff.h"
@@ -355,11 +356,24 @@ private:
 		bool RefreshCallSource(const ShaderRecompiler::IR::SrtRuntime& runtime);
 		// Takes the plan stored for the current callee code; false if there is none.
 		bool UseStoredCallPlan();
+		// Port callsite-lookup: the table of records and where the lookup is made from.
+		struct CallSiteQuery {
+			CallSiteTable* table = nullptr;
+			CallSiteKey    key;
+		};
 		template <bool HasCalls>
 		ShaderModule* FindModule(const ShaderRecompiler::IR::SrtRuntime& runtime,
 		                         ShaderRecompiler::IR::PushData::Window  push_data,
 		                         bool*                                   materialized          = nullptr,
-		                         std::string*                            materialization_error = nullptr);
+		                         std::string*                            materialization_error = nullptr,
+		                         const CallSiteQuery*                    site                  = nullptr);
+		// The module of this call site's record when its registers and bytes are unchanged, with the
+		// result of its materialization made current; null when the full lookup must run.
+		ShaderModule* FindByCallSite(const CallSiteQuery& site,
+		                             const ShaderRecompiler::IR::SrtRuntime& runtime,
+		                             ShaderRecompiler::IR::PushData::Window  push_data);
+		// Records what the last materialization produced for the call site.
+		void StoreCallSite(const CallSiteQuery& site, ShaderModule* module);
 		// The module of a program without calls that was built for these inputs, if any.
 		ShaderModule* FindCandidate(const ShaderRecompiler::IR::ResourceSpecialization& wanted,
 		                            ShaderRecompiler::IR::PushData::Window              push_data);
@@ -410,6 +424,8 @@ private:
 	ShaderStoreWriter m_store;
 	// What the module lookups ended in, for the `[store] lookups=` line.
 	StoreDiff::LookupStats m_lookup_stats;
+	// Port callsite-lookup: one record per (command packet, shader, stage); made on first use.
+	std::unique_ptr<CallSiteTable> m_callsites;
 	// Counts a lookup that found no module, and describes the first few.
 	void NoteLookupMiss(const ProgramKey& key, const Program* program,
 	                    ShaderRecompiler::IR::PushData::Window push_data, bool first);

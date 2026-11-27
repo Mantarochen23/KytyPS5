@@ -386,7 +386,11 @@ bool PipelineCache::Program::Materialize(const ShaderRecompiler::IR::SrtRuntime&
 	};
 	auto&      memo     = materialization_memo;
 	const auto settings = GlobalMaterializationMemoSettings();
-	memo.Configure(settings.entries, settings.stamps);
+	// A call-site record holds an entry past its eviction; heap plans are only kept by a memo that
+	// can hold two.
+	memo.Configure(Config::PortEnabled(Config::Port::CallsiteLookup) ? std::max(settings.entries, 2u)
+	                                                                  : settings.entries,
+	               settings.stamps);
 	const bool uses_heap = resource_plan.info.uses_image_heap;
 	if (uses_heap) Common::FrameCost::Add(Counter::MemoHeapPlanCalls);
 
@@ -505,7 +509,8 @@ template <bool HasCalls>
 ShaderModule* PipelineCache::Program::FindModule(const ShaderRecompiler::IR::SrtRuntime& runtime,
                                                  ShaderRecompiler::IR::PushData::Window push_data,
                                                  bool*        materialized,
-                                                 std::string* materialization_error) {
+                                                 std::string* materialization_error,
+                                                 const CallSiteQuery* site) {
 	Common::FrameCost::ScopedTimer timer(Common::FrameCost::Counter::FindModuleNs);
 	Common::FrameCost::Add(Common::FrameCost::Counter::FindModuleCalls);
 	const auto begin = std::chrono::steady_clock::now();
@@ -519,6 +524,15 @@ ShaderModule* PipelineCache::Program::FindModule(const ShaderRecompiler::IR::Srt
 		                           : Common::FrameCost::Counter::FindModuleMissNs,
 		                       elapsed);
 	};
+	if constexpr (!HasCalls) {
+		if (site != nullptr && site->table != nullptr) {
+			if (auto* module = FindByCallSite(*site, runtime, push_data)) {
+				if (materialized != nullptr) *materialized = true;
+				note(true);
+				return module;
+			}
+		}
+	}
 	// The old layout's hash is needed while stored modules wait for their first comparison, and
 	// for the module a miss will build.
 	auto probe        = runtime;
@@ -533,7 +547,11 @@ ShaderModule* PipelineCache::Program::FindModule(const ShaderRecompiler::IR::Srt
 	if (materialized != nullptr) {
 		*materialized = true;
 	}
-	if (auto* candidate = FindIndexed(push_data, HasCalls, FunctionCode())) {
+	auto* candidate = FindIndexed(push_data, HasCalls, FunctionCode());
+	if constexpr (!HasCalls) {
+		if (site != nullptr && site->table != nullptr) StoreCallSite(*site, candidate);
+	}
+	if (candidate != nullptr) {
 		note(true);
 		return candidate;
 	}
@@ -554,6 +572,88 @@ ShaderModule* PipelineCache::Program::FindModule(const ShaderRecompiler::IR::Srt
 	}
 	note(false);
 	return nullptr;
+}
+
+ShaderModule* PipelineCache::Program::FindByCallSite(const CallSiteQuery& site,
+                                                     const ShaderRecompiler::IR::SrtRuntime& runtime,
+                                                     ShaderRecompiler::IR::PushData::Window  push_data) {
+	using Counter = Common::FrameCost::Counter;
+	const auto begin = std::chrono::steady_clock::now();
+	const auto done  = [&](bool hit) {
+		Common::FrameCost::Add(hit ? Counter::CallSiteHitNs : Counter::CallSiteMissNs,
+		                       static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+		                                                 std::chrono::steady_clock::now() - begin)
+		                                                 .count()));
+	};
+	// The walk reads the first srt_user_data words of the user data and no more; the others (and
+	// everything else a shader sees through registers) are not inputs of the result.
+	size_t user_words = MemoizedMaterialization::AllUserData;
+	if (resource_plan.srt_code != nullptr && resource_plan.srt_user_data <= runtime.user_data.size()) {
+		user_words = resource_plan.srt_user_data;
+	}
+	CallSiteTable::Record* record = nullptr;
+	CallSiteStats          stats;
+	const auto outcome = site.table->Lookup(site.key, this, materialization_memo.Generation(),
+	                                        materialization_memo, runtime, user_words, record, stats);
+	Common::FrameCost::Add(Counter::CallSiteRangesSmall, stats.ranges_small);
+	Common::FrameCost::Add(Counter::CallSiteRangesLarge, stats.ranges_large);
+	Common::FrameCost::Add(Counter::CallSiteRangesStamped, stats.ranges_stamped);
+	Common::FrameCost::Add(Counter::CallSiteBytesCompared, stats.bytes_compared);
+	Common::FrameCost::Add(Counter::CallSiteBytesLarge, stats.bytes_large);
+	if (outcome != CallSiteOutcome::Hit) {
+		Common::FrameCost::Add(Counter::CallSiteMisses);
+		switch (outcome) {
+			case CallSiteOutcome::NoRecord: Common::FrameCost::Add(Counter::CallSiteMissNew); break;
+			case CallSiteOutcome::Stale: Common::FrameCost::Add(Counter::CallSiteMissStale); break;
+			case CallSiteOutcome::Registers: Common::FrameCost::Add(Counter::CallSiteMissRegisters); break;
+			case CallSiteOutcome::Ranges: Common::FrameCost::Add(Counter::CallSiteMissRanges); break;
+			case CallSiteOutcome::Heap: Common::FrameCost::Add(Counter::CallSiteMissHeap); break;
+			default: break;
+		}
+		done(false);
+		return nullptr;
+	}
+	auto& entry = *record->entry;
+	// The members hold the result of the last materialization; this entry's result is copied in.
+	if (materialization_memo.current != entry.serial) {
+		resources           = entry.resources;
+		specialization      = entry.specialization;
+		specialization_hash = entry.specialization_hash;
+		materialization_memo.current = entry.serial;
+	} else {
+		resources.user_data.assign(runtime.user_data.begin(), runtime.user_data.end());
+	}
+	auto* module = static_cast<ShaderModule*>(record->module);
+	if (module != nullptr) {
+		const auto& layout = module->info.bindings;
+		if (layout.push_data_start_dword !=
+		    push_data.StartFor(layout.ShaderDataDwords(), module->info.stage)) {
+			module = nullptr;
+		}
+	}
+	if (module == nullptr) module = FindIndexed(push_data, false, FunctionCode());
+	// The first use of a stored module is compared with the old layout by the full lookup.
+	if (module == nullptr || (!module->legacy_checked && legacy_unchecked != 0)) {
+		Common::FrameCost::Add(Counter::CallSiteMisses);
+		Common::FrameCost::Add(Counter::CallSiteMissNoModule);
+		done(false);
+		return nullptr;
+	}
+	record->module = module;
+	++materialization_memo_hits;
+	Common::FrameCost::Add(Counter::CallSiteHits);
+	done(true);
+	return module;
+}
+
+void PipelineCache::Program::StoreCallSite(const CallSiteQuery& site, ShaderModule* module) {
+	auto entry = materialization_memo.ShareCurrent();
+	if (entry == nullptr) return;
+	bool evicted = false;
+	site.table->Store(site.key, this, materialization_memo.Generation(), std::move(entry), module,
+	                  evicted);
+	Common::FrameCost::Add(Common::FrameCost::Counter::CallSiteStored);
+	if (evicted) Common::FrameCost::Add(Common::FrameCost::Counter::CallSiteEvicted);
 }
 
 ShaderModule* PipelineCache::Program::FindCandidate(
@@ -1087,8 +1187,15 @@ const ShaderModule* PipelineCache::GetProgramImpl(const ShaderParams& params, In
 				}
 			}
 		} else if (cached.call_plans.empty()) {
+			Program::CallSiteQuery site;
+			if (g_current_call_site != 0 && Config::PortEnabled(Config::Port::CallsiteLookup)) {
+				if (m_callsites == nullptr) m_callsites = std::make_unique<CallSiteTable>(2048u, 4u);
+				site.table = m_callsites.get();
+				site.key   = {g_current_call_site, params.hash, static_cast<uint8_t>(options.stage)};
+			}
 			module = cached.FindModule<false>(runtime, push_data, &materialized,
-			                                  &materialization_error);
+			                                  &materialization_error,
+			                                  site.table != nullptr ? &site : nullptr);
 		}
 		if (module != nullptr) {
 			if (m_async != nullptr) {

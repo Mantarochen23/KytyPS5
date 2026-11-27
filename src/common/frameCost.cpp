@@ -203,7 +203,11 @@ ReportLines FormatWindow(const std::array<uint64_t, CounterCount>& delta, double
 	    "memo_miss_heap_changed={:.2f} memo_stored={:.2f} memo_not_stored={:.2f} "
 	    "memo_evicted={:.2f} memo_heap_plan_calls={:.2f} memo_ranges_stamped={:.2f} "
 	    "memo_ranges_compared={:.2f} memo_bytes_compared={:.0f} memo_ranges_tracked={:.2f} "
-	    "memo_ranges_untracked={:.2f} memo_walk_changed={:.2f}\n",
+	    "memo_ranges_untracked={:.2f} memo_walk_changed={:.2f} "
+	    "callsite_hits={:.2f} callsite_miss(new={:.2f} stale={:.2f} regs={:.2f} ranges={:.2f} "
+	    "heap={:.2f} no_module={:.2f}) callsite_stored={:.2f} callsite_evicted={:.2f} "
+	    "callsite_ranges(small={:.2f} large={:.2f} stamped={:.2f}) callsite_bytes(compared={:.0f} "
+	    "large={:.0f}) ns/call callsite_hit={:.0f} callsite_miss={:.0f}\n",
 	    elapsed_seconds, frames, Mean(delta, Counter::Draws, frames),
 	    Mean(delta, Counter::Dispatches, frames),
 	    Mean(delta, Counter::ImageHeapRebindCalls, frames),
@@ -245,7 +249,21 @@ ReportLines FormatWindow(const std::array<uint64_t, CounterCount>& delta, double
 	    Mean(delta, Counter::MemoBytesCompared, frames),
 	    Mean(delta, Counter::MemoRangesTracked, frames),
 	    Mean(delta, Counter::MemoRangesUntracked, frames),
-	    Mean(delta, Counter::MemoWalkChanged, frames));
+	    Mean(delta, Counter::MemoWalkChanged, frames),
+	    Mean(delta, Counter::CallSiteHits, frames), Mean(delta, Counter::CallSiteMissNew, frames),
+	    Mean(delta, Counter::CallSiteMissStale, frames),
+	    Mean(delta, Counter::CallSiteMissRegisters, frames),
+	    Mean(delta, Counter::CallSiteMissRanges, frames),
+	    Mean(delta, Counter::CallSiteMissHeap, frames),
+	    Mean(delta, Counter::CallSiteMissNoModule, frames),
+	    Mean(delta, Counter::CallSiteStored, frames), Mean(delta, Counter::CallSiteEvicted, frames),
+	    Mean(delta, Counter::CallSiteRangesSmall, frames),
+	    Mean(delta, Counter::CallSiteRangesLarge, frames),
+	    Mean(delta, Counter::CallSiteRangesStamped, frames),
+	    Mean(delta, Counter::CallSiteBytesCompared, frames),
+	    Mean(delta, Counter::CallSiteBytesLarge, frames),
+	    NanosecondsPerCall(delta, Counter::CallSiteHitNs, Counter::CallSiteHits),
+	    NanosecondsPerCall(delta, Counter::CallSiteMissNs, Counter::CallSiteMisses));
 
 	lines.arch = fmt::format(
 	    "[frame] arch wait_gpu_bg={:.3f} "
