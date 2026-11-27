@@ -22,6 +22,7 @@
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
 #include "graphics/host_gpu/renderer/pipeline/asyncPlan.h"
 #include "graphics/host_gpu/renderer/pipeline/blendMapping.h"
+#include "graphics/host_gpu/renderer/pipeline/frameHoles.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineAsync.h"
 #include "graphics/host_gpu/renderer/pipeline/renderActivity.h"
 #include "graphics/host_gpu/renderer/pipeline/skippedDraws.h"
@@ -1030,6 +1031,9 @@ const ShaderModule* PipelineCache::GetProgramImpl(const ShaderParams& params, In
 			m_lookup_stats.lookups++;
 		}
 		if (cached.skip_dispatch) {
+			if (m_async != nullptr) {
+				m_async->RetireWaiting(m_lookup_key, "negative-cache");
+			}
 			if (!cached.logged_neg_hit) {
 				cached.logged_neg_hit = true;
 				PipelineCacheLog(
@@ -1083,6 +1087,9 @@ const ShaderModule* PipelineCache::GetProgramImpl(const ShaderParams& params, In
 			                                  &materialization_error);
 		}
 		if (module != nullptr) {
+			if (m_async != nullptr) {
+				m_async->RetireWaiting(m_lookup_key, "module-hit");
+			}
 			(first_attempt ? m_lookup_stats.hit : m_lookup_stats.served_late)++;
 			if (!module->legacy_checked) {
 				// First hit of a stored module: would the old layout's key have found it?
@@ -1119,7 +1126,7 @@ const ShaderModule* PipelineCache::GetProgramImpl(const ShaderParams& params, In
 				    ShaderRecompiler::StageName(options.stage), params.hash, cached.failure_reason);
 				StoreFailedProgram(m_lookup_key, cached.failure_reason);
 				if (m_async != nullptr) {
-					m_async->translations.erase(m_lookup_key);
+					m_async->RetireWaiting(m_lookup_key, "materialization-failed");
 				}
 			}
 			return nullptr;
@@ -1708,6 +1715,19 @@ void PipelineCache::GetGraphicsPrograms(const CommandBuffer& command, DrawRender
 	     db.shader_mask_export_enable || db.shader_dual_export_enable ||
 	     db.shader_execute_on_noop || sh.AlphaToMask());
 	state.ps_active = pixel_active;
+	const auto collect_targets = [&]() {
+		std::vector<uint64_t> addrs;
+		for (uint32_t slot = 0; slot < RENDER_COLOR_ATTACHMENTS_MAX; ++slot) {
+			if ((color_output_mask & (1u << slot)) != 0) {
+				const auto addr = context.GetRenderTarget(slot).base.addr;
+				if (addr != 0) addrs.push_back(addr);
+			}
+		}
+		const auto& dt    = context.GetDepthRenderTarget();
+		const auto  zaddr = dt.z_write_base_addr != 0 ? dt.z_write_base_addr : dt.z_read_base_addr;
+		if (zaddr != 0) addrs.push_back(zaddr);
+		return addrs;
+	};
 	const bool tess_active = user_config.GetPrimType() == Prospero::PrimitiveType::kPatch;
 	std::array<ShaderParams, 3> vertex_params;
 	if (tess_active) {
@@ -1718,6 +1738,7 @@ void PipelineCache::GetGraphicsPrograms(const CommandBuffer& command, DrawRender
 				Log::WriteToConsoleAndLog(
 				    "Warning: dropping tessellation draws with a geometry shader.\n");
 			}
+			FrameHoles::NoteDrawSkip(FrameHoles::DrawSkipReason::UnsupportedStage, collect_targets());
 			return;
 		}
 		vertex_params = PrepareTessellationPrograms(vertex_regs, context, vertex_info);
@@ -1774,6 +1795,7 @@ void PipelineCache::GetGraphicsPrograms(const CommandBuffer& command, DrawRender
 				    "Warning: dropping mesh draws the host does not support (shader 0x{:016x}).\n",
 				    vertex_params[0].hash));
 			}
+			FrameHoles::NoteDrawSkip(FrameHoles::DrawSkipReason::UnsupportedStage, collect_targets());
 			return;
 		}
 		// A task shader launches each record's groups and passes its draw parameters in a
@@ -1950,6 +1972,7 @@ void PipelineCache::GetGraphicsPrograms(const CommandBuffer& command, DrawRender
 			deferred |= m_last_deferred;
 			if (mode != AsyncMode::On) {
 				vertex_info[0].stage.module = nullptr; // Skips the draw (PrepareDrawRenderState).
+				FrameHoles::NoteDrawSkip(FrameHoles::DrawSkipReason::FailedShader, collect_targets());
 				return;
 			}
 			ready = false;
@@ -1970,6 +1993,7 @@ void PipelineCache::GetGraphicsPrograms(const CommandBuffer& command, DrawRender
 			deferred |= m_last_deferred;
 			if (mode != AsyncMode::On) {
 				vertex_info[0].stage.module = nullptr; // Skips the draw (PrepareDrawRenderState).
+				FrameHoles::NoteDrawSkip(FrameHoles::DrawSkipReason::FailedShader, collect_targets());
 				return;
 			}
 			ready = false;
@@ -1980,6 +2004,9 @@ void PipelineCache::GetGraphicsPrograms(const CommandBuffer& command, DrawRender
 		vertex_info[0].stage.module = nullptr;
 		if (deferred) {
 			NoteDrawSkippedForShaders();
+			FrameHoles::NoteDrawSkip(FrameHoles::DrawSkipReason::ShaderBuilding, collect_targets());
+		} else {
+			FrameHoles::NoteDrawSkip(FrameHoles::DrawSkipReason::FailedShader, collect_targets());
 		}
 	}
 }
@@ -2081,7 +2108,7 @@ bool PipelineCache::PrefetchComputeProgram(const HW::CsStageRegisters& cs_regs,
 	m_lookup_key.user_data_count = params.user_data_count;
 	BuildStageStaticKey(input_info, m_lookup_key.static_state);
 	if (m_program_cache.contains(m_lookup_key) || m_async->translations.contains(m_lookup_key) ||
-	    m_async->sync_only_keys.contains(m_lookup_key)) {
+	    m_async->sync_only_keys.contains(m_lookup_key) || WarmUpPending(m_lookup_key)) {
 		m_prefetch.known++;
 		return false;
 	}

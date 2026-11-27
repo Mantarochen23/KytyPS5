@@ -49,15 +49,17 @@ static uint32_t LoadFlattenedSrt(EmitterState& state, uint32_t index) {
 
 // Word index of a mapping: a constant, or under the canonical layout the value of its header slot.
 static uint32_t MappingBase(EmitterState& state, uint32_t mapping_offset) {
-	if ((mapping_offset & IR::IndirectMappingHeader) == 0u) return ConstantU32(state, mapping_offset);
-	return LoadFlattenedSrt(state, ConstantU32(state, mapping_offset & ~IR::IndirectMappingHeader));
+	const auto slot = IR::IndirectMappingSlot(mapping_offset);
+	if ((mapping_offset & IR::IndirectMappingHeader) == 0u) return ConstantU32(state, slot);
+	return LoadFlattenedSrt(state, ConstantU32(state, slot));
 }
 
 // Word index word of a mapping; constant without the header, so that layout emits as before.
 static uint32_t MappingWord(EmitterState& state, uint32_t mapping_offset, uint32_t base,
                             uint32_t word) {
-	if ((mapping_offset & IR::IndirectMappingHeader) == 0u)
-		return ConstantU32(state, mapping_offset + word);
+	if ((mapping_offset & IR::IndirectMappingHeader) == 0u &&
+	    !IR::IsIndirectBufferRuntimeTable(mapping_offset))
+		return ConstantU32(state, IR::IndirectMappingSlot(mapping_offset) + word);
 	return word == 0u ? base : EmitAddU32(state, base, ConstantU32(state, word));
 }
 
@@ -83,6 +85,43 @@ uint32_t EmitImageHeapEntry(EmitterState& state, uint32_t key, uint32_t mapping_
 	return entry;
 }
 
+uint32_t EmitLoadIndirectBufferTableEntry(EmitterState& state, uint32_t selected,
+                                          uint32_t mapping_offset) {
+	const auto base    = MappingBase(state, mapping_offset);
+	const auto bda_lo  = LoadFlattenedSrt(state, base);
+	const auto bda_hi  = LoadFlattenedSrt(state, EmitAddU32(state, base, ConstantU32(state, 1u)));
+	const auto entries = LoadFlattenedSrt(state, EmitAddU32(state, base, ConstantU32(state, 2u)));
+	const auto nonzero = Binary(state, spv::OpINotEqual, TypeBool(state), selected, ConstantU32(state, 0u));
+	const auto in_range = Binary(state, spv::OpULessThan, TypeBool(state), selected, entries);
+	const auto valid    = Binary(state, spv::OpLogicalAnd, TypeBool(state), nonzero, in_range);
+	const auto vec4_ty  = TypeU32Vector(state, 4u);
+	return EmitValueOrDefaultIfCondition(state, valid, vec4_ty, ConstantU32CompositeZero(state, 4u), [&]() {
+		const auto idx    = Binary(state, spv::OpISub, TypeU32(state), selected, ConstantU32(state, 1u));
+		const auto offset = Binary(state, spv::OpShiftLeftLogical, TypeU64(state),
+		                           Unary(state, spv::OpUConvert, TypeU64(state), idx),
+		                           ConstantU32(state, 4u));
+		const auto base64 = Binary(state, spv::OpIAdd, TypeU64(state), PackU64(state, bda_lo, bda_hi), offset);
+		const auto load_word = [&](uint32_t byte_off) {
+			const auto addr = byte_off == 0u
+			                      ? base64
+			                      : Binary(state, spv::OpIAdd, TypeU64(state), base64,
+			                               ConstantU64(state, byte_off));
+			const auto ptr = Unary(state, spv::OpConvertUToPtr, TypePhysicalU32Pointer(state), addr);
+			const auto val = state.builder.AllocateId();
+			state.builder.AddFunction(spv::OpLoad, TypeU32(state), val, ptr,
+			                          spv::MemoryAccessAlignedMask, 4u);
+			return val;
+		};
+		const auto w0 = load_word(0u);
+		const auto w1 = load_word(4u);
+		const auto w2 = load_word(8u);
+		const auto w3 = load_word(12u);
+		const auto out = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpCompositeConstruct, vec4_ty, out, w0, w1, w2, w3);
+		return out;
+	});
+}
+
 uint32_t EmitImageHeapArm(EmitterState& state, uint32_t arm, uint32_t mapping_offset,
                           uint32_t kinds) {
 	if ((mapping_offset & IR::IndirectMappingHeader) == 0u) return arm;
@@ -96,7 +135,11 @@ uint32_t EmitImageHeapArm(EmitterState& state, uint32_t arm, uint32_t mapping_of
 
 uint32_t EmitIndirectResourceIndex(EmitterState& state, uint32_t key, uint32_t mapping_offset,
                                    uint32_t search_iterations, uint32_t default_resource) {
-	const auto mapping = MappingBase(state, mapping_offset);
+	auto mapping = MappingBase(state, mapping_offset);
+	if (IR::IsIndirectBufferRuntimeTable(mapping_offset)) {
+		// Runtime-table roots prefix the mapping with [table_bda_lo, table_bda_hi, entry_count].
+		mapping = EmitAddU32(state, mapping, ConstantU32(state, 3u));
+	}
 	const auto count = LoadFlattenedSrt(state, mapping);
 	if (search_iterations == 0u) {
 		const auto index = Binary(state, spv::OpShiftRightLogical, TypeU32(state), key,
@@ -224,7 +267,19 @@ uint32_t SharedIndirectBufferResource(const EmitterState& state, uint32_t resour
 	return representative;
 }
 
+bool IsRuntimeTableIndirectBuffer(const EmitterState& state, uint32_t resource) {
+	const auto& buffers = state.program.info.buffers;
+	if (resource >= buffers.size()) return false;
+	const auto& root = buffers[resource];
+	return root.indirect_root == resource && !root.scalar &&
+	       IR::IsIndirectBufferRuntimeTable(root.indirect_mapping_offset) &&
+	       root.indirect_resources.size() >= 2u;
+}
+
 bool UsesDynamicIndirectBufferSlots(const EmitterState& state, uint32_t resource) {
+	if (IsRuntimeTableIndirectBuffer(state, resource)) {
+		return true;
+	}
 	const auto& buffers = state.program.info.buffers;
 	if (resource >= buffers.size()) return false;
 	const auto& root = buffers[resource];
@@ -429,9 +484,11 @@ uint32_t EmitMemoryElementInBounds(EmitterState& state, const MemoryResourceAcce
 
 uint32_t EmitStorageElementInBounds(EmitterState& state, const MemoryResourceAccess& access,
                                     uint32_t index) {
-	// The descriptor range ends where access.length does.
-	if (state.profile.robust_buffer_access && (access.kind == IR::ResourceKind::Buffer ||
-	                                           access.kind == IR::ResourceKind::ScalarBuffer)) {
+	// The descriptor range ends where access.length does; physical-address pointers always need
+	// explicit bounds checks because robustBufferAccess only covers descriptor bindings.
+	if (!access.physical_address && state.profile.robust_buffer_access &&
+	    (access.kind == IR::ResourceKind::Buffer ||
+	     access.kind == IR::ResourceKind::ScalarBuffer)) {
 		return ConstantBool(state, true);
 	}
 	return EmitMemoryElementInBounds(state, access, index);
@@ -439,6 +496,18 @@ uint32_t EmitStorageElementInBounds(EmitterState& state, const MemoryResourceAcc
 
 uint32_t EmitMemoryElementPointer(EmitterState& state, const MemoryResourceAccess& access,
                                   uint32_t index) {
+	if (access.physical_address) {
+		const uint32_t shift = access.element_bits == 64u ? 3u : 2u;
+		const auto     byte_offset =
+		    Binary(state, spv::OpShiftLeftLogical, TypeU64(state),
+		           Unary(state, spv::OpUConvert, TypeU64(state), index), ConstantU32(state, shift));
+		const auto addr =
+		    Binary(state, spv::OpIAdd, TypeU64(state), access.object_pointer, byte_offset);
+		return Unary(state, spv::OpConvertUToPtr,
+		             access.element_bits == 64u ? TypePhysicalU64Pointer(state)
+		                                        : TypePhysicalU32Pointer(state),
+		             addr);
+	}
 	if (access.kind == IR::ResourceKind::Lds || access.kind == IR::ResourceKind::Scratch) {
 		const auto storage_class = access.kind == IR::ResourceKind::Scratch
 		                               ? spv::StorageClassFunction : state.lds_storage_class;

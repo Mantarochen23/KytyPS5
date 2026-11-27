@@ -774,55 +774,73 @@ void RenderExecutor::PrepareBindings(const ShaderStageRuntime& runtime,
 
 void RenderExecutor::FindBuffers(std::span<PreparedBindings* const> stages) {
 	KYTY_PROFILER_FUNCTION();
-	auto& cache = m_context.GetBufferCache();
+	auto&      cache    = m_context.GetBufferCache();
+	const auto& graphics = m_context.GetGraphics();
+	const auto  resolve_source = [&](const ShaderRecompiler::IR::BufferResource& metadata,
+	                                 const ShaderRecompiler::IR::DescriptorValue& desc_val,
+	                                 bool allow_unmapped) -> PreparedBindings::BufferSource {
+		const auto descriptor = DecodeNativeDescriptor<ShaderBufferResource>(desc_val);
+		const auto address    = descriptor.Base48();
+		auto       size       = BufferBindingSize(metadata, descriptor);
+		if (address == 0 || size == 0) {
+			return {};
+		}
+		if (descriptor.NumRecords() == UINT32_MAX) {
+			if (metadata.written) {
+				// Sentinel write ranges end before tables captured by any bound stage.
+				for (const auto* reader: stages) {
+					for (const auto [read_address, read_size]:
+					     reader->runtime->resources->specialization_reads) {
+						if (read_size == 0) continue;
+						if (read_address > address) {
+							size = std::min(size, read_address - address);
+						} else if (address - read_address < read_size) {
+							EXIT("scalar resource reads overlap a shader buffer write\n");
+						}
+					}
+				}
+			}
+			const auto limit =
+			    uint64_t {graphics.GetPhysicalDeviceProperties().limits.maxStorageBufferRange} -
+			    (graphics.StorageMinAlignment() - 1);
+			size = Libs::LibKernel::Memory::ClampRangeSize(
+			    address, std::min({size, uint64_t {256} * 1024 * 1024, limit}));
+		} else if (size >= (uint64_t {1} << 30u)) {
+			// Finite descriptors can span sparse PRT holes; oversized pool windows are mapped
+			// in pieces, so they end at their last committed range.
+			size = Libs::LibKernel::Memory::ClampRangeSize(address, size, true);
+		} else if (allow_unmapped) {
+			size = Libs::LibKernel::Memory::ClampRangeSize(address, size, true);
+		}
+		if (size == 0) {
+			return {};
+		}
+		return {.address = address, .size = size, .id = cache.FindBuffer(address, size)};
+	};
 	for (auto* stage: stages) {
 		auto&       prepared = *stage;
 		const auto& program  = prepared.runtime->module->info;
 		const auto& snapshot = *prepared.runtime->resources;
 		const auto& layout   = program.bindings;
 		prepared.buffer_sources.resize(layout.descriptor_counts[static_cast<size_t>(BindingKind::Buffers)]);
-		if (layout.descriptor_counts[static_cast<size_t>(BindingKind::Buffers)] == 0) {
-			continue;
-		}
 		for (uint32_t resource = 0; resource < program.info.buffers.size(); ++resource) {
 			const auto& metadata = program.info.buffers[resource];
 			if (metadata.descriptor_index == UINT32_MAX) continue;
-			auto& source = prepared.buffer_sources[metadata.descriptor_index];
-			const auto descriptor = DecodeNativeDescriptor<ShaderBufferResource>(snapshot.buffers[resource]);
-			const auto address = descriptor.Base48();
-			auto size = BufferBindingSize(metadata, descriptor);
-			if (address == 0 || size == 0) {
-				source = {};
-				continue;
+			prepared.buffer_sources[metadata.descriptor_index] =
+			    resolve_source(metadata, snapshot.buffers[resource], false);
+		}
+		prepared.indirect_tables.clear();
+		prepared.indirect_tables.reserve(snapshot.indirect_buffer_tables.size());
+		for (const auto& table: snapshot.indirect_buffer_tables) {
+			const auto& metadata = program.info.buffers[table.root_resource];
+			PreparedBindings::IndirectTableBinding binding;
+			binding.root_resource = table.root_resource;
+			binding.header_word   = table.header_word;
+			binding.sources.reserve(table.entries.size());
+			for (const auto& entry: table.entries) {
+				binding.sources.push_back(resolve_source(metadata, entry, true));
 			}
-			if (descriptor.NumRecords() == UINT32_MAX) {
-				if (program.info.buffers[resource].written) {
-					// Sentinel write ranges end before tables captured by any bound stage.
-					for (const auto* reader: stages) {
-						for (const auto [read_address, read_size]: reader->runtime->resources->specialization_reads) {
-							if (read_size == 0) continue;
-							if (read_address > address) {
-								size = std::min(size, read_address - address);
-							} else if (address - read_address < read_size) {
-								EXIT("scalar resource reads overlap a shader buffer write\n");
-							}
-						}
-					}
-				}
-				//  PPSA15246
-				const auto& graphics = m_context.GetGraphics();
-				const auto  limit =
-				    uint64_t {graphics.GetPhysicalDeviceProperties().limits.maxStorageBufferRange} -
-				    (graphics.StorageMinAlignment() - 1);
-				size = Libs::LibKernel::Memory::ClampRangeSize(
-				    address, std::min({size, uint64_t {256} * 1024 * 1024, limit}));
-			} else if (size >= (uint64_t {1} << 30u)) {
-				//  PPSA18026
-				// Finite descriptors can span sparse PRT holes; oversized pool windows are mapped
-				// in pieces, so they end at their last committed range.
-				size = Libs::LibKernel::Memory::ClampRangeSize(address, size, true);
-			}
-			source = {.address = address, .size = size, .id = cache.FindBuffer(address, size)};
+			prepared.indirect_tables.push_back(std::move(binding));
 		}
 	}
 }
@@ -856,7 +874,49 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 		    static_cast<uint32_t>(prepared.buffer_sources[index].size + buffer_offset);
 	}
 	if (layout.descriptor_counts[static_cast<size_t>(BindingKind::FlattenedSrt)] != 0) {
-		prepared.flattened_srt = NativeUpload(m_context, snapshot.flattened_srt);
+		if (prepared.indirect_tables.empty()) {
+			prepared.flattened_srt = NativeUpload(m_context, snapshot.flattened_srt);
+		} else {
+			std::vector<uint32_t> patched_srt = snapshot.flattened_srt;
+			auto&                 cache       = m_context.GetBufferCache();
+			auto&                 stream      = cache.GetUtilityBuffer(MemoryUsage::Stream);
+			for (size_t ti = 0; ti < prepared.indirect_tables.size(); ++ti) {
+				auto&       tb         = prepared.indirect_tables[ti];
+				const auto& snap_table = snapshot.indirect_buffer_tables[ti];
+				const auto& metadata   = program.info.buffers[tb.root_resource];
+				std::vector<uint32_t> table_words(tb.sources.size() * 4u, 0u);
+				for (size_t j = 0; j < tb.sources.size(); ++j) {
+					const auto& src = tb.sources[j];
+					if (src.address == 0 || src.size == 0) continue;
+					auto [buf, off] = cache.ObtainBuffer(
+					    src.address, src.size, metadata.written,
+					    metadata.formatted || (metadata.read && Config::SyncRawImageBuffersEnabled()),
+					    src.id);
+					if (metadata.written) {
+						m_context.GetTextureCache().InvalidateMemoryFromGPU(src.address, src.size);
+					}
+					const uint64_t host_bda    = static_cast<uint64_t>(buf->BufferDeviceAddress()) + off;
+					const uint64_t aligned_bda = host_bda & ~uint64_t {3};
+					const uint32_t byte_offset = static_cast<uint32_t>(host_bda & 3u);
+					const uint32_t byte_size =
+					    static_cast<uint32_t>(std::min<uint64_t>(src.size + byte_offset, UINT32_MAX));
+					const uint32_t cls = snap_table.class_index[j] & 0x00ffffffu;
+					table_words[j * 4u + 0u] = static_cast<uint32_t>(aligned_bda);
+					table_words[j * 4u + 1u] = static_cast<uint32_t>(aligned_bda >> 32u);
+					table_words[j * 4u + 2u] = byte_size;
+					table_words[j * 4u + 3u] = (byte_offset << 24u) | cls;
+				}
+				if (!table_words.empty()) {
+					const auto table_off = stream.Copy(table_words.data(),
+					                                   table_words.size() * sizeof(uint32_t), 16);
+					const uint64_t table_bda =
+					    static_cast<uint64_t>(stream.BufferDeviceAddress()) + table_off;
+					patched_srt[tb.header_word + 0u] = static_cast<uint32_t>(table_bda);
+					patched_srt[tb.header_word + 1u] = static_cast<uint32_t>(table_bda >> 32u);
+				}
+			}
+			prepared.flattened_srt = NativeUpload(m_context, patched_srt);
+		}
 	}
 	if (layout.descriptor_counts[static_cast<size_t>(BindingKind::ShaderData)] != 0) {
 		prepared.shader_data_buffer = NativeUpload(m_context, prepared.shader_data);

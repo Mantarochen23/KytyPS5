@@ -60,6 +60,8 @@ struct PipelineCache::Async {
 		// What the translation job spent, to show in the build line of the module made from it.
 		uint64_t translate_us = 0;
 		uint64_t plan_us      = 0;
+		// What asked for this translation ("prefetch", "dispatch", or "draw").
+		const char* origin    = "unknown";
 	};
 
 	// A job a worker has or will run for a program, and what it does.
@@ -150,8 +152,12 @@ struct PipelineCache::Async {
 		uint64_t pipelines_ready   = 0;
 		uint64_t pipeline_failed   = 0;
 		uint64_t expired           = 0; // translations dropped over the IR budget
+		uint64_t retired           = 0; // waiting translations retired loudly (TTL/redundant/failed)
 	};
 	Counters counters;
+	// Render thread only: retires a single waiting translation for `key` with a named reason and
+	// frees its IR off the render thread.
+	bool RetireWaiting(const ProgramKey& key, const char* reason);
 	uint64_t last_store_report_ms = 0;
 	uint64_t last_account_ms      = 0;
 	// Owned by the PipelineCache: the builds and the skipped dispatches of the status period.

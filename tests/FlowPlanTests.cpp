@@ -1,5 +1,6 @@
 #include "graphics/host_gpu/renderer/pipeline/buildTiming.h"
 #include "graphics/host_gpu/renderer/pipeline/flowPlan.h"
+#include "graphics/host_gpu/renderer/pipeline/frameHoles.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -156,6 +157,28 @@ void TestBuildLine() {
 	      "totals text");
 }
 
+void TestFrameHolesSummary() {
+	FrameHoles::Tracker tracker;
+	Check(tracker.TakeFrameLine(1).empty(), "complete frame emits no frame-holes line");
+	const uint64_t rt_addrs[]  = {0x100010000ull, 0x100020000ull};
+	const uint64_t buf_addrs[] = {0x100020000ull, 0x100030000ull};
+	tracker.RecordDraw(FrameHoles::DrawSkipReason::ShaderBuilding, rt_addrs);
+	tracker.RecordDraw(FrameHoles::DrawSkipReason::FailedShader, {rt_addrs, 1});
+	tracker.RecordDispatch(FrameHoles::DispatchSkipReason::Wait, buf_addrs);
+	tracker.RecordDispatch(FrameHoles::DispatchSkipReason::Tainted, {buf_addrs + 1, 1});
+	tracker.RecordDispatch(FrameHoles::DispatchSkipReason::Refused);
+	const auto line = tracker.TakeFrameLine(42);
+	Check(line.find("[frame-holes] frame=42 draws skipped=2 (shader-building=1, failed-shader=1)") !=
+	          std::string::npos,
+	      "draw skip reasons counted");
+	Check(line.find("dispatches skipped=3 (wait=1, tainted=1, refused=1)") != std::string::npos,
+	      "dispatch skip reasons counted");
+	Check(line.find("targets affected=3 (0x000100010000, 0x000100020000, 0x000100030000)") !=
+	          std::string::npos,
+	      "distinct targets deduplicated and formatted");
+	Check(tracker.TakeFrameLine(43).empty(), "counters reset after frame flush");
+}
+
 } // namespace
 
 int main() {
@@ -168,6 +191,7 @@ int main() {
 	TestRequestCounter();
 	TestUserDataTracker();
 	TestBuildLine();
+	TestFrameHolesSummary();
 	std::printf("FlowPlanTests: ok\n");
 	return 0;
 }
