@@ -12,6 +12,7 @@
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/guest_gpu/pm4.h"
 #include "graphics/guest_gpu/tile.h"
+#include "graphics/host_gpu/renderer/dispatchLimits.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/renderer/sync.h"
@@ -1773,6 +1774,26 @@ uint32_t* KYTY_SYSV_ABI AgcCbDispatch(CommandBuffer* buf, uint32_t thread_group_
 	cmd[2] = thread_group_y;
 	cmd[3] = thread_group_z;
 	cmd[4] = (modifier & 0xa038u) | 0x41u;
+
+	// More than 2^32 groups (or threads) is never a real dispatch: name the guest caller that
+	// passed the counts (the renderer's `[dispatch]` line refuses it later). Rate limited.
+	if (Libs::Graphics::DispatchGroups(thread_group_x, thread_group_y, thread_group_z) >
+	    (uint64_t {1} << 32u)) {
+		static std::atomic<uint32_t> reports {0};
+		if (reports.fetch_add(1, std::memory_order_relaxed) < 16) {
+			uint64_t caller = 0;
+			Libs::GetThreadCallRing().ForEachOldestFirst(
+			    [&](const Libs::CallRecord& record, size_t) { caller = record.guest_ret_addr; });
+			float as_float[3];
+			std::memcpy(as_float, &cmd[1], sizeof(as_float));
+			LOGF("[dispatch-src] AgcCbDispatch thread=%d caller=0x%016" PRIx64
+			     " counts=0x%08" PRIx32 ",0x%08" PRIx32 ",0x%08" PRIx32 " (as floats %g %g %g)"
+			     " modifier=0x%08" PRIx32 " packet=0x%016" PRIx64 "\n",
+			     Common::Thread::GetThreadIdUnique(), caller, thread_group_x, thread_group_y,
+			     thread_group_z, static_cast<double>(as_float[0]), static_cast<double>(as_float[1]),
+			     static_cast<double>(as_float[2]), modifier, reinterpret_cast<uint64_t>(cmd));
+		}
+	}
 
 	return cmd;
 }

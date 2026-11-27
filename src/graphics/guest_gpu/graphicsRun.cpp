@@ -1,6 +1,7 @@
 #include "graphics/guest_gpu/graphicsRun.h"
 
 #include "common/faultReport.h"
+#include "common/fpEnv.h"
 #include "common/assert.h"
 #include "common/debugCounters.h"
 #include "common/frameCost.h"
@@ -25,6 +26,7 @@
 #include "graphics/shader/shaderCompiler.h"
 #include "kernel/memory.h"
 #include "libs/errno.h"
+#include "libs/libs.h"
 
 #include <algorithm>
 #include <chrono>
@@ -136,6 +138,29 @@ void GuestGpu::SendCommandSync(Common::UniqueFunction<void>&& command) {
 	done.acquire();
 }
 
+// On the submitting guest thread: who it is, its FP control state and its last library calls
+// (the submit call itself is the newest), for the report of a refused dispatch.
+static void CaptureSubmitter(DispatchSubmitter& submitter) {
+	submitter.thread_id = Common::Thread::GetThreadIdUnique();
+	const auto env      = Common::ReadFpEnv();
+	submitter.mxcsr     = env.mxcsr;
+	submitter.x87_cw    = env.control;
+	const auto& ring    = Libs::GetThreadCallRing();
+	const auto  skip    = ring.count > DispatchSubmitterCalls ? ring.count - DispatchSubmitterCalls : 0;
+	submitter.calls_num = 0;
+	ring.ForEachOldestFirst([&](const Libs::CallRecord& record, size_t index) {
+		if (index < skip) return;
+		submitter.calls[submitter.calls_num++] = {record.library, record.function,
+		                                          record.guest_ret_addr};
+	});
+	if (Common::FpControlFirstDeviation(Common::FpCheckSite::Submit, env)) {
+		LOGF("[fpenv] site=submit thread=%d mxcsr=0x%04x x87=0x%04x expected mxcsr=0x%04x "
+		     "x87=0x%04x; last calls: %s\n",
+		     submitter.thread_id, env.mxcsr, env.control, Common::GuestFpEnv.mxcsr,
+		     Common::GuestFpEnv.control, FormatSubmitterCalls(submitter).c_str());
+	}
+}
+
 void GuestGpu::Submit(std::span<const uint32_t> commands) {
 	if (commands.empty()) {
 		return;
@@ -144,6 +169,7 @@ void GuestGpu::Submit(std::span<const uint32_t> commands) {
 	submission.type     = SubmissionType::Commands;
 	submission.queue_id = 0;
 	submission.commands = commands;
+	CaptureSubmitter(submission.submitter);
 	Enqueue(std::move(submission));
 }
 
@@ -157,6 +183,7 @@ void GuestGpu::SubmitCompute(uint32_t queue, std::span<const uint32_t> commands)
 	submission.type     = SubmissionType::Commands;
 	submission.queue_id = 1 + compute_queue;
 	submission.commands = commands;
+	CaptureSubmitter(submission.submitter);
 	Enqueue(std::move(submission));
 }
 
@@ -703,8 +730,10 @@ bool GuestGpu::Process(Submission& submission) {
 				submission.prefetched = true;
 				cp.PrefetchComputeShaders(submission.commands);
 			}
+			cp.SetSubmitter(&submission.submitter);
 			complete =
 			    cp.Process(submission.execution, submission.commands) == Pm4ProcessResult::Complete;
+			cp.SetSubmitter(nullptr);
 			if (submission.execution.MadeProgress()) {
 				cp.BufferFlush();
 			}
@@ -1296,12 +1325,20 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 }
 
 void CommandProcessor::DispatchDirect(uint32_t thread_group_x, uint32_t thread_group_y,
-                                      uint32_t thread_group_z, uint32_t mode) {
+                                      uint32_t thread_group_z, uint32_t mode,
+                                      const uint32_t* packet) {
+	DispatchOrigin origin {};
+	origin.packet    = packet;
+	origin.submitter = m_submitter;
+	// A thread-dimension indirect dispatch (DispatchIndirect below) already set its origin.
+	const ScopedDispatchOrigin scope(t_dispatch_origin != nullptr ? t_dispatch_origin : &origin);
+	const uint64_t indirect_args = t_dispatch_origin->args_addr;
 	m_sh_ctx.SetCsWaveSize(Pm4::ComputeWaveSize(mode));
 	const bool allow_async = g_current_execution != nullptr;
 	if (!m_renderer.GetRenderExecutor().DispatchDirect(CurrentBuffer(), thread_group_x,
 	                                                   thread_group_y, thread_group_z, mode,
-	                                                   IsAsyncComputeQueue(), allow_async)) {
+	                                                   IsAsyncComputeQueue(), allow_async,
+	                                                   indirect_args)) {
 		SuspendOrSkipDispatch();
 	} else {
 		NoteDispatchDone();
@@ -1313,14 +1350,31 @@ void CommandProcessor::ProcessPssr(const Pssr::Request& request) {
 	m_renderer.GetRenderExecutor().ProcessPssr(CurrentBuffer(), request);
 }
 
-void CommandProcessor::DispatchIndirect(uint64_t args_addr, uint32_t mode) {
+void CommandProcessor::DispatchIndirect(uint64_t args_addr, uint32_t mode, const uint32_t* packet) {
 	EXIT_NOT_IMPLEMENTED(args_addr == 0 || (args_addr & 3u) != 0);
 	if ((mode & Pm4::COMPUTE_DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS) != 0) {
+		// The thread counts are read here, on the command processor, from guest memory (a GPU
+		// written range is downloaded first). The dispatch keeps the argument address: its report
+		// says `source=indirect-threads`, and a skipped producer of the counts skips it.
+		DispatchOrigin origin {};
+		origin.packet           = packet;
+		origin.submitter        = m_submitter;
+		origin.args_addr        = args_addr;
+		origin.args_gpu_written =
+		    m_renderer.GetBufferCache().IsRegionGpuModified(args_addr, sizeof(vk::DispatchIndirectCommand))
+		        ? 1
+		        : 0;
+		const ScopedDispatchOrigin  scope(&origin);
 		vk::DispatchIndirectCommand args;
 		LibKernel::Memory::ReadGuestMemory(args_addr, &args, sizeof(args));
-		DispatchDirect(args.x, args.y, args.z, mode);
+		DispatchDirect(args.x, args.y, args.z, mode, packet);
 		return;
 	}
+	DispatchOrigin origin {};
+	origin.packet    = packet;
+	origin.submitter = m_submitter;
+	origin.args_addr = args_addr;
+	const ScopedDispatchOrigin scope(&origin);
 	m_sh_ctx.SetCsWaveSize(Pm4::ComputeWaveSize(mode));
 	const bool allow_async = g_current_execution != nullptr;
 	if (!m_renderer.GetRenderExecutor().DispatchIndirect(CurrentBuffer(), args_addr, mode,

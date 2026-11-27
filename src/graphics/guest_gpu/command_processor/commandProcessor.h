@@ -5,6 +5,7 @@
 #include "common/emulatorConfig.h"
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/guest_gpu/pssr.h"
+#include "graphics/host_gpu/renderer/dispatchOrigin.h"
 #include "graphics/host_gpu/renderer/pipeline/flowPlan.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
@@ -96,9 +97,12 @@ public:
 	void WriteBackImages();
 	void Flip(int handle, int index, int flip_mode, int64_t flip_arg);
 	void PrepareCpuFlip(uint64_t request_id);
+	// `packet`: guest address of the PM4 header, for the report of a refused dispatch.
 	void DispatchDirect(uint32_t thread_group_x, uint32_t thread_group_y, uint32_t thread_group_z,
-	                    uint32_t mode);
-	void DispatchIndirect(uint64_t args_addr, uint32_t mode);
+	                    uint32_t mode, const uint32_t* packet = nullptr);
+	void DispatchIndirect(uint64_t args_addr, uint32_t mode, const uint32_t* packet = nullptr);
+	// The guest thread that submitted the commands being processed (nullptr = not known).
+	void SetSubmitter(const DispatchSubmitter* submitter) { m_submitter = submitter; }
 	void WaitFlipDone(const uint64_t* label);
 	void ProcessPssr(const Pssr::Request& request);
 	void TriggerEvent(uint32_t event_type, uint32_t event_index, uint64_t event_address = 0);
@@ -163,6 +167,7 @@ private:
 	uint32_t       m_draws                       = 0; // Since the buffer start or CountDraw's flush
 	uint64_t       m_synthetic_occlusion_counter = 0;
 	bool           m_predicate_skip              = false;
+	const DispatchSubmitter* m_submitter         = nullptr;
 };
 
 } // namespace Libs::Graphics

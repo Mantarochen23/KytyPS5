@@ -144,9 +144,11 @@ public:
 	~RenderExecutor();
 	KYTY_CLASS_NO_COPY(RenderExecutor);
 
+	// `indirect_args`: the guest argument address of a thread-dimension indirect dispatch whose
+	// counts the command processor read (an input of the dispatch), 0 for a direct packet.
 	bool DispatchDirect(CommandBuffer& buffer, uint32_t thread_group_x, uint32_t thread_group_y,
 	                    uint32_t thread_group_z, uint32_t mode, bool async_compute,
-	                    bool allow_async = false);
+	                    bool allow_async = false, uint64_t indirect_args = 0);
 	bool DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr, uint32_t mode,
 	                      bool async_compute, bool allow_async = false);
 	void ProcessPssr(CommandBuffer& buffer, const Pssr::Request& request);
