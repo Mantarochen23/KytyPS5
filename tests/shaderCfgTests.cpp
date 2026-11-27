@@ -14576,9 +14576,9 @@ void TestIndirectBufferSharedHelpersStayCompact() {
   };
 
   // Synthetic compute shader with 128 interleaved heterogeneous buffer candidates (4 format/stride
-  // classes plus an empty entry) and 40 accesses (32 formatted stores + 8 formatted loads with
-  // distinct immediate offsets). Inline expansion would emit >1.4M SPIR-V words; shared helpers
-  // must stay strictly under 20,000 words and pass Vulkan 1.3 validation.
+  // classes plus an empty entry) and 40 accesses (8 formatted loads accumulated into v6 + 32
+  // formatted stores at distinct dynamic indices). Inline expansion would emit >1.4M SPIR-V words;
+  // shared helpers must stay strictly under 20,000 words and pass Vulkan 1.3 validation.
   std::vector<uint32_t> shader{
       EncodeVop3Word0(0x182, 4),
       EncodeVop3Word1(256u + 0u, 0, 0), // v_readfirstlane_b32 s4, v0
@@ -14588,14 +14588,18 @@ void TestIndirectBufferSharedHelpersStayCompact() {
       EncodeSmem0(0x0a, 8, 0),
       4u << 25u,                        // s_buffer_load_dwordx4 s[8:11], s[0:3], s4
       0xbf8cc07fu,                      // s_waitcnt lgkmcnt(0)
+      EncodeVop1(0x01, 6u, 128u + 0u),  // v_mov_b32 v6, 0
   };
   for (uint32_t i = 0; i < 8u; ++i) {
-    shader.push_back(EncodeMubuf0(0x03, i * 16u, true)); // buffer_load_format_xyzw
-    shader.push_back(EncodeMubuf1(1u, 2u, 0u));
+    shader.push_back(EncodeVop2(0x25, 5u, 128u + i, 0u)); // v_add_nc_u32 v5, i, v0
+    shader.push_back(EncodeMubuf0(0x03, 0u, true));       // buffer_load_format_xyzw
+    shader.push_back(EncodeMubuf1(1u, 2u, 5u));
+    shader.push_back(EncodeVop2(0x25, 6u, 256u + 1u, 6u)); // v_add_nc_u32 v6, v1, v6
   }
   for (uint32_t i = 0; i < 32u; ++i) {
-    shader.push_back(EncodeMubuf0(0x07, i * 16u, true)); // buffer_store_format_xyzw
-    shader.push_back(EncodeMubuf1(1u, 2u, 0u));
+    shader.push_back(EncodeVop2(0x25, 5u, 128u + i, 0u)); // v_add_nc_u32 v5, i, v0
+    shader.push_back(EncodeMubuf0(0x07, 0u, true));       // buffer_store_format_xyzw
+    shader.push_back(EncodeMubuf1(6u, 2u, 5u));
   }
   shader.push_back(EncodeSopp(0x01)); // s_endpgm
 
@@ -14652,6 +14656,8 @@ void TestIndirectBufferSharedHelpersStayCompact() {
                  compiled.spirv.size(), kMaxWords);
     Check(false, "shared indirect buffer helpers exceeded expected SPIR-V word bound");
   }
+  std::printf("TestIndirectBufferSharedHelpersStayCompact: candidates=%zu accesses=40 words=%zu\n",
+              specialization.buffers.size(), compiled.spirv.size());
   bool saw_indirect = false;
   for (uint32_t i = 0; i < compiled.emit_stats.contributor_count; ++i) {
     const auto &c = compiled.emit_stats.top_contributors[i];
