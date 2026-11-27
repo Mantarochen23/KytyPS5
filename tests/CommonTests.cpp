@@ -5,6 +5,7 @@
 #include "common/file.h"
 #include "common/hostException.h"
 #include "common/logging/log.h"
+#include "common/memAccount.h"
 #include "common/ports.h"
 #include "common/platform/sysDbg.h"
 #include "common/stringUtils.h"
@@ -513,3 +514,74 @@ TEST(Ports, DisablePortParsesNamesAndSelectsTheShaderStore) {
 	EXPECT_NE(Config::PortsSummary().find("enabled: none"), std::string::npos);
 	Config::SetDisabledPorts({});
 }
+
+namespace {
+
+TEST(MemAccount, ProcStatusFieldsAreKilobytes) {
+	const auto memory = Common::MemAccount::ParseProcStatus(
+	    "Name:\tx\nVmHWM:\t  2048 kB\nVmRSS:\t  1024 kB\nVmSwap:\t     8 kB\nThreads:\t3\n");
+	EXPECT_EQ(memory.rss, 1024u * 1024u);
+	EXPECT_EQ(memory.peak_rss, 2048u * 1024u);
+	EXPECT_EQ(memory.swap, 8u * 1024u);
+	EXPECT_EQ(Common::MemAccount::ParseProcStatus("nothing here").rss, 0u);
+}
+
+TEST(MemAccount, GaugesAddAndSaturate) {
+	auto& gauge = Common::MemAccount::Owner("test-owner-a");
+	EXPECT_EQ(&gauge, &Common::MemAccount::Owner("test-owner-a"));
+	gauge.Set(100, 2);
+	gauge.Add(50, 1);
+	EXPECT_EQ(gauge.Bytes(), 150u);
+	EXPECT_EQ(gauge.Items(), 3u);
+	gauge.Add(-1000, -10);
+	EXPECT_EQ(gauge.Bytes(), 0u);
+	EXPECT_EQ(gauge.Items(), 0u);
+}
+
+TEST(MemAccount, UnaccountedIsSigned) {
+	EXPECT_EQ(Common::MemAccount::Unaccounted(10, 4), 6);
+	EXPECT_EQ(Common::MemAccount::Unaccounted(4, 10), -6);
+	const std::vector<Common::MemAccount::Entry> owners {{"a", 3, 0}, {"b", 4, 1}};
+	EXPECT_EQ(Common::MemAccount::Counted(owners), 7u);
+}
+
+TEST(MemAccount, LineNamesEveryOwnerAndTheGap) {
+	Common::MemAccount::Sample sample;
+	sample.process = {.rss = 3ull << 30, .swap = 1ull << 30, .peak_rss = 4ull << 30};
+	sample.owners  = {{"ir-table", 1ull << 30, 12}, {"store-queue", 0, 0}};
+	sample.heap    = {.known = true, .in_use = 2ull << 30, .free_held = 512ull << 20};
+	sample.external.emplace_back("vk", "device=100MiB");
+	const auto line = Common::MemAccount::FormatLine(sample, "now");
+	EXPECT_NE(line.find("[mem] now"), std::string::npos);
+	EXPECT_NE(line.find("rss=3072MiB"), std::string::npos);
+	EXPECT_NE(line.find("swap=1024MiB"), std::string::npos);
+	EXPECT_NE(line.find("total=4096MiB"), std::string::npos);
+	EXPECT_NE(line.find("peak-rss=4096MiB"), std::string::npos);
+	EXPECT_NE(line.find("counted=1024MiB"), std::string::npos);
+	EXPECT_NE(line.find("unaccounted=2048MiB"), std::string::npos);
+	EXPECT_NE(line.find("ir-table=1024MiB(12)"), std::string::npos);
+	EXPECT_NE(line.find("store-queue=0MiB"), std::string::npos);
+	EXPECT_NE(line.find("heap-free-held=512MiB"), std::string::npos);
+	EXPECT_NE(line.find("vk: device=100MiB"), std::string::npos);
+	sample.owners = {{"big", 5ull << 30, 0}};
+	EXPECT_NE(Common::MemAccount::FormatLine(sample, "x").find("unaccounted=-2048MiB"),
+	          std::string::npos);
+}
+
+TEST(MemAccount, LimitGuardDropsThenStopsOnlyWhileOver) {
+	using Action = Common::MemAccount::LimitGuard::Action;
+	Common::MemAccount::LimitGuard off(0);
+	EXPECT_EQ(off.Step(0, 1ull << 40), Action::None);
+	Common::MemAccount::LimitGuard guard(100, 10'000);
+	EXPECT_EQ(guard.Step(1000, 50), Action::None);
+	EXPECT_EQ(guard.Step(2000, 150), Action::DropCaches);
+	EXPECT_EQ(guard.Step(5000, 150), Action::None);
+	EXPECT_EQ(guard.Step(11'999, 150), Action::None);
+	EXPECT_EQ(guard.Step(12'000, 150), Action::Stop);
+	// Back under: the next time over starts again with a drop.
+	EXPECT_EQ(guard.Step(13'000, 90), Action::None);
+	EXPECT_EQ(guard.Step(14'000, 150), Action::DropCaches);
+	EXPECT_EQ(guard.Step(20'000, 100), Action::None);
+}
+
+} // namespace

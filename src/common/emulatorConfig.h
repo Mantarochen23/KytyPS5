@@ -179,6 +179,9 @@ struct ConfigOptions {
 	uint32_t                 warmup_budget_s            = 0;
 	// --spirv-compact: run the measured conservative post-emission cleanup recipe. Off by default.
 	bool                     spirv_compact_enabled = false;
+	// --mem-limit-gb: when the process's RSS + swap passes this, caches are dropped and the memory
+	// table printed; still over 10 s later, the run stops with a message. 0 = off.
+	uint32_t                 mem_limit_gb               = 0;
 };
 
 void Load(const ConfigOptions& cfg);
@@ -295,6 +298,7 @@ bool     AsyncLookaheadEnabled();
 uint32_t AsyncSpeculativeModulesMode();
 uint32_t WarmUpBudgetSeconds();
 bool SpirvCompactEnabled();
+uint32_t MemLimitGb();
 
 } // namespace Config
 

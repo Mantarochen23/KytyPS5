@@ -2,6 +2,7 @@
 
 #include "common/emulatorConfig.h"
 #include "common/logging/log.h"
+#include "common/memAccount.h"
 
 #include <algorithm>
 #include <array>
@@ -261,10 +262,13 @@ void DumpWorker() {
 			if (!g_dump_queue.empty()) {
 				entry = std::move(g_dump_queue.front());
 				g_dump_queue.pop_front();
+				MemAccount::Owner("dump-queue").Set(g_dump_queue.size() * sizeof(DumpEntry),
+				                                    g_dump_queue.size());
 			} else {
 				use = std::move(g_use_queue.front());
 				g_use_queue.pop_front();
 				g_use_queue_bytes -= std::min(g_use_queue_bytes, UseBytes(*use));
+				MemAccount::Owner("use-queue").Set(g_use_queue_bytes, g_use_queue.size());
 			}
 		}
 		if (entry) WriteDumpEntry(*entry, index);
@@ -312,7 +316,12 @@ void NoteRegistration(uint64_t hash, Stage stage) {
 	if (index >= StageCount) return;
 	const auto now = NowMs();
 	std::lock_guard lock(g_mutex);
-	auto&   record = g_records.try_emplace(hash).first->second;
+	const auto [slot, added] = g_records.try_emplace(hash);
+	if (added) {
+		// The table and its sets, as estimated: a record, a hash node and one variant node.
+		MemAccount::Owner("reg-ledger").Add(static_cast<int64_t>(sizeof(HashRecord) + 64), 1);
+	}
+	auto&   record = slot->second;
 	auto&   entry  = record.stages[index];
 	if (entry.first_registration_ms < 0) entry.first_registration_ms = now;
 	++entry.registrations;
@@ -335,6 +344,8 @@ void DumpRegistration(uint64_t hash, const DumpRegistrationInfo& info,
 	entry.info.binary_stage = {};
 	g_dump_queue.push_back(std::move(entry));
 	const auto size = static_cast<uint64_t>(g_dump_queue.size());
+	// The queued code is the shader map's shared copy: no bytes of its own, only the entries.
+	MemAccount::Owner("dump-queue").Set(size * sizeof(DumpEntry), size);
 	auto high = g_dump_high_water.load(std::memory_order_relaxed);
 	while (size > high && !g_dump_high_water.compare_exchange_weak(
 	                          high, size, std::memory_order_relaxed)) {}
@@ -374,6 +385,7 @@ void DumpUse(UseRecord&& record) {
 	g_use_queue_bytes += bytes;
 	g_use_queue.push_back(std::move(record));
 	const auto size = static_cast<uint64_t>(g_use_queue.size());
+	MemAccount::Owner("use-queue").Set(g_use_queue_bytes, size);
 	auto high = g_use_high_water.load(std::memory_order_relaxed);
 	while (size > high && !g_use_high_water.compare_exchange_weak(
 	                          high, size, std::memory_order_relaxed)) {}
@@ -386,11 +398,17 @@ void NoteUse(uint64_t hash, Stage stage, uint64_t variant_key) {
 	if (index >= StageCount) return;
 	const auto now = NowMs();
 	std::lock_guard lock(g_mutex);
-	auto&   record = g_records.try_emplace(hash).first->second;
+	const auto [slot, added] = g_records.try_emplace(hash);
+	if (added) {
+		MemAccount::Owner("reg-ledger").Add(static_cast<int64_t>(sizeof(HashRecord) + 64), 1);
+	}
+	auto&   record = slot->second;
 	auto&   entry  = record.stages[index];
 	if (entry.first_use_ms < 0) entry.first_use_ms = now;
 	++entry.uses;
-	record.variants.insert(variant_key);
+	if (record.variants.insert(variant_key).second) {
+		MemAccount::Owner("reg-ledger").Add(48);
+	}
 }
 
 void PrintSummary() {

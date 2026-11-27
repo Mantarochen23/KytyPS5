@@ -209,6 +209,7 @@ private:
 	std::atomic<uint64_t>                    m_appended {0};
 	std::atomic<uint64_t>                    m_written {0};
 	std::atomic<uint64_t>                    m_failed {0};
+	std::atomic<uint64_t>                    m_dropped {0};
 	std::mutex                               m_mutex;
 	std::condition_variable_any              m_ready;
 	std::queue<Common::UniqueFunction<void>> m_jobs;
@@ -269,12 +270,17 @@ public:
 	// its user data is built to its module ahead of the dispatch.
 	bool PrefetchComputeProgram(const HW::CsStageRegisters& cs_regs,
 	                            bool dispatch_thread_dimensions, bool async_compute,
-	                            const HW::UserSgprInfo* user_data = nullptr);
+	                            const HW::UserSgprInfo* user_data = nullptr,
+	                            bool                    from_registration = false);
 	// A dispatch gave up waiting for its shader (--async-compute-wait-ms) and is skipped. Counts it
 	// and logs the first skip of each shader. Render thread only.
 	void NoteDispatchSkipped(uint64_t waited_ms);
 	// The `[prefetch]` line.
 	void ReportPrefetch() const;
+	// The `[mem]` owners the cache can count (render thread, every 2 s); also drops on --mem-limit-gb.
+	void AccountMemory();
+	// Whether a program of this stage and hash is in the cache under any key.
+	[[nodiscard]] bool HasProgramOfHash(ShaderType stage, uint64_t hash) const;
 	// Counters of what the scans and registrations queued for translation, printed every 30 s.
 	struct PrefetchCounters {
 		uint64_t requested   = 0; // calls
@@ -285,6 +291,7 @@ public:
 		uint64_t with_data   = 0; // queued with the user data of a scan
 		uint64_t lookahead_modules_built = 0;
 		uint64_t lookahead_hits          = 0;
+		uint64_t registration_deferred   = 0; // registrations kept without a translation
 	};
 	// Registers a callback invoked on worker threads whenever an async shader/pipeline job
 	// finishes, so the guest command processor wakes without polling.

@@ -1,4 +1,5 @@
 #include "graphics/host_gpu/renderer/pipeline/asyncPlan.h"
+#include "graphics/host_gpu/renderer/pipeline/createStats.h"
 #include "graphics/host_gpu/renderer/pipeline/renderActivity.h"
 
 #include <cstdio>
@@ -198,9 +199,50 @@ void TestActivity() {
 	      "packets are counted");
 }
 
+// A registration translates only when the cache already knows the hash or the lookahead had the
+// user data; the scan of a dispatch about to run always translates. A model of the registration
+// of N shaders of which a program dispatches a few shows what stays in memory.
+void TestRegistrationTranslatesOnlyWhatTheCacheKnows() {
+	using AsyncPlan::TranslateAhead;
+	Check(!TranslateAhead(true, false, false), "a registration of an unknown hash is only kept");
+	Check(TranslateAhead(true, false, true), "a registration of a hash the cache has translates");
+	Check(TranslateAhead(true, true, false), "a registration with user data translates");
+	Check(TranslateAhead(false, false, false), "a scanned dispatch always translates");
+	Check(TranslateAhead(false, true, true), "a scanned dispatch with data translates");
+	size_t translated = 0;
+	for (int hash = 0; hash < 3854; hash++) {
+		const bool in_store = hash % 100 == 0;
+		translated += TranslateAhead(true, false, in_store) ? 1u : 0u;
+	}
+	Check(translated == 39, "only the registrations of stored hashes are translated ahead");
+}
+
+// The pipeline-create line separates a warm driver cache (calls under 10 ms, cache hits) from a
+// compile (seconds each), and shows how many calls were inside the driver at once.
+void TestCreateStats() {
+	namespace CS = Libs::Graphics::CreateStats;
+	Check(CS::Bucket(9'999) == 0 && CS::Bucket(10'000) == 1 && CS::Bucket(999'999) == 2 &&
+	      CS::Bucket(1'000'000) == 3 && CS::Bucket(10'000'000) == 4, "bucket edges");
+	CS::Totals totals;
+	CS::Enter(totals);
+	CS::Enter(totals);
+	CS::Leave(totals, totals.compute, 4'000, true, true, 3'000'000);
+	CS::Leave(totals, totals.compute, 2'500'000, true, false, 2'400'000'000);
+	CS::Enter(totals);
+	CS::Leave(totals, totals.graphics, 500, false, false, 0);
+	const auto line = CS::Line(totals);
+	Check(line.find("cs n=2 wall=2504ms driver=2403ms max=2500ms cache-hit=1/2 <10ms=1 <100ms=0 "
+	                "<1s=0 <10s=1 >=10s=0") != std::string::npos, "compute figures");
+	Check(line.find("gfx n=1") != std::string::npos && line.find("cache-hit=0/0") != std::string::npos,
+	      "graphics figures");
+	Check(line.find("in-driver now=0 peak=2") != std::string::npos, "concurrency");
+}
+
 } // namespace
 
 int main() {
+	TestCreateStats();
+	TestRegistrationTranslatesOnlyWhatTheCacheKnows();
 	TestColdRequest();
 	TestLoadedFromStore();
 	TestSpeculationEndsAfterOneRound();

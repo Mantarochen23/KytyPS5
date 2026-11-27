@@ -181,7 +181,10 @@ static void PrintUsage() {
 	         "                                       store (first-used first); the rest loads in the\n"
 	         "                                       background. 0 = load all first. Default: 0.\n"
 	         "  --spirv-compact                     Run conservative SPIR-V cleanup after emission.\n"
-	         "                                       Default: off.\n");
+	         "                                       Default: off.\n"
+	         "  --mem-limit-gb <n>                   When the process's RSS + swap passes n GB, print the\n"
+	         "                                       [mem] table and drop caches; if still over 10 s later\n"
+	         "                                       stop the run with a message. 0 = off. Default: 0.\n");
 }
 
 static bool NextArg(int argc, char* argv[], int& index, std::string& out) {
@@ -642,6 +645,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 		} else if (arg == "--warmup-budget-s") {
 			if (!ParseUint32(value, options.config.warmup_budget_s)) {
 				::printf("invalid warmup budget value: %s\n", value.c_str());
+				return false;
+			}
+		} else if (arg == "--mem-limit-gb") {
+			if (!ParseUint32(value, options.config.mem_limit_gb)) {
+				::printf("invalid memory limit value: %s\n", value.c_str());
 				return false;
 			}
 		} else {

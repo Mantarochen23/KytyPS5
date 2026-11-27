@@ -153,6 +153,7 @@ struct PipelineCache::Async {
 	};
 	Counters counters;
 	uint64_t last_store_report_ms = 0;
+	uint64_t last_account_ms      = 0;
 	// Owned by the PipelineCache: the builds and the skipped dispatches of the status period.
 	BuildTiming::Totals*   build_totals = nullptr;
 	FlowPlan::SkipLedger*  skipped_dispatches = nullptr;
