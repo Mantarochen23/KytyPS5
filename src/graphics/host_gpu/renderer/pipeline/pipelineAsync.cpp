@@ -8,6 +8,7 @@
 #include "common/recoverable.h"
 #include "common/threads.h"
 #include "graphics/host_gpu/renderer/pipeline/asyncPlan.h"
+#include "graphics/host_gpu/renderer/pipeline/createStats.h"
 #include "graphics/host_gpu/renderer/pipeline/renderActivity.h"
 #include "graphics/host_gpu/renderer/pipeline/skippedDraws.h"
 #include "graphics/host_gpu/vulkanCommon.h"
@@ -569,6 +570,7 @@ registrations.queue_full);
 	            p.lookahead_modules_built - std::min(p.lookahead_hits, p.lookahead_modules_built),
 	            m_served.Hashes(), m_served.Uses(), m_skipped_dispatches.Hashes(),
 	            m_skipped_dispatches.Total(), m_skipped_dispatches.WaitedMs(), p.registration_deferred);
+	std::printf("%s\n", CreateStats::Line().c_str());
 }
 
 bool PipelineCache::PostCallProgramModule(const ProgramKey& key, Program& program,

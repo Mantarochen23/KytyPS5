@@ -5,6 +5,7 @@
 #include "gpu_blit_shaders/gpu_mesh_indirect_spv.h"
 #include "graphics/guest_gpu/gpu_defs.h"
 #include "graphics/host_gpu/graphicContext.h"
+#include "graphics/host_gpu/renderer/pipeline/createStats.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
@@ -22,6 +23,7 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <chrono>
 #include <cinttypes>
 #include <mutex>
 #include <set>
@@ -472,8 +474,27 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 	pipeline_info.pDynamicState       = &dynamic_state;
 	pipeline_info.layout              = pipeline.pipeline_layout;
 
+	vk::PipelineCreationFeedback feedback {};
+	std::array<vk::PipelineCreationFeedback, 8> stage_feedback {};
+	vk::PipelineCreationFeedbackCreateInfo feedback_info {};
+	feedback_info.pPipelineCreationFeedback          = &feedback;
+	feedback_info.pipelineStageCreationFeedbackCount = shader_stage_count;
+	feedback_info.pPipelineStageCreationFeedbacks    = stage_feedback.data();
+	rendering_info.pNext                    = &feedback_info;
+	auto&       stats = CreateStats::Global();
+	const auto  begin = std::chrono::steady_clock::now();
+	CreateStats::Enter(stats);
 	const auto result = graphics.device.createGraphicsPipelines(driver_cache, 1, &pipeline_info,
 	                                                            nullptr, &pipeline.pipeline);
+	CreateStats::Leave(
+	    stats, stats.graphics,
+	    static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+	                              std::chrono::steady_clock::now() - begin)
+	                              .count()),
+	    static_cast<bool>(feedback.flags & vk::PipelineCreationFeedbackFlagBits::eValid),
+	    static_cast<bool>(feedback.flags &
+	                      vk::PipelineCreationFeedbackFlagBits::eApplicationPipelineCacheHit),
+	    feedback.duration);
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
 
 	graphics.device.destroyShaderModule(tess_control_shader_module, nullptr);
@@ -515,8 +536,27 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 	info.stage  = comp_shader_stage_info;
 	info.layout = pipeline.pipeline_layout;
 
+	vk::PipelineCreationFeedback feedback {};
+	vk::PipelineCreationFeedback stage_feedback {};
+	vk::PipelineCreationFeedbackCreateInfo feedback_info {};
+	feedback_info.pPipelineCreationFeedback          = &feedback;
+	feedback_info.pipelineStageCreationFeedbackCount = 1;
+	feedback_info.pPipelineStageCreationFeedbacks    = &stage_feedback;
+	info.pNext                              = &feedback_info;
+	auto&       stats = CreateStats::Global();
+	const auto  begin = std::chrono::steady_clock::now();
+	CreateStats::Enter(stats);
 	const auto result =
 	    graphics.device.createComputePipelines(driver_cache, 1, &info, nullptr, &pipeline.pipeline);
+	CreateStats::Leave(
+	    stats, stats.compute,
+	    static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+	                              std::chrono::steady_clock::now() - begin)
+	                              .count()),
+	    static_cast<bool>(feedback.flags & vk::PipelineCreationFeedbackFlagBits::eValid),
+	    static_cast<bool>(feedback.flags &
+	                      vk::PipelineCreationFeedbackFlagBits::eApplicationPipelineCacheHit),
+	    feedback.duration);
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
 }
 
