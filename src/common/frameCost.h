@@ -39,6 +39,26 @@ enum class Counter : uint8_t {
 	GuestMemoryWaitNs,
 	LockWaitNs,
 	IdleNs,
+	// Why the materialization memo missed (one per miss), and what its entries cost.
+	MemoMissEmpty,
+	MemoMissHeapPlan,
+	MemoMissShaderBase,
+	MemoMissIndirectArgs,
+	MemoMissLegacyHash,
+	MemoMissUserData,
+	MemoMissWorkgroupCounts,
+	MemoMissUnreadable,
+	MemoMissRangeChanged,
+	MemoMissHeapChanged,
+	MemoStored,
+	MemoNotStored,
+	MemoEvicted,
+	MemoHeapPlanCalls,
+	MemoRangesStamped,
+	MemoRangesCompared,
+	MemoBytesCompared,
+	MemoRangesTracked,
+	MemoRangesUntracked,
 	Count
 };
 

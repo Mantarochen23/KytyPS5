@@ -370,84 +370,90 @@ bool PipelineCache::Program::RefreshCallSource(const ShaderRecompiler::IR::SrtRu
 
 bool PipelineCache::Program::Materialize(const ShaderRecompiler::IR::SrtRuntime& runtime,
 	                                      std::string* failure_reason) {
+	using Counter = Common::FrameCost::Counter;
 	const auto begin = std::chrono::steady_clock::now();
 	const auto note = [&](bool hit) {
 		const auto elapsed = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
 		                                               std::chrono::steady_clock::now() - begin)
 		                                               .count());
-		Common::FrameCost::Add(hit ? Common::FrameCost::Counter::MaterializationMemoHits
-		                           : Common::FrameCost::Counter::MaterializationMemoMisses);
-		Common::FrameCost::Add(hit ? Common::FrameCost::Counter::MaterializationMemoHitNs
-		                           : Common::FrameCost::Counter::MaterializationMemoMissNs,
+		Common::FrameCost::Add(hit ? Counter::MaterializationMemoHits
+		                           : Counter::MaterializationMemoMisses);
+		Common::FrameCost::Add(hit ? Counter::MaterializationMemoHitNs
+		                           : Counter::MaterializationMemoMissNs,
 		                       elapsed);
 	};
-	auto& memo = materialization_memo;
-	const auto hash_read = [&](uint64_t address, uint64_t size, uint64_t& hash) {
-		if (size == 0u) {
-			hash = 0u;
-			return true;
-		}
-		if (runtime.read_specialization_memory == nullptr || (size & 3u) != 0u ||
-		    size / sizeof(uint32_t) > memo.scratch.max_size()) {
-			return false;
-		}
-		memo.scratch.resize(static_cast<size_t>(size / sizeof(uint32_t)));
-		if (!runtime.read_specialization_memory(runtime.userdata, address, memo.scratch)) return false;
-		hash = XXH3_64bits(memo.scratch.data(), static_cast<size_t>(size));
-		return true;
+	auto&      memo     = materialization_memo;
+	const auto settings = GlobalMaterializationMemoSettings();
+	memo.Configure(settings.entries, settings.stamps);
+	const bool uses_heap = resource_plan.info.uses_image_heap;
+	if (uses_heap) Common::FrameCost::Add(Counter::MemoHeapPlanCalls);
+
+	MemoOutcome     outcome = MemoOutcome::Empty;
+	MemoLookupStats stats;
+	const auto count_stats = [&] {
+		Common::FrameCost::Add(Counter::MemoRangesStamped, stats.ranges_stamped);
+		Common::FrameCost::Add(Counter::MemoRangesCompared, stats.ranges_compared);
+		Common::FrameCost::Add(Counter::MemoBytesCompared, stats.bytes_compared);
 	};
-	const auto same_bound_state = [&] {
-		if (!memo.valid || resource_plan.info.uses_image_heap ||
-		    memo.shader_base != runtime.shader_base ||
-		    memo.indirect_args_address != runtime.indirect_args_address ||
-		    memo.legacy_hash != runtime.legacy_hash ||
-		    !std::ranges::equal(memo.user_data, runtime.user_data) ||
-		    !std::ranges::equal(memo.workgroup_counts, runtime.workgroup_counts)) {
-			return false;
+	if (auto* entry = memo.Lookup(runtime, uses_heap, outcome, stats)) {
+		// The members hold the result of the last materialization; another entry's result is
+		// copied in.
+		if (memo.current != entry->serial) {
+			resources           = entry->resources;
+			specialization      = entry->specialization;
+			specialization_hash = entry->specialization_hash;
+			memo.current        = entry->serial;
 		}
-		for (const auto& read: memo.reads) {
-			uint64_t hash = 0;
-			if (!hash_read(read.address, read.size, hash) || hash != read.hash) return false;
-		}
-		return true;
-	};
-	if (same_bound_state()) {
+		count_stats();
 		++materialization_memo_hits;
 		note(true);
 		return true;
 	}
+	count_stats();
+	switch (outcome) {
+		case MemoOutcome::Empty: Common::FrameCost::Add(Counter::MemoMissEmpty); break;
+		case MemoOutcome::HeapPlan: Common::FrameCost::Add(Counter::MemoMissHeapPlan); break;
+		case MemoOutcome::ShaderBase: Common::FrameCost::Add(Counter::MemoMissShaderBase); break;
+		case MemoOutcome::IndirectArgs: Common::FrameCost::Add(Counter::MemoMissIndirectArgs); break;
+		case MemoOutcome::LegacyHash: Common::FrameCost::Add(Counter::MemoMissLegacyHash); break;
+		case MemoOutcome::UserData: Common::FrameCost::Add(Counter::MemoMissUserData); break;
+		case MemoOutcome::WorkgroupCounts: Common::FrameCost::Add(Counter::MemoMissWorkgroupCounts); break;
+		case MemoOutcome::Unreadable: Common::FrameCost::Add(Counter::MemoMissUnreadable); break;
+		case MemoOutcome::RangeChanged: Common::FrameCost::Add(Counter::MemoMissRangeChanged); break;
+		case MemoOutcome::HeapChanged: Common::FrameCost::Add(Counter::MemoMissHeapChanged); break;
+		default: break;
+	}
+	// The members are about to hold a result no entry describes.
+	memo.current = 0;
 	// A memo must observe every resource-walk read, including direct descriptors whose contents
 	// affect bindings but not specialization.
 	resource_plan.capture_specialization_reads = true;
-	if (!ShaderRecompiler::IR::MaterializeResources(resource_plan, runtime, resources,
+	RecordingImageHeap recorder(runtime.image_heap);
+	auto               walk = runtime;
+	// Only a memo that keeps heap plans needs what the heap hands out.
+	if (runtime.image_heap != nullptr && memo.Capacity() >= 2u) walk.image_heap = &recorder;
+	if (!ShaderRecompiler::IR::MaterializeResources(resource_plan, walk, resources,
 	                                                specialization, failure_reason)) {
-		memo.valid = false;
 		note(false);
 		return false;
 	}
 	specialization_hash = SpecializationHash(specialization);
-	if (resource_plan.info.uses_image_heap) {
-		memo.valid = false;
-		note(false);
-		return true;
-	}
-	memo.user_data.assign(runtime.user_data.begin(), runtime.user_data.end());
-	memo.workgroup_counts.assign(runtime.workgroup_counts.begin(), runtime.workgroup_counts.end());
-	memo.shader_base           = runtime.shader_base;
-	memo.indirect_args_address = runtime.indirect_args_address;
-	memo.legacy_hash           = runtime.legacy_hash;
-	memo.reads.clear();
-	memo.reads.reserve(resources.specialization_reads.size());
-	for (const auto [address, size]: resources.specialization_reads) {
-		uint64_t hash = 0;
-		if (!hash_read(address, size, hash)) {
-			memo.valid = false;
-			note(false);
-			return true;
+	MemoLookupStats store_stats;
+	uint32_t        evicted = 0;
+	if (const auto* stored = memo.Store(runtime, resources, specialization, specialization_hash,
+	                                    recorder, uses_heap, evicted, store_stats)) {
+		memo.current = stored->serial;
+		Common::FrameCost::Add(Counter::MemoStored);
+		for (const auto& read: stored->reads) {
+			Common::FrameCost::Add(read.tracked ? Counter::MemoRangesTracked
+			                                    : Counter::MemoRangesUntracked);
 		}
-		memo.reads.push_back({address, size, hash});
+	} else {
+		Common::FrameCost::Add(Counter::MemoNotStored);
 	}
-	memo.valid = true;
+	Common::FrameCost::Add(Counter::MemoEvicted, evicted);
+	Common::FrameCost::Add(Counter::MemoRangesCompared, store_stats.ranges_compared);
+	Common::FrameCost::Add(Counter::MemoBytesCompared, store_stats.bytes_compared);
 	note(false);
 	return true;
 }
@@ -529,6 +535,7 @@ ShaderModule* PipelineCache::Program::FindModule(const ShaderRecompiler::IR::Srt
 		    return source.indirect_descriptor.has_value();
 	    })) {
 		probe.legacy_hash = true;
+		materialization_memo.current = 0;
 		if (!ShaderRecompiler::IR::MaterializeResources(resource_plan, probe, resources,
 		                                                specialization)) {
 			resources.legacy_hash = 0;

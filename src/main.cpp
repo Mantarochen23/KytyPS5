@@ -201,7 +201,14 @@ static void PrintUsage() {
 	         "                                       store load and each build burst. 0 = off. Default: 0.\n"
 	         "  --driver-cache-cap-mb <n>            Do not load or save a driver pipeline cache file larger\n"
 	         "                                       than n MB (it restarts from what this run creates).\n"
-	         "                                       0 = no cap. Default: 0.\n");
+	         "                                       0 = no cap. Default: 0.\n"
+	         "  --materialize-memo-entries <n>       Resource materializations each shader program remembers\n"
+	         "                                       (by user data, bases and the bytes it read). 1 = the\n"
+	         "                                       single-entry memo; 2 or more also remembers plans that\n"
+	         "                                       use the resident image heap. Default: 1.\n"
+	         "  --materialize-memo-stamps <n>        Write-watch the guest pages a remembered materialization\n"
+	         "                                       read, so a lookup reads none of them; a page written more\n"
+	         "                                       than n times is compared by its bytes. 0 = off. Default: 0.\n");
 }
 
 static bool NextArg(int argc, char* argv[], int& index, std::string& out) {
@@ -698,6 +705,17 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 		} else if (arg == "--driver-cache-cap-mb") {
 			if (!ParseUint32(value, options.config.driver_cache_cap_mb)) {
 				::printf("invalid driver cache cap value: %s\n", value.c_str());
+				return false;
+			}
+		} else if (arg == "--materialize-memo-entries") {
+			if (!ParseUint32(value, options.config.materialize_memo_entries) ||
+			    options.config.materialize_memo_entries == 0u) {
+				::printf("invalid materialize memo entries value: %s\n", value.c_str());
+				return false;
+			}
+		} else if (arg == "--materialize-memo-stamps") {
+			if (!ParseUint32(value, options.config.materialize_memo_stamps)) {
+				::printf("invalid materialize memo stamps value: %s\n", value.c_str());
 				return false;
 			}
 		} else {
