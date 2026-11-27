@@ -90,6 +90,16 @@ void ScopedTimer::Stop() noexcept {
 	Add(m_duration, elapsed_ns - std::min(elapsed_ns, m_child_ns));
 }
 
+namespace {
+std::atomic<bool> g_store_loaded {false};
+double            g_bad_seconds = 0.0; // under g_report_mutex
+bool              g_bad_warned  = false;
+} // namespace
+
+void NoteStoreLoaded() noexcept {
+	g_store_loaded.store(true, std::memory_order_relaxed);
+}
+
 void FramePresented() noexcept {
 	Add(Counter::Frames);
 	const auto now = Clock::now();
@@ -154,6 +164,23 @@ void FramePresented() noexcept {
 		                       Counter::MaterializationMemoMisses),
 		    NanosecondsPerCall(delta, Counter::FindModuleHitNs, Counter::FindModuleHits),
 		    NanosecondsPerCall(delta, Counter::FindModuleMissNs, Counter::FindModuleMisses)));
+	}
+	if (g_store_loaded.load(std::memory_order_relaxed) && !g_bad_warned) {
+		const auto hits   = delta[static_cast<size_t>(Counter::FindModuleHits)];
+		const auto misses = delta[static_cast<size_t>(Counter::FindModuleMisses)];
+		if (misses > hits) {
+			g_bad_seconds += std::chrono::duration<double>(elapsed).count();
+		} else {
+			g_bad_seconds = 0.0;
+		}
+		if (g_bad_seconds >= 10.0) {
+			g_bad_warned = true;
+			Log::WriteToConsoleAndLog(fmt::format(
+			    "[frame] WARNING module-misses: module lookups missed more often than they hit for "
+			    "{:.0f} s after the store load (last window hits={} misses={}); modules that exist "
+			    "are not found, each use requests a new translation\n",
+			    g_bad_seconds, hits, misses));
+		}
 	}
 	g_previous     = totals;
 	g_window_start = now;

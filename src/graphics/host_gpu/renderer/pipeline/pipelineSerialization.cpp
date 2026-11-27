@@ -1,3 +1,4 @@
+#include "common/frameCost.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderStoreCapability.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderStoreFile.h"
@@ -370,7 +371,7 @@ bool PipelineCache::ApplyStoreItem(StoreItem& item, std::vector<vk::ShaderModule
 			// A module the old layout's key is known for waits for its first comparison.
 			module.legacy_checked = module.legacy_hash == 0;
 			program->second.legacy_unchecked += module.legacy_checked ? 0u : 1u;
-			program->second.modules.push_back(std::move(module));
+			program->second.Adopt(std::move(module));
 			return true;
 		}
 		case Record::GraphicsPipeline:
@@ -924,6 +925,7 @@ void PipelineCache::WarmUp(const std::filesystem::path& path) {
 	    "Shader cache: loaded {} programs, {} modules, {} pipelines in {} ms\n",
 	    m_program_cache.size(), module_map.size() - 1,
 	    m_graphics_pipelines.size() + m_compute_pipelines.size(), Nanoseconds(start) / 1'000'000u));
+	if (module_map.size() > 1) Common::FrameCost::NoteStoreLoaded();
 	// The parts summed over the threads that ran them; wall is the time before the title starts.
 	Log::WriteToConsoleAndLog(fmt::format(
 	    "[warmup] frames={}ms decode={}ms plans={}ms modules={}ms pipelines={}ms threads={} "

@@ -329,8 +329,9 @@ void PipelineCache::RequestAsync(const ProgramKey& key, Program* program,
 					}
 					auto& cached = m_program_cache.at(inputs->key);
 					// Another draw's compilation may have made it first.
-					if (cached.FindCandidate(pending->stage.module.specialization,
-					                         push_data) != nullptr) {
+					if (auto* existing = cached.FindCandidate(pending->stage.module.specialization,
+					                                          push_data)) {
+						cached.CheckIndexed(*existing, "async-duplicate");
 						return;
 					}
 					pending->taken = true;
@@ -521,7 +522,9 @@ void PipelineCache::RequestAsync(const ProgramKey& key, Program* program,
 			}
 			if (speculated) {
 				auto& cached = m_program_cache.at(inputs->key);
-				if (cached.FindCandidate(pending->stage.module.specialization, {}) == nullptr) {
+				if (auto* existing = cached.FindCandidate(pending->stage.module.specialization, {})) {
+					cached.CheckIndexed(*existing, "lookahead-duplicate");
+				} else {
 					pending->taken = true;
 					NoteBuild({.stage             = ShaderRecompiler::StageName(inputs->key.stage),
 					           .hash              = inputs->key.hash,

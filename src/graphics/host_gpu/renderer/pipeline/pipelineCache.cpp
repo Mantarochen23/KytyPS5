@@ -444,6 +444,42 @@ bool PipelineCache::Program::Materialize(const ShaderRecompiler::IR::SrtRuntime&
 	return true;
 }
 
+ShaderModule* PipelineCache::Program::FindIndexed(ShaderRecompiler::IR::PushData::Window push_data,
+                                                  bool has_calls,
+                                                  std::span<const uint32_t> callee_code) {
+	const auto [first, last] = module_index.equal_range(specialization_hash);
+	for (auto found = first; found != last; ++found) {
+		auto&       candidate = *found->second;
+		const auto& layout    = candidate.info.bindings;
+		if (layout.push_data_start_dword !=
+		        push_data.StartFor(layout.ShaderDataDwords(), candidate.info.stage) ||
+		    candidate.specialization != specialization) {
+			continue;
+		}
+		if (has_calls) {
+			if (candidate.function_code_hash != function_code_hash ||
+			    !std::ranges::equal(candidate.function_code, callee_code)) {
+				continue;
+			}
+		} else {
+			if (!candidate.function_code.empty()) continue;
+		}
+		return &candidate;
+	}
+	return nullptr;
+}
+
+uint64_t PipelineCache::Program::HashSpecialization(
+    const ShaderRecompiler::IR::ResourceSpecialization& value) {
+	return SpecializationHash(value);
+}
+
+ShaderModule& PipelineCache::Program::Adopt(ShaderModule&& module) {
+	auto& added = modules.emplace_back(std::move(module));
+	IndexModule(added);
+	return added;
+}
+
 template <bool HasCalls>
 ShaderModule* PipelineCache::Program::FindModule(const ShaderRecompiler::IR::SrtRuntime& runtime,
                                                  ShaderRecompiler::IR::PushData::Window push_data,
@@ -476,25 +512,9 @@ ShaderModule* PipelineCache::Program::FindModule(const ShaderRecompiler::IR::Srt
 	if (materialized != nullptr) {
 		*materialized = true;
 	}
-	const auto [first, last] = module_index.equal_range(specialization_hash);
-	for (auto found = first; found != last; ++found) {
-		auto&       candidate = *found->second;
-		const auto& layout    = candidate.info.bindings;
-		if (layout.push_data_start_dword !=
-		        push_data.StartFor(layout.ShaderDataDwords(), candidate.info.stage) ||
-		    candidate.specialization != specialization) {
-			continue;
-		}
-		if constexpr (HasCalls) {
-			if (candidate.function_code_hash != function_code_hash ||
-			    !std::ranges::equal(candidate.function_code, FunctionCode())) {
-				continue;
-			}
-		} else {
-			if (!candidate.function_code.empty()) continue;
-		}
+	if (auto* candidate = FindIndexed(push_data, HasCalls, FunctionCode())) {
 		note(true);
-		return &candidate;
+		return candidate;
 	}
 	if (!probe.legacy_hash && Config::PortEnabled(Config::Port::CanonicalResources) &&
 	    std::ranges::any_of(resource_plan.descriptor_sources, [](const auto& source) {
@@ -526,6 +546,28 @@ ShaderModule* PipelineCache::Program::FindCandidate(
 		}
 	}
 	return nullptr;
+}
+
+void PipelineCache::Program::IndexModule(ShaderModule& module) {
+	module.specialization_hash = SpecializationHash(module.specialization);
+	module.function_code_hash  = CallCodeHash(module.function_code);
+	module_index.emplace(module.specialization_hash, &module);
+}
+
+bool PipelineCache::Program::CheckIndexed(ShaderModule& module, const char* path) {
+	const auto [first, last] = module_index.equal_range(SpecializationHash(module.specialization));
+	for (auto found = first; found != last; ++found) {
+		if (found->second == &module) return true;
+	}
+	if (!logged_index_bug) {
+		logged_index_bug = true;
+		Log::WriteToConsoleAndLog(fmt::format(
+		    "[module-index] BUG stage={} hash=0x{:016x} path={}: a module of this program was not in "
+		    "the lookup index (lookups for it miss and request new builds); indexed now\n",
+		    ShaderRecompiler::StageName(module.info.stage), module.info.shader_hash, path));
+	}
+	IndexModule(module);
+	return false;
 }
 
 ShaderModule& PipelineCache::CompileModule(Program& program, const ProgramKey& key,
@@ -626,10 +668,16 @@ void PipelineCache::NoteBuild(BuildTiming::Build build) {
 
 ShaderModule& PipelineCache::AddModule(Program& program, const ProgramKey& key,
                                        CompiledStage compiled) {
-	auto& module = program.modules.emplace_back(std::move(compiled.module));
-	module.specialization_hash = SpecializationHash(module.specialization);
-	module.function_code_hash  = CallCodeHash(module.function_code);
-	program.module_index.emplace(module.specialization_hash, &module);
+#ifndef NDEBUG
+	// A build whose result equals a module the program has: the lookup missed it.
+	if (!program.modules.empty() && !program.logged_index_bug) {
+		const auto existing = program.FindCandidate(compiled.module.specialization, {});
+		if (existing != nullptr && existing->function_code == compiled.module.function_code) {
+			program.CheckIndexed(*existing, "build-duplicate");
+		}
+	}
+#endif
+	auto& module = program.Adopt(std::move(compiled.module));
 	m_compiled[static_cast<size_t>(key.stage)]++;
 	NoteModuleUse(module);
 	if (const auto legacy = program.legacy_of_specialization.find(SpecializationHash(module.specialization));

@@ -62,6 +62,7 @@ cache_lines = []; last_store = None; store_lookups = None
 skip_lines = 0; skip_t_first = None; skip_t_last = None
 ledger_lines = []; ledger_t = None
 frame_cost_lines = []
+module_index_warnings = []
 
 # diag2 findings. Every collection is bounded so a large log cannot grow memory
 # without limit; only the first/last examples and the largest builds are kept.
@@ -294,6 +295,8 @@ with open(path, 'rb') as f:
                             park_threads.append(dict(t=round(t, 1), id=int(pm.group(1)),
                                                      pc=pc, module=modoff))
                     continue
+                if line.startswith(b'[frame] WARNING module-misses') or line.startswith(b'[module-index] BUG'):
+                    module_index_warnings.append((round(t, 1), line.rstrip().decode(errors='replace')))
                 if line.startswith(b'[frame]'):
                     if len(frame_cost_lines) < 2000:
                         frame_cost_lines.append((round(t, 1), line.rstrip().decode(errors='replace')))
@@ -565,6 +568,8 @@ def build_verdict():
         v.append('store misses: %s failed programs at load @%s s, %s failed writes @%s s' %
                  (st['failed_programs'] if st['failed_programs'] is not None else 'no data', st['cache_t'],
                   kv(st['last_store'][0]).get('failed', '?'), st['last_store'][1]))
+    for tt, line in module_index_warnings[:3]:
+        v.append('MODULE LOOKUPS BROKEN @%s s: %s' % (tt, line[:200]))
     mw = findings['queues']['memory_waits']
     if mw:
         w = mw[0]

@@ -60,6 +60,10 @@ private:
 	uint64_t                              m_child_ns = 0;
 };
 
+// Called when a store load that applied modules has finished: from then on, module lookups that
+// miss more often than they hit for 10 s print one `[frame] WARNING module-misses ...` line.
+void NoteStoreLoaded() noexcept;
+
 // Counts a presented frame and emits one `[frame]` line after each five-second window.
 void FramePresented() noexcept;
 

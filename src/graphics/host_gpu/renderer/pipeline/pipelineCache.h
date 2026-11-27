@@ -374,6 +374,21 @@ private:
 		// The module of a program without calls that was built for these inputs, if any.
 		ShaderModule* FindCandidate(const ShaderRecompiler::IR::ResourceSpecialization& wanted,
 		                            ShaderRecompiler::IR::PushData::Window              push_data);
+		// The one entry of a module into the lookup index: every path that puts a module into
+		// `modules` (build, async build, lookahead, store load) ends here.
+		void IndexModule(ShaderModule& module);
+		// Puts a module into `modules` and the index; the only way a module enters a program.
+		ShaderModule& Adopt(ShaderModule&& module);
+		// The hash lookup of FindModule: the module of `specialization_hash` (and, with calls, of
+		// `function_code_hash` and the callee code) whose push-data start matches.
+		// `callee_code` is the program's current callee code; `has_calls` selects FindModule<true>.
+		ShaderModule* FindIndexed(ShaderRecompiler::IR::PushData::Window push_data, bool has_calls,
+		                          std::span<const uint32_t> callee_code);
+		static uint64_t HashSpecialization(const ShaderRecompiler::IR::ResourceSpecialization&);
+		// True if the lookup index finds this module; if not, indexes it and returns false (the
+		// first time per program it logs `[module-index] BUG`).
+		bool CheckIndexed(ShaderModule& module, const char* path);
+		bool logged_index_bug = false;
 	};
 
 	// Variants of one source share a bucket; ProgramKey equality compares the state.
