@@ -198,9 +198,28 @@ void TestActivity() {
 	      "packets are counted");
 }
 
+// A registration translates only when the cache already knows the hash or the lookahead had the
+// user data; the scan of a dispatch about to run always translates. A model of the registration
+// of N shaders of which a program dispatches a few shows what stays in memory.
+void TestRegistrationTranslatesOnlyWhatTheCacheKnows() {
+	using AsyncPlan::TranslateAhead;
+	Check(!TranslateAhead(true, false, false), "a registration of an unknown hash is only kept");
+	Check(TranslateAhead(true, false, true), "a registration of a hash the cache has translates");
+	Check(TranslateAhead(true, true, false), "a registration with user data translates");
+	Check(TranslateAhead(false, false, false), "a scanned dispatch always translates");
+	Check(TranslateAhead(false, true, true), "a scanned dispatch with data translates");
+	size_t translated = 0;
+	for (int hash = 0; hash < 3854; hash++) {
+		const bool in_store = hash % 100 == 0;
+		translated += TranslateAhead(true, false, in_store) ? 1u : 0u;
+	}
+	Check(translated == 39, "only the registrations of stored hashes are translated ahead");
+}
+
 } // namespace
 
 int main() {
+	TestRegistrationTranslatesOnlyWhatTheCacheKnows();
 	TestColdRequest();
 	TestLoadedFromStore();
 	TestSpeculationEndsAfterOneRound();

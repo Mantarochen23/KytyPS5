@@ -563,12 +563,12 @@ registrations.queue_full);
 	            " in-flight=%" PRIu64 "; lookahead modules built=%" PRIu64 " used=%" PRIu64
 	            " unused=%" PRIu64 "; served from store: %" PRIu64 " hashes, %" PRIu64
 	            " uses; skipped dispatches: %" PRIu64 " hashes, %" PRIu64 " uses, %" PRIu64
-	            " ms waited\n",
+	            " ms waited; registrations kept without a translation: %" PRIu64 "\n",
 	            p.requested, p.queued, p.with_data, p.unmapped, p.known, p.in_flight,
 	            p.lookahead_modules_built, p.lookahead_hits,
 	            p.lookahead_modules_built - std::min(p.lookahead_hits, p.lookahead_modules_built),
 	            m_served.Hashes(), m_served.Uses(), m_skipped_dispatches.Hashes(),
-	            m_skipped_dispatches.Total(), m_skipped_dispatches.WaitedMs());
+	            m_skipped_dispatches.Total(), m_skipped_dispatches.WaitedMs(), p.registration_deferred);
 }
 
 bool PipelineCache::PostCallProgramModule(const ProgramKey& key, Program& program,

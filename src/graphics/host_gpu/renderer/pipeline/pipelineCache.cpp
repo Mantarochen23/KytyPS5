@@ -17,6 +17,7 @@
 #include "graphics/host_gpu/renderer/debug.h"
 #include "graphics/host_gpu/renderer/image/imageView.h"
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
+#include "graphics/host_gpu/renderer/pipeline/asyncPlan.h"
 #include "graphics/host_gpu/renderer/pipeline/blendMapping.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineAsync.h"
 #include "graphics/host_gpu/renderer/pipeline/renderActivity.h"
@@ -1574,9 +1575,24 @@ const ShaderModule* PipelineCache::GetComputeProgram(const HW::ComputeShaderInfo
 	return module;
 }
 
+bool PipelineCache::HasProgramOfHash(ShaderType stage, uint64_t hash) const {
+	// The table is hashed by the shader hash, so the bucket holds the variants of one shader.
+	ProgramKey probe;
+	probe.stage = stage;
+	probe.hash  = hash;
+	const auto bucket = m_program_cache.bucket(probe);
+	for (auto it = m_program_cache.begin(bucket); it != m_program_cache.end(bucket); ++it) {
+		if (it->first.stage == stage && it->first.hash == hash) {
+			return true;
+		}
+	}
+	return false;
+}
+
 bool PipelineCache::PrefetchComputeProgram(const HW::CsStageRegisters& cs_regs,
                                            bool dispatch_thread_dimensions, bool async_compute,
-                                           const HW::UserSgprInfo* user_data) {
+                                           const HW::UserSgprInfo* user_data,
+                                           bool                    from_registration) {
 	if (m_async == nullptr || cs_regs.data_addr == 0) {
 		return false;
 	}
@@ -1619,6 +1635,11 @@ bool PipelineCache::PrefetchComputeProgram(const HW::CsStageRegisters& cs_regs,
 	const auto translating = FlightId(m_lookup_key, {UINT32_MAX, UINT32_MAX}, nullptr);
 	if (m_async->in_flight.contains(translating)) {
 		m_prefetch.in_flight++;
+		return false;
+	}
+	if (!AsyncPlan::TranslateAhead(from_registration, user_data_known,
+	                               HasProgramOfHash(ShaderType::Compute, params.hash))) {
+		m_prefetch.registration_deferred++;
 		return false;
 	}
 	ShaderRecompiler::CompileOptions options {

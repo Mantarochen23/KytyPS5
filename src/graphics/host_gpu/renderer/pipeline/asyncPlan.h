@@ -78,6 +78,19 @@ struct RequestState {
 	return mode != 0 && compute && !has_program && (user_data_known || mode >= 2);
 }
 
+// Whether a prefetch translates a compute shader now. The scan of a submitted command buffer sees a
+// dispatch that is about to run, so it always does. A registration only says the shader exists: it
+// knows no user data, a title registers thousands of shaders that it never dispatches, and each
+// finished translation holds its IR until a dispatch asks for it or the IR budget drops it. So a
+// registration translates only when the lookahead had the user data (never the case for the
+// registration itself) or when the cache already has a program of that hash, from the store or an
+// earlier translation under another key, which says the shader is one the program does use.
+// Otherwise the registration stays in the shader map and the dispatch translates it.
+[[nodiscard]] constexpr bool TranslateAhead(bool from_registration, bool user_data_known,
+                                            bool cache_has_hash) {
+	return !from_registration || user_data_known || cache_has_hash;
+}
+
 // The memory the finished translations that no draw has asked for yet may hold, as the sum of their
 // estimated IR sizes. A translation is kept while its shader is registered, so a draw that comes
 // back after a minute or an hour still finds it; only when the translations hold more than this
