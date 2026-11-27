@@ -77,6 +77,13 @@ void TestValidationStillHolds() {
 	Check(ValidationStillHolds(entry, 0x1000, 7, 0xabc, 10 + Slots / 2, Slots), "half a ring later");
 	Check(!ValidationStillHolds(entry, 0x1000, 7, 0xabc, 10 + Slots, Slots), "the slot was reused");
 	Check(!ValidationStillHolds(entry, 0x1000, 7, 0xabc, 5, Slots), "a ring position from the past");
+	const ValidatedArgs tdim {0x1000, 7, 3, 10, 0xabc, 64, 1, 1, 3};
+	Check(ValidationStillHolds(tdim, 0x1000, 7, 0xabc, 11, Slots, 64, 1, 1, 3),
+	      "thread-dim entry matches same group size and flags");
+	Check(!ValidationStillHolds(tdim, 0x1000, 7, 0xabc, 11, Slots, 32, 1, 1, 3),
+	      "different group size invalidates thread-dim cache");
+	Check(!ValidationStillHolds(tdim, 0x1000, 7, 0xabc, 11, Slots, 64, 1, 1, 1),
+	      "different flags invalidate thread-dim cache");
 }
 
 void TestLimitText() {

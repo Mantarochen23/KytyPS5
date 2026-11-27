@@ -92,6 +92,10 @@ struct ValidatedArgs {
 	uint64_t slot          = 0;
 	uint64_t sequence      = 0;
 	uint64_t command       = 0;
+	uint32_t group_x       = 1;
+	uint32_t group_y       = 1;
+	uint32_t group_z       = 1;
+	uint32_t flags         = 1;
 };
 
 // True when `entry` is still the check of the counts at `guest_address`: nothing wrote them since
@@ -101,9 +105,12 @@ struct ValidatedArgs {
 [[nodiscard]] constexpr bool ValidationStillHolds(const ValidatedArgs& entry,
                                                   uint64_t guest_address, uint64_t stamp,
                                                   uint64_t command, uint64_t next,
-                                                  uint64_t slot_count) {
+                                                  uint64_t slot_count, uint32_t group_x = 1,
+                                                  uint32_t group_y = 1, uint32_t group_z = 1,
+                                                  uint32_t flags = 1) {
 	return stamp != 0 && entry.stamp == stamp && entry.guest_address == guest_address &&
-	       entry.command == command && next >= entry.sequence &&
+	       entry.command == command && entry.group_x == group_x && entry.group_y == group_y &&
+	       entry.group_z == group_z && entry.flags == flags && next >= entry.sequence &&
 	       next - entry.sequence < slot_count - slot_count / 4;
 }
 

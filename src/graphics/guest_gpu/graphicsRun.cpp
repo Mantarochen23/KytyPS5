@@ -7,6 +7,7 @@
 #include "common/frameCost.h"
 #include "common/emulatorConfig.h"
 #include "common/logging/log.h"
+#include "common/ports.h"
 #include "common/profiler.h"
 #include "common/stringUtils.h"
 #include "common/threads.h"
@@ -1390,6 +1391,28 @@ void CommandProcessor::DispatchIndirect(uint64_t args_addr, uint32_t mode, const
 	EXIT_NOT_IMPLEMENTED(args_addr == 0 || (args_addr & 3u) != 0);
 	if ((mode & Pm4::COMPUTE_DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS) != 0) {
 		Common::FrameCost::Add(Common::FrameCost::Counter::DispatchesIndirectThreadDim);
+		constexpr uint32_t DISPATCH_INITIATOR_ORDERED_APPEND_ENABLE = 1u << 3u;
+		const bool args_gpu_modified =
+		    m_renderer.GetBufferCache().IsRegionGpuModified(args_addr, sizeof(vk::DispatchIndirectCommand));
+		if (Config::PortEnabled(Config::Port::GpuIndirectThreadDim) && args_gpu_modified &&
+		    (mode & DISPATCH_INITIATOR_ORDERED_APPEND_ENABLE) == 0 &&
+		    m_renderer.GetTextureCache().WriteBackTick(args_addr, sizeof(vk::DispatchIndirectCommand)) == 0) {
+			DispatchOrigin origin {};
+			origin.packet           = packet;
+			origin.submitter        = m_submitter;
+			origin.args_addr        = args_addr;
+			origin.args_gpu_written = 1;
+			const ScopedDispatchOrigin scope(&origin);
+			m_sh_ctx.SetCsWaveSize(Pm4::ComputeWaveSize(mode));
+			const bool allow_async = g_current_execution != nullptr;
+			if (!m_renderer.GetRenderExecutor().DispatchIndirect(CurrentBuffer(), args_addr, mode,
+			                                                     IsAsyncComputeQueue(), allow_async)) {
+				SuspendOrSkipDispatch();
+			} else {
+				NoteDispatchDone();
+			}
+			return;
+		}
 		// The thread counts are read here, on the command processor, from guest memory (a GPU
 		// written range is downloaded first). The dispatch keeps the argument address: its report
 		// says `source=indirect-threads`, and a skipped producer of the counts skips it.
@@ -1397,10 +1420,7 @@ void CommandProcessor::DispatchIndirect(uint64_t args_addr, uint32_t mode, const
 		origin.packet           = packet;
 		origin.submitter        = m_submitter;
 		origin.args_addr        = args_addr;
-		origin.args_gpu_written =
-		    m_renderer.GetBufferCache().IsRegionGpuModified(args_addr, sizeof(vk::DispatchIndirectCommand))
-		        ? 1
-		        : 0;
+		origin.args_gpu_written = args_gpu_modified ? 1 : 0;
 		const ScopedDispatchOrigin  scope(&origin);
 		vk::DispatchIndirectCommand args;
 		{
