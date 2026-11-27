@@ -20,6 +20,7 @@
 #include <map>
 #include <mutex>
 #include <type_traits>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -110,6 +111,32 @@ private:
 		ImageId image;
 		int32_t mip   = -1;
 		int32_t layer = -1;
+	};
+
+	// Fields which decide an exact SameBacking or stencil-plane match.
+	struct ExactImageKey {
+		GuestRange             data;
+		vk::Extent3D           extent;
+		ImageSubresources      resources;
+		uint32_t               samples         = 1;
+		uint32_t               bytes_per_block = 0;
+		Prospero::TileMode     tile_mode       = Prospero::TileMode::kLinear;
+		ColorTransform         transform       = ColorTransform::None;
+		vk::Format             pixel_format    = vk::Format::eUndefined;
+		Prospero::BufferFormat guest_format    = Prospero::BufferFormat::kInvalid;
+		Prospero::ImageType    type            = Prospero::ImageType::kColor2D;
+		BindingType            binding         = BindingType::Texture;
+		bool                   exact_format    = false;
+
+		bool operator==(const ExactImageKey&) const = default;
+	};
+	struct ExactImageKeyHash {
+		[[nodiscard]] size_t operator()(const ExactImageKey& key) const noexcept;
+	};
+	struct ExactImage {
+		ImageId  id;
+		uint64_t generation = 0;
+		bool     sole        = false;
 	};
 
 	// A recorded image download whose guest pages stay inaccessible until it lands.
@@ -223,6 +250,9 @@ private:
 	void                      FreeImage(ImageId id);
 	void                      TouchImage(Image& image);
 	void                      TouchResolutionGenerationLocked(uint64_t address, uint64_t size);
+	void                      TouchRegistrationsLocked(uint64_t address, uint64_t size);
+	[[nodiscard]] bool        RegistrationsSinceLocked(uint64_t address, uint64_t size,
+	                                                   uint64_t generation) const;
 	[[nodiscard]] uint64_t    ResolutionGeneration() const noexcept {
 		return m_resolution_generation.load(std::memory_order_relaxed);
 	}
@@ -290,6 +320,9 @@ private:
 	ImagePageTable                                    m_image_page_table;
 	ResolutionPageTable                               m_resolution_page_table;
 	std::atomic<uint64_t>                             m_resolution_generation {1};
+	std::unordered_map<ExactImageKey, ExactImage, ExactImageKeyHash> m_exact_images;
+	ResolutionPageTable                               m_registration_page_table;
+	uint64_t                                          m_registration_generation = 1;
 	Common::LeastRecentlyUsedCache<ImageId, uint64_t> m_lru_cache;
 	std::unordered_set<ImageId>                       m_download_images;
 	std::mutex                                        m_write_back_mutex;

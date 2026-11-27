@@ -38,6 +38,7 @@ namespace {
 constexpr uint64_t NumFramesBeforeRemoval = 16;
 // Largest GPU-written tiled image (in texels) that is written back to guest memory on submit.
 constexpr uint64_t SmallTiledReadbackTexels = 64 * 64;
+constexpr size_t   MaxExactImages            = 16384;
 
 [[nodiscard]] bool DecodeColorClear(const TextureCache::ImageDesc& desc, uint8_t code,
                                   vk::ClearColorValue& clear) {
@@ -188,6 +189,26 @@ bool TextureCache::SameBacking(const ImageInfo& cached, const ImageInfo& request
 	return true;
 }
 
+size_t TextureCache::ExactImageKeyHash::operator()(const ExactImageKey& key) const noexcept {
+	uint64_t state = 0xcbf29ce484222325ull;
+	const auto mix = [&state](uint64_t value) {
+		state = (state ^ value) * 0x100000001b3ull;
+		state ^= state >> 32u;
+	};
+	mix(key.data.address);
+	mix(key.data.size);
+	mix(key.extent.width | (uint64_t {key.extent.height} << 32u));
+	mix(key.extent.depth | (uint64_t {key.resources.levels} << 32u));
+	mix(key.resources.layers | (uint64_t {key.samples} << 32u));
+	mix(key.bytes_per_block | (uint64_t {static_cast<uint32_t>(key.tile_mode)} << 32u));
+	mix(static_cast<uint32_t>(key.transform) |
+	    (uint64_t {static_cast<uint32_t>(key.pixel_format)} << 32u));
+	mix(static_cast<uint32_t>(key.type) |
+	    (uint64_t {static_cast<uint32_t>(key.binding)} << 32u));
+	mix(static_cast<uint32_t>(key.guest_format) | (uint64_t {key.exact_format} << 32u));
+	return static_cast<size_t>(state);
+}
+
 TextureCache::BindingType TextureCache::UploadBinding(const Image& image) {
 	if (image.info.IsDepth()) {
 		if (image.info.tile_mode == Prospero::TileMode::kDepth ||
@@ -225,6 +246,7 @@ void TextureCache::RegisterImage(ImageId id) {
 	ForEachPage(data.address, data.size, [this, &entry](uint64_t page) {
 		m_image_page_table[page].entries.push_back(entry);
 	});
+	TouchRegistrationsLocked(data.address, data.size);
 	TouchResolutionGenerationLocked(data.address, data.size);
 	image.registered = true;
 	image.lru_id     = m_lru_cache.Insert(id, m_gc_tick);
@@ -248,11 +270,29 @@ void TextureCache::UnregisterImage(ImageId id) {
 		}
 		entries.erase(entry);
 	});
+	TouchRegistrationsLocked(image.info.data.address, image.info.data.size);
 	TouchResolutionGenerationLocked(image.info.data.address, image.info.data.size);
 	m_lru_cache.Free(image.lru_id);
 	m_total_used_memory -= image.AccountedSize();
 	image.registered = false;
 	m_resolve_cache.Invalidate();
+}
+
+void TextureCache::TouchRegistrationsLocked(uint64_t address, uint64_t size) {
+	const auto generation = ++m_registration_generation;
+	ForEachPage(address, size,
+	            [this, generation](uint64_t page) { m_registration_page_table[page] = generation; });
+}
+
+bool TextureCache::RegistrationsSinceLocked(uint64_t address, uint64_t size,
+	                                         uint64_t generation) const {
+	bool changed = false;
+	ForEachPage(address, size, [&](uint64_t page) {
+		const auto* stamp = m_registration_page_table.Find(page);
+		changed           = stamp != nullptr && *stamp > generation;
+		return changed;
+	});
+	return changed;
 }
 
 void TextureCache::TouchResolutionGenerationLocked(uint64_t address, uint64_t size) {
@@ -1332,6 +1372,7 @@ ImageId TextureCache::AssociateStencil(ImageId depth_id, GuestRange stencil) {
 		record.info                 = plane;
 		record.depth_id             = depth_id;
 		record.stencil_subresources = depth.stencil_subresources;
+		TouchRegistrationsLocked(stencil.address, stencil.size);
 		TouchResolutionGenerationLocked(stencil.address, stencil.size);
 	}
 
@@ -1349,36 +1390,58 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 	bool    cache_hit = false;
 	{
 		std::scoped_lock lock {m_lock};
+		const ExactImageKey key {desc.info.data,
+		                         desc.info.extent,
+		                         desc.info.resources,
+		                         desc.info.samples,
+		                         desc.info.bytes_per_block,
+		                         desc.info.tile_mode,
+		                         desc.info.GetColorTransform(),
+		                         desc.info.pixel_format,
+		                         desc.info.guest_format,
+		                         desc.info.type,
+		                         desc.type,
+		                         exact_format};
+		const auto exact = m_exact_images.find(key);
+		const bool known = exact != m_exact_images.end() &&
+		                   !RegistrationsSinceLocked(desc.info.data.address, desc.info.data.size,
+		                                             exact->second.generation);
 		Common::SmallVector<ImageId, 8> candidates;
-		ForEachImageInRegion(desc.info.data.address, desc.info.data.size,
-		                     [&](ImageId id, Image&) { candidates.push_back(id); });
+		bool exact_match = known;
 		bool block_alias = false;
-
-		for (const auto id: candidates) {
-			const auto& image = m_slot_images[id];
-			// Stencil descriptors name the associated plane; its depth owner supplies
-			// the native image and the canonical guest tiling.
-			if ((desc.type == BindingType::Texture || desc.type == BindingType::Storage) &&
-			    image.depth_id && image.info.data == desc.info.data &&
-			    m_slot_images[image.depth_id].info.samples == desc.info.samples &&
-			    image.info.extent == desc.info.extent && image.info.type == desc.info.type &&
-			    image.info.resources.levels >= desc.info.resources.levels &&
-			    image.info.resources.layers >= desc.info.resources.layers &&
-			    desc.info.bytes_per_block == 1 &&
-			    desc.info.guest_format == Prospero::BufferFormat::k8UInt) {
-				result = id;
-				break;
+		bool sole         = known && exact->second.sole;
+		if (known) {
+			result = exact->second.id;
+		} else {
+			ForEachImageInRegion(desc.info.data.address, desc.info.data.size,
+			                     [&](ImageId id, Image&) { candidates.push_back(id); });
+			sole = candidates.size() == 1u;
+			for (const auto id: candidates) {
+				const auto& image = m_slot_images[id];
+				// Stencil descriptors name the associated plane; its depth owner supplies
+				// the native image and the canonical guest tiling.
+				if ((desc.type == BindingType::Texture || desc.type == BindingType::Storage) &&
+				    image.depth_id && image.info.data == desc.info.data &&
+				    m_slot_images[image.depth_id].info.samples == desc.info.samples &&
+				    image.info.extent == desc.info.extent && image.info.type == desc.info.type &&
+				    image.info.resources.levels >= desc.info.resources.levels &&
+				    image.info.resources.layers >= desc.info.resources.layers &&
+				    desc.info.bytes_per_block == 1 &&
+				    desc.info.guest_format == Prospero::BufferFormat::k8UInt) {
+					result = id;
+					break;
+				}
+				// Even equal-sized allocations can place different mip chains within one tail tile.
+				if (image.info.resources.levels == desc.info.resources.levels &&
+				    SameBacking(image.info, desc.info, exact_format)) {
+					result = id;
+				} else if (image.SafeToDownload() && BcAlias::Matches(desc.info, image.info)) {
+					block_alias = true;
+				}
 			}
-			// Even equal-sized allocations can place different mip chains within one tail tile.
-			if (image.info.resources.levels == desc.info.resources.levels &&
-			    SameBacking(image.info, desc.info, exact_format)) {
-				result = id;
-			} else if (image.SafeToDownload() &&
-			           BcAlias::Matches(desc.info, image.info)) {
-				block_alias = true;
-			}
+			exact_match = static_cast<bool>(result);
 		}
-		desc.stamp = m_resolve_cache.Stamp(desc.info, candidates.size(), result);
+		desc.stamp = m_resolve_cache.Stamp(desc.info, sole ? 1u : 2u, result);
 
 		int32_t view_mip   = -1;
 		int32_t view_layer = -1;
@@ -1436,11 +1499,27 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 		cache_hit = static_cast<bool>(result);
 		if (!result) {
 			result         = InsertImage(desc.info);
+			exact_match    = true;
+			sole           = true;
 			auto& inserted = m_slot_images[result];
 			if (m_buffer_cache.HasGpuDirtyBytes(inserted.info.data.address,
 			                                    inserted.info.data.size)) {
 				inserted.MarkBufferModified();
 			}
+		}
+		const auto alias_left = [&] {
+			for (const auto id: candidates) {
+				const auto* owner = m_slot_images.try_get(id);
+				if (id != result && owner != nullptr && owner->registered &&
+				    BcAlias::Matches(desc.info, owner->info)) {
+					return true;
+				}
+			}
+			return false;
+		};
+		if (exact_match && !known && !alias_left()) {
+			if (m_exact_images.size() >= MaxExactImages) m_exact_images.clear();
+			m_exact_images[key] = {result, m_registration_generation, sole};
 		}
 		auto& image = m_slot_images[result];
 		if (view_mip >= 0) {
