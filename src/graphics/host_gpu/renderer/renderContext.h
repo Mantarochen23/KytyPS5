@@ -66,7 +66,7 @@ public:
 	[[nodiscard]] bool IsMapped(uint64_t vaddr, uint64_t size) const noexcept;
 	void               MapMemory(uint64_t vaddr, uint64_t size);
 	void               UnmapMemory(uint64_t vaddr, uint64_t size);
-	void               PrepareBda();
+	void               PrepareBda(bool untracked_writes = true);
 	// Shaders that only write the fault buffer (loop guard) need its next drain, not the BDA sync.
 	void               RequestFaultBufferProcess() noexcept { m_fault_process_pending = true; }
 	void               RunGarbageCollector();

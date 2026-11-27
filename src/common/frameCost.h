@@ -140,6 +140,10 @@ enum class Counter : uint8_t {
 	PrefetchSkipped,
 	PumpAsyncCalls,
 	PumpAsyncSkipped,
+	// Runtime-indexed buffer table activity: candidates are paid only on rebuild.
+	TableCandidates,
+	TableDispatches,
+	TableRebuilds,
 	Count
 };
 

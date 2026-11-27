@@ -1149,8 +1149,8 @@ bool RenderExecutor::DispatchDirectLocked(CommandBuffer& buffer, uint32_t thread
 	const bool buffer_probe = Config::BufferProbeShader(program.shader_hash);
 	std::vector<BufferProbe::CacheState> probe_states;
 	if (buffer_probe) probe_states = BufferProbeRunner::SampleCacheState(m_context, bindings);
-	if (program.info.uses_dma) {
-		m_context.PrepareBda();
+	if (program.info.uses_dma || program.info.uses_device_address) {
+		m_context.PrepareBda(program.info.uses_dma);
 	}
 	PrepareRayQuery(m_context, input_info.stage, bindings);
 	if (program.info.uses_image_heap) {
@@ -1412,8 +1412,8 @@ bool RenderExecutor::DispatchIndirectLocked(CommandBuffer& buffer, uint64_t args
 	const bool buffer_probe = Config::BufferProbeShader(program.shader_hash);
 	std::vector<BufferProbe::CacheState> probe_states;
 	if (buffer_probe) probe_states = BufferProbeRunner::SampleCacheState(m_context, bindings);
-	if (program.info.uses_dma) {
-		m_context.PrepareBda();
+	if (program.info.uses_dma || program.info.uses_device_address) {
+		m_context.PrepareBda(program.info.uses_dma);
 	}
 	PrepareRayQuery(m_context, input_info.stage, bindings);
 	BindSharedMemory(m_context, input_info, bindings, args_addr);

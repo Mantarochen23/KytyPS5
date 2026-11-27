@@ -95,14 +95,7 @@ bool HasShaderBufferWrites(const ShaderStageRuntime& runtime) {
 		    !program.info.buffers[table.root_resource].written) {
 			continue;
 		}
-		for (const auto& value: table.entries) {
-			ShaderBufferResource descriptor;
-			std::memcpy(descriptor.fields, value.dwords.data(), sizeof(descriptor.fields));
-			if (descriptor.Base48() != 0 && descriptor.NumRecords() != 0) {
-				has_writes = true;
-				break;
-			}
-		}
+		has_writes |= table.has_live_range;
 	}
 	return has_writes;
 }

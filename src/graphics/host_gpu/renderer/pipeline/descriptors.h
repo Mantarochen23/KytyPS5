@@ -11,6 +11,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <type_traits>
 #include <vector>
 
@@ -43,9 +44,11 @@ struct PreparedBindings {
 	};
 
 	struct IndirectTableBinding {
-		uint32_t                  root_resource = 0;
-		uint32_t                  header_word   = 0;
-		std::vector<BufferSource> sources;
+		uint32_t                                       root_resource = 0;
+		uint32_t                                       header_word   = 0;
+		uint64_t                                       table_bda     = 0;
+		bool                                           written       = false;
+		std::shared_ptr<BufferCache::RuntimeTableState> state;
 	};
 
 	// The draw owns the immutable compiled-program/runtime-snapshot association through commit.
@@ -63,6 +66,16 @@ struct PreparedBindings {
 	vk::DescriptorBufferInfo              shader_data_buffer;
 	vk::DescriptorBufferInfo              shared_memory;
 	std::vector<uint32_t>                 shader_data;
+};
+
+struct RuntimeBufferTableCacheEntry {
+	std::array<uint64_t, 2>                         candidate_key {};
+	uint64_t                                        module_id     = 0;
+	uint32_t                                        root_resource = 0;
+	std::unique_ptr<Buffer>                         buffer;
+	std::shared_ptr<BufferCache::RuntimeTableState> state;
+	uint64_t                                        built_generation = 0;
+	uint64_t                                        last_use         = 0;
 };
 
 [[nodiscard]] vk::DescriptorType

@@ -833,14 +833,102 @@ void RenderExecutor::FindBuffers(std::span<PreparedBindings* const> stages) {
 		prepared.indirect_tables.reserve(snapshot.indirect_buffer_tables.size());
 		for (const auto& table: snapshot.indirect_buffer_tables) {
 			const auto& metadata = program.info.buffers[table.root_resource];
-			PreparedBindings::IndirectTableBinding binding;
-			binding.root_resource = table.root_resource;
-			binding.header_word   = table.header_word;
-			binding.sources.reserve(table.entries.size());
-			for (const auto& entry: table.entries) {
-				binding.sources.push_back(resolve_source(metadata, entry, true));
+			Common::FrameCost::Add(Common::FrameCost::Counter::TableDispatches);
+			auto found = std::ranges::find_if(m_runtime_buffer_tables, [&](const auto& entry) {
+				return entry.module_id == prepared.runtime->module->id &&
+				       entry.root_resource == table.root_resource &&
+				       entry.candidate_key == table.candidate_key;
+			});
+			if (found == m_runtime_buffer_tables.end()) {
+				constexpr size_t MaxCachedRuntimeTables = 64;
+				if (m_runtime_buffer_tables.size() >= MaxCachedRuntimeTables) {
+					auto oldest = std::ranges::min_element(
+					    m_runtime_buffer_tables, {}, &RuntimeBufferTableCacheEntry::last_use);
+					auto retired = std::move(oldest->buffer);
+					m_runtime_buffer_tables.erase(oldest);
+					if (retired != nullptr && m_context.GetCommandScheduler().Active()) {
+						m_context.GetCommandScheduler().DeferOperation(
+						    [owner = std::move(retired)]() mutable { owner.reset(); });
+					}
+				}
+				found = m_runtime_buffer_tables.emplace(
+				    m_runtime_buffer_tables.end(), RuntimeBufferTableCacheEntry {
+				                                       .candidate_key = table.candidate_key,
+				                                       .module_id = prepared.runtime->module->id,
+				                                       .root_resource = table.root_resource,
+				                                   });
 			}
-			prepared.indirect_tables.push_back(std::move(binding));
+			found->last_use = ++m_runtime_buffer_table_tick;
+			const bool rebuild = found->buffer == nullptr || found->state == nullptr ||
+			                     found->built_generation != found->state->BackingGeneration();
+			if (rebuild) {
+				Common::FrameCost::Add(Common::FrameCost::Counter::TableRebuilds);
+				Common::FrameCost::Add(Common::FrameCost::Counter::TableCandidates,
+				                       table.entries.size());
+				EXIT_IF(table.class_index.size() != table.entries.size());
+				std::vector<uint32_t> table_words(table.entries.size() * 4u, 0u);
+				std::vector<PreparedBindings::BufferSource> sources;
+				sources.reserve(table.entries.size());
+				RangeSet              candidate_ranges;
+				RangeSet              backing_ranges;
+				for (const auto& value: table.entries) {
+					const auto descriptor = DecodeNativeDescriptor<ShaderBufferResource>(value);
+					const auto address    = descriptor.Base48();
+					auto dependency_size = ShaderRecompiler::IR::BufferBindingSize(metadata, descriptor);
+					if (descriptor.NumRecords() == UINT32_MAX) {
+						dependency_size = std::min<uint64_t>(dependency_size, 256u << 20u);
+					}
+					if (address != 0 && dependency_size != 0 &&
+					    GuestRange {address, dependency_size}.Valid()) {
+						candidate_ranges.Add(address, dependency_size);
+					}
+					sources.push_back(resolve_source(metadata, value, true));
+				}
+				// Discovery can merge earlier buffer owners. Obtain only after the whole candidate set has
+				// been discovered so every stored BDA names a final backing buffer.
+				for (size_t j = 0; j < sources.size(); ++j) {
+					const auto& source = sources[j];
+					if (source.address == 0 || source.size == 0) continue;
+					auto [buf, off] = cache.ObtainBuffer(
+					    source.address, source.size, false,
+					    metadata.formatted || (metadata.read && Config::SyncRawImageBuffersEnabled()),
+					    source.id, false);
+					backing_ranges.Add(buf->CpuAddress(), buf->Size());
+					const uint64_t host_bda = static_cast<uint64_t>(buf->BufferDeviceAddress()) + off;
+					const uint64_t aligned_bda = host_bda & ~uint64_t {3};
+					const uint32_t byte_offset = static_cast<uint32_t>(host_bda & 3u);
+					const uint32_t byte_size = static_cast<uint32_t>(
+					    std::min<uint64_t>(source.size + byte_offset, UINT32_MAX));
+					const uint32_t cls = table.class_index[j] & 0x00ffffffu;
+					table_words[j * 4u + 0u] = static_cast<uint32_t>(aligned_bda);
+					table_words[j * 4u + 1u] = static_cast<uint32_t>(aligned_bda >> 32u);
+					table_words[j * 4u + 2u] = byte_size;
+					table_words[j * 4u + 3u] = (byte_offset << 24u) | cls;
+				}
+				auto replacement = std::make_unique<Buffer>(
+				    m_context.GetGraphics(), m_context.GetCommandScheduler(), MemoryUsage::Upload, 0,
+				    AllFlags | vk::BufferUsageFlagBits::eShaderDeviceAddress,
+				    table_words.size() * sizeof(uint32_t));
+				EXIT_IF(replacement->Mapped().size() < table_words.size() * sizeof(uint32_t));
+				std::memcpy(replacement->Mapped().data(), table_words.data(),
+				            table_words.size() * sizeof(uint32_t));
+				replacement->Flush(0, table_words.size() * sizeof(uint32_t));
+				auto retired = std::move(found->buffer);
+				found->buffer = std::move(replacement);
+				found->state  = cache.RegisterRuntimeTable(std::move(candidate_ranges),
+				                                                 std::move(backing_ranges));
+				found->built_generation = found->state->BackingGeneration();
+				if (retired != nullptr && m_context.GetCommandScheduler().Active()) {
+					m_context.GetCommandScheduler().DeferOperation(
+					    [owner = std::move(retired)]() mutable { owner.reset(); });
+				}
+			}
+			prepared.indirect_tables.push_back({.root_resource = table.root_resource,
+			                                     .header_word = table.header_word,
+			                                     .table_bda = static_cast<uint64_t>(
+			                                         found->buffer->BufferDeviceAddress()),
+			                                     .written = metadata.written,
+			                                     .state = found->state});
 		}
 	}
 }
@@ -878,41 +966,12 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 			prepared.flattened_srt = NativeUpload(m_context, snapshot.flattened_srt);
 		} else {
 			std::vector<uint32_t> patched_srt = snapshot.flattened_srt;
-			auto&                 cache       = m_context.GetBufferCache();
-			auto&                 stream      = cache.GetUtilityBuffer(MemoryUsage::Stream);
 			for (size_t ti = 0; ti < prepared.indirect_tables.size(); ++ti) {
-				auto&       tb         = prepared.indirect_tables[ti];
-				const auto& snap_table = snapshot.indirect_buffer_tables[ti];
-				const auto& metadata   = program.info.buffers[tb.root_resource];
-				std::vector<uint32_t> table_words(tb.sources.size() * 4u, 0u);
-				for (size_t j = 0; j < tb.sources.size(); ++j) {
-					const auto& src = tb.sources[j];
-					if (src.address == 0 || src.size == 0) continue;
-					auto [buf, off] = cache.ObtainBuffer(
-					    src.address, src.size, metadata.written,
-					    metadata.formatted || (metadata.read && Config::SyncRawImageBuffersEnabled()),
-					    src.id);
-					if (metadata.written) {
-						m_context.GetTextureCache().InvalidateMemoryFromGPU(src.address, src.size);
-					}
-					const uint64_t host_bda    = static_cast<uint64_t>(buf->BufferDeviceAddress()) + off;
-					const uint64_t aligned_bda = host_bda & ~uint64_t {3};
-					const uint32_t byte_offset = static_cast<uint32_t>(host_bda & 3u);
-					const uint32_t byte_size =
-					    static_cast<uint32_t>(std::min<uint64_t>(src.size + byte_offset, UINT32_MAX));
-					const uint32_t cls = snap_table.class_index[j] & 0x00ffffffu;
-					table_words[j * 4u + 0u] = static_cast<uint32_t>(aligned_bda);
-					table_words[j * 4u + 1u] = static_cast<uint32_t>(aligned_bda >> 32u);
-					table_words[j * 4u + 2u] = byte_size;
-					table_words[j * 4u + 3u] = (byte_offset << 24u) | cls;
-				}
-				if (!table_words.empty()) {
-					const auto table_off = stream.Copy(table_words.data(),
-					                                   table_words.size() * sizeof(uint32_t), 16);
-					const uint64_t table_bda =
-					    static_cast<uint64_t>(stream.BufferDeviceAddress()) + table_off;
-					patched_srt[tb.header_word + 0u] = static_cast<uint32_t>(table_bda);
-					patched_srt[tb.header_word + 1u] = static_cast<uint32_t>(table_bda >> 32u);
+				const auto& tb = prepared.indirect_tables[ti];
+				patched_srt[tb.header_word + 0u] = static_cast<uint32_t>(tb.table_bda);
+				patched_srt[tb.header_word + 1u] = static_cast<uint32_t>(tb.table_bda >> 32u);
+				if (tb.written) {
+					m_context.GetBufferCache().MarkRuntimeTableWritten(tb.state);
 				}
 			}
 			prepared.flattened_srt = NativeUpload(m_context, patched_srt);
@@ -963,15 +1022,17 @@ void RenderExecutor::RebindImages(PreparedBindings& prepared) {
 
 void RenderExecutor::PrepareGraphicsBindings(std::span<PreparedBindings* const> stages,
                                              DrawTargets&                       targets) {
-	bool uses_dma        = false;
-	bool uses_image_heap = false;
+	bool uses_dma            = false;
+	bool uses_device_address = false;
+	bool uses_image_heap     = false;
 	FindBuffers(stages);
 	for (auto* stage: stages) {
 		uses_dma |= stage->runtime->module->info.info.uses_dma;
+		uses_device_address |= stage->runtime->module->info.info.uses_device_address;
 		uses_image_heap |= stage->runtime->module->info.info.uses_image_heap;
 	}
-	if (uses_dma) {
-		m_context.PrepareBda();
+	if (uses_dma || uses_device_address) {
+		m_context.PrepareBda(uses_dma);
 	}
 	if (uses_image_heap) {
 		m_context.GetImageHeap().Rebind(*this);

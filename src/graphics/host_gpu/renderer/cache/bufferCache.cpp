@@ -268,6 +268,8 @@ void BufferCache::Register(BufferId id) {
 }
 
 void BufferCache::Unregister(BufferId id) {
+	const auto& buffer = m_slot_buffers[id];
+	InvalidateRuntimeTables(buffer.CpuAddress(), buffer.Size());
 	ChangeRegister<false>(id);
 }
 
@@ -714,10 +716,10 @@ void BufferCache::UploadCopies(std::span<const BufferUpload> uploads,
 
 std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t size,
                                                        bool is_written, bool is_texel_buffer,
-                                                       BufferId id) {
+                                                       BufferId id, bool allow_stream) {
 	EXIT_IF(!(GuestRange {vaddr, size}.Valid()));
 
-	if (!is_written && size <= CACHING_PAGESIZE &&
+	if (allow_stream && !is_written && size <= CACHING_PAGESIZE &&
 	    !m_memory_tracker.IsRegionGpuModified(vaddr, size) &&
 	    m_memory_tracker.IsRegionCpuModified(vaddr, size)) {
 		// Within one draw window the guest has no signal to rewrite the range. A copy made in this
@@ -909,6 +911,42 @@ uint64_t BufferCache::WriteStamp(uint64_t vaddr, uint64_t size) const {
 		}
 	}
 	return stamp;
+}
+
+std::shared_ptr<BufferCache::RuntimeTableState> BufferCache::RegisterRuntimeTable(
+    RangeSet dependencies, RangeSet write_ranges) {
+	auto state = std::make_shared<RuntimeTableState>(std::move(dependencies),
+	                                                std::move(write_ranges));
+	std::lock_guard lock(m_runtime_tables_mutex);
+	m_runtime_tables.emplace_back(state);
+	return state;
+}
+
+void BufferCache::InvalidateRuntimeTables(uint64_t vaddr, uint64_t size) {
+	std::lock_guard lock(m_runtime_tables_mutex);
+	for (auto it = m_runtime_tables.begin(); it != m_runtime_tables.end();) {
+		if (auto state = it->lock()) {
+			state->InvalidateBacking(vaddr, size);
+			++it;
+		} else {
+			it = m_runtime_tables.erase(it);
+		}
+	}
+}
+
+void BufferCache::MarkRuntimeTableWritten(const std::shared_ptr<RuntimeTableState>& state) {
+	if (state == nullptr) return;
+	state->WriteRanges().ForEach([&](uint64_t begin, uint64_t end) {
+		const auto size = end - begin;
+		// FindBuffers/PrepareBda has already uploaded CPU-owned bytes. This transition only
+		// establishes GPU ownership for a dispatch which may select any member of the union.
+		m_memory_tracker.ForEachUploadRange(
+		    begin, size, true, [](uint64_t, uint64_t) noexcept {}, []() noexcept {});
+		m_gpu_modified_ranges.Add(begin, size);
+		NoteWrite(begin, size);
+		ForgetColorMetadataChecks(begin, size);
+		m_texture_cache.InvalidateMemoryFromGPU(begin, size);
+	});
 }
 
 bool BufferCache::IsRegionGpuModified(uint64_t vaddr, uint64_t size) {
