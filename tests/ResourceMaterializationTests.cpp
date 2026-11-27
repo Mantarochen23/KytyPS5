@@ -1655,18 +1655,25 @@ void TestIndirectFormattedStridedAndGeneralStores() {
             failure_reason.find("first_diff=") != std::string::npos,
         "port-off formatted store refusal missing decoded format/stride/records/nearest/first_diff");
 
-  // Port ON: all five stride-16 formatted store candidates must materialize cleanly.
+  // Port ON: all five stride-16 formatted store candidates must materialize cleanly
+  // (CanonicalResources sorts candidates canonically, so verify the multiset of formats).
   Config::SetDisabledPorts({});
   Check(MaterializeResources(plan, runtime, snapshot, specialization, &failure_reason) &&
             failure_reason.empty(),
         "general strided formatted indirect store failed materialization with port enabled");
-  Check(specialization.buffers.size() == 6u &&
-            specialization.buffers[1].descriptor_format == F::k8UInt &&
-            specialization.buffers[1].packed_stride == 16u &&
-            specialization.buffers[2].descriptor_format == F::k32Float &&
-            specialization.buffers[3].descriptor_format == F::k8_8_8_8UNorm &&
-            specialization.buffers[4].descriptor_format == F::k10_10_10_2UNorm &&
-            specialization.buffers[5].descriptor_format == F::k32_32_32_32Float,
+  Check(specialization.buffers.size() == 6u,
+        "materialized indirect formatted store candidate count mismatch");
+  std::vector<F> got_formats;
+  for (size_t i = 1; i < specialization.buffers.size(); ++i) {
+    Check(specialization.buffers[i].packed_stride == 16u,
+          "materialized indirect formatted store candidates lost stride");
+    got_formats.push_back(specialization.buffers[i].descriptor_format);
+  }
+  std::ranges::sort(got_formats);
+  std::vector<F> expected_formats{
+      F::k8UInt, F::k32Float, F::k8_8_8_8UNorm, F::k10_10_10_2UNorm, F::k32_32_32_32Float};
+  std::ranges::sort(expected_formats);
+  Check(got_formats == expected_formats,
         "materialized indirect formatted store candidates lost format or stride");
 
   // Non-identity active swizzle (BGRA) must still fail with a one-line decoded diagnostic.
