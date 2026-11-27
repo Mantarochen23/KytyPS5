@@ -228,6 +228,9 @@ struct ConfigOptions {
 	// target that was not seen redrawn is skipped while its shaders build, like a draw into a
 	// redrawn one, instead of building them on the render thread. 0 = never.
 	uint32_t                 defer_new_targets_on_stall_ms = 0;
+	// --catchup-max-age-ms: a skipped dispatch older than this is dropped instead of replayed,
+	// since its descriptors in guest memory may have been reused by then. 0 = no extra limit.
+	uint32_t                 catchup_max_age_ms         = 0;
 	// --enable-port: names from common/ports.h that are off by default and turned on.
 	std::vector<std::string> enabled_ports;
 };
@@ -363,6 +366,7 @@ uint32_t MaxSpirvWords();
 uint32_t MaterializeMemoEntries();
 uint32_t MaterializeMemoStamps();
 uint32_t DeferNewTargetsOnStallMs();
+uint32_t CatchupMaxAgeMs();
 
 } // namespace Config
 

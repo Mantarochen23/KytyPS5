@@ -614,4 +614,8 @@ uint32_t DeferNewTargetsOnStallMs() {
 	return g_config != nullptr ? g_config->defer_new_targets_on_stall_ms : 0u;
 }
 
+uint32_t CatchupMaxAgeMs() {
+	return g_config != nullptr ? g_config->catchup_max_age_ms : 0u;
+}
+
 } // namespace Config
