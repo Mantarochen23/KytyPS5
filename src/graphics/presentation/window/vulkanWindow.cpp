@@ -498,6 +498,7 @@ static vk::Device VulkanCreateDevice(GraphicContext&          graphics,
 	graphics.fragment_shader_pixel_interlock_enabled =
 	    fragment_interlock.fragmentShaderPixelInterlock;
 	graphics.sampler_filter_minmax_enabled      = supported12.samplerFilterMinmax;
+	graphics.draw_indirect_count_enabled        = supported12.drawIndirectCount == VK_TRUE;
 	graphics.device_fault_ext_enabled           = device_fault.deviceFault == VK_TRUE;
 	// RADV keeps its hang report in memory for vkGetDeviceFaultInfoEXT instead of writing the
 	// radv_dumps_* folder when the vendor-binary feature is on, so leave it off in hang mode.
@@ -510,6 +511,7 @@ static vk::Device VulkanCreateDevice(GraphicContext&          graphics,
 	auto features12                     = WindowContext::RequiredVulkan12Features();
 	features12.shaderSharedInt64Atomics = supported12.shaderSharedInt64Atomics;
 	features12.samplerFilterMinmax      = supported12.samplerFilterMinmax;
+	features12.drawIndirectCount        = supported12.drawIndirectCount;
 	if (!features12.shaderSharedInt64Atomics || !workgroup_layout.workgroupMemoryExplicitLayout) {
 		Log::WriteToConsoleAndLog(fmt::format(
 		    "WARNING: Native 64-bit LDS atomics are unavailable: shaderSharedInt64Atomics={}, "
@@ -578,6 +580,8 @@ static vk::Device VulkanCreateDevice(GraphicContext&          graphics,
 	graphics.conditional_rendering_enabled = conditional_rendering.conditionalRendering;
 	LOGF("Vulkan maintenance8 support: %s\n",
 	     graphics.maintenance8_enabled ? "true" : "false");
+	LOGF("Vulkan drawIndirectCount support: %s\n",
+	     graphics.draw_indirect_count_enabled ? "true" : "false");
 	LOGF("Vulkan depth feedback support: %s\n",
 	     graphics.attachment_feedback_loop_enabled ? "true" : "false");
 	LOGF("Vulkan device fault support: %s (vendor_binary=%s), AMD buffer marker: %s\n",

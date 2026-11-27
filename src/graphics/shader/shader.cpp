@@ -4,6 +4,7 @@
 #include "common/assert.h"
 #include "common/common.h"
 #include "common/emulatorConfig.h"
+#include "common/frameCost.h"
 #include "common/logging/log.h"
 #include "common/memAccount.h"
 #include "common/profiler.h"
@@ -275,6 +276,7 @@ static void ShaderApplyAttribSemantics(ShaderVertexInputInfo&          info,
                                        std::span<const ShaderSemantic> input_semantics,
                                        uint64_t attrib_address, uint64_t buffer_address) {
 	KYTY_PROFILER_FUNCTION();
+	Common::FrameCost::ScopedReadbackSite rb_site(Common::FrameCost::ReadbackSite::VertexAttrib);
 
 	const bool debug_dump = Config::GraphicsDebugDumpEnabled();
 
@@ -653,7 +655,8 @@ void BuildStageStaticKey(const ShaderComputeInputInfo& info, std::vector<uint32_
 	key.push_back(info.thread_ids_num);
 	key.push_back(info.lds_size_dwords);
 	key.push_back(info.scratch_size_dwords);
-	key.push_back(static_cast<uint32_t>(info.dispatch_thread_dimensions));
+	key.push_back(static_cast<uint32_t>(info.dispatch_thread_dimensions) |
+	              (static_cast<uint32_t>(info.indirect_thread_dimensions) << 1u));
 	for (int i = 0; i < 3; i++) {
 		key.push_back(info.threads_num[i]);
 		key.push_back(static_cast<uint32_t>(info.group_id[i]));

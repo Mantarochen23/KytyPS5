@@ -11,6 +11,7 @@
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 
+#include <algorithm>
 #include <array>
 #include <cinttypes>
 #include <cstdlib>
@@ -30,6 +31,10 @@ struct Params {
 	uint32_t max_groups;
 	uint32_t address_low;
 	uint32_t address_high;
+	uint32_t group_size_x;
+	uint32_t group_size_y;
+	uint32_t group_size_z;
+	uint32_t flags;
 };
 
 // The trip buffer of gpu_dispatch_guard.comp.
@@ -115,21 +120,30 @@ void DispatchArgsGuard::Report() {
 
 std::pair<vk::Buffer, uint64_t> DispatchArgsGuard::Record(CommandBuffer& buffer, const Buffer& args,
                                                           uint64_t offset, uint64_t guest_address,
-                                                          uint64_t write_stamp) {
-	const auto cmd_id = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(
-	    static_cast<VkCommandBuffer>(buffer.Handle())));
-	auto&      checked = m_checked[(guest_address >> 2u) % CheckedCount];
-	if (ValidationStillHolds(checked, guest_address, write_stamp, cmd_id, m_next, SlotCount)) {
+                                                          uint64_t write_stamp, uint32_t group_x,
+                                                          uint32_t group_y, uint32_t group_z,
+                                                          bool divide_threads, bool guard_enabled) {
+	const uint32_t gx    = divide_threads ? std::max(group_x, 1u) : 1u;
+	const uint32_t gy    = divide_threads ? std::max(group_y, 1u) : 1u;
+	const uint32_t gz    = divide_threads ? std::max(group_z, 1u) : 1u;
+	const uint32_t flags = (guard_enabled ? 1u : 0u) | (divide_threads ? 2u : 0u);
+	const auto     cmd_id = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(
+	    static_cast<VkCommandBuffer>(buffer.StateHandle())));
+	auto&          checked = m_checked[(guest_address >> 2u) % CheckedCount];
+	if (ValidationStillHolds(checked, guest_address, write_stamp, cmd_id, m_next, SlotCount, gx, gy,
+	                         gz, flags)) {
 		Common::FrameCost::Add(Common::FrameCost::Counter::GuardSkipped);
 		return {m_ring->Handle(), checked.slot};
 	}
 	Common::FrameCost::Add(Common::FrameCost::Counter::GuardGpuRuns);
 	Common::FrameCost::Add(Common::FrameCost::Counter::DispatchesGuard); // the GPU pass really runs
 	// The trip counter is only reported, and reading it is not free: look every 64 dispatches.
-	if ((m_next & 63u) == 0) {
+	if (guard_enabled && (m_next & 63u) == 0) {
 		Report();
 	}
-	const auto     command = buffer.Handle();
+	// With the barrier tracker the pass is a guest dispatch like the one it guards.
+	const bool     tracked = Config::PortEnabled(Config::Port::BarrierTracker);
+	const auto     command = tracked ? buffer.DispatchHandle(true) : buffer.Handle();
 	const auto&    limits  = m_graphics.GetPhysicalDeviceProperties().limits;
 	const uint64_t slot    = (m_next++ % SlotCount) * SlotBytes;
 	// A storage buffer binding starts on the device's alignment; the shader indexes from there.
@@ -158,16 +172,26 @@ std::pair<vk::Buffer, uint64_t> DispatchArgsGuard::Record(CommandBuffer& buffer,
 	                     .max_z            = limits.maxComputeWorkGroupCount[2],
 	                     .max_groups       = m_max_groups,
 	                     .address_low      = static_cast<uint32_t>(guest_address),
-	                     .address_high     = static_cast<uint32_t>(guest_address >> 32u)};
+	                     .address_high     = static_cast<uint32_t>(guest_address >> 32u),
+	                     .group_size_x     = gx,
+	                     .group_size_y     = gy,
+	                     .group_size_z     = gz,
+	                     .flags            = flags};
 	command.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, m_layout, 0, writes.size(),
 	                             writes.data());
 	command.bindPipeline(vk::PipelineBindPoint::eCompute, m_pipeline);
 	command.pushConstants(m_layout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(params), &params);
 	command.dispatch(1, 1, 1);
 
-	ShaderAccessBarrier(command, vk::PipelineStageFlagBits::eComputeShader);
+	if (tracked) {
+		// The guarded dispatch records the barrier from every earlier shader write to its
+		// indirect-argument read; this pass's own is included.
+		Common::FrameCost::Add(Common::FrameCost::Counter::BarriersDropped);
+	} else {
+		ShaderAccessBarrier(command, vk::PipelineStageFlagBits::eComputeShader);
+	}
 	if (write_stamp != 0) {
-		checked = {guest_address, write_stamp, slot, m_next - 1u, cmd_id};
+		checked = {guest_address, write_stamp, slot, m_next - 1u, cmd_id, gx, gy, gz, flags};
 	}
 	return {m_ring->Handle(), slot};
 }

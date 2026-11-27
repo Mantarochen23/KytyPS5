@@ -238,6 +238,7 @@ bool ImageHeap::Refresh(Memory& memory) {
 		const auto [address, end] = PageRange(memory.base, memory.size, m_runs[run].first,
 		                                      m_runs[run].second);
 		m_scratch.resize((end - address) / 4u);
+		Common::FrameCost::ScopedReadbackSite rb_site(Common::FrameCost::ReadbackSite::Heap);
 		if (!LibKernel::Memory::TryReadBufferBacking(address, m_scratch.data(), end - address)) {
 			std::scoped_lock lock {m_mutex};
 			for (; run < m_runs.size(); ++run) {
@@ -840,7 +841,7 @@ void ImageHeap::Commit(CommandBuffer& buffer, vk::PipelineBindPoint bind_point,
 		               buffer.Handle());
 		return true;
 	});
-	buffer.Handle().bindDescriptorSets(bind_point, layout, IR::ImageHeapSet, 1, &m_set, 0,
+	buffer.StateHandle().bindDescriptorSets(bind_point, layout, IR::ImageHeapSet, 1, &m_set, 0,
 	                                   nullptr);
 }
 

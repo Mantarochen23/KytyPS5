@@ -1258,11 +1258,23 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 		mesh_indices = indices->BufferDeviceAddress() + offset + (index_source.address & 3u);
 	}
 	std::pair<Buffer*, uint64_t> args_buffer {};
+	std::pair<Buffer*, uint64_t> count_buffer {};
 	if (emit.indirect.address != 0) {
 		const auto size = static_cast<uint64_t>(emit.indirect.count - 1) * emit.indirect.stride +
 		                  (draw.indexed ? sizeof(vk::DrawIndexedIndirectCommand)
 		                                : sizeof(vk::DrawIndirectCommand));
-		args_buffer = m_context.GetBufferCache().ObtainBuffer(emit.indirect.address, size, false);
+		auto& buffer_cache = m_context.GetBufferCache();
+		if (emit.indirect.count_address != 0) {
+			// Discover both ranges first so acquiring the second cannot merge and invalidate the first.
+			const auto args_id  = buffer_cache.FindBuffer(emit.indirect.address, size);
+			const auto count_id = buffer_cache.FindBuffer(emit.indirect.count_address, sizeof(uint32_t));
+			args_buffer  = buffer_cache.ObtainBuffer(emit.indirect.address, size, false, false, args_id);
+			count_buffer = buffer_cache.ObtainBuffer(emit.indirect.count_address, sizeof(uint32_t),
+			                                         false, false, count_id);
+			EXIT_IF((count_buffer.second & 3u) != 0);
+		} else {
+			args_buffer = buffer_cache.ObtainBuffer(emit.indirect.address, size, false);
+		}
 		EXIT_IF((args_buffer.second & 3u) != 0);
 	}
 	if (g_draw_sample != nullptr) g_draw_sample->clock.AddTo(g_draw_sample->bind_ns);
@@ -1405,6 +1417,16 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 		vk_buffer.drawMeshTasksEXT(mesh_groups, draw.instance_count, 1);
 	} else if (args_buffer.first == nullptr) {
 		EmitDrawPrimitives(ucfg, vk_buffer, draw, emit);
+	} else if (count_buffer.first != nullptr) {
+		if (draw.indexed) {
+			vk_buffer.drawIndexedIndirectCount(args_buffer.first->Handle(), args_buffer.second,
+			                                   count_buffer.first->Handle(), count_buffer.second,
+			                                   emit.indirect.count, emit.indirect.stride);
+		} else {
+			vk_buffer.drawIndirectCount(args_buffer.first->Handle(), args_buffer.second,
+			                            count_buffer.first->Handle(), count_buffer.second,
+			                            emit.indirect.count, emit.indirect.stride);
+		}
 	} else if (draw.indexed) {
 		vk_buffer.drawIndexedIndirect(args_buffer.first->Handle(), args_buffer.second,
 		                              emit.indirect.count, emit.indirect.stride);
@@ -1414,6 +1436,11 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 	}
 	occlusion_queries.End(vk_buffer, occlusion_query);
 	graphics.breadcrumbs.EndOp(graphics, vk_buffer, marker_id);
+	m_context.GetBufferCache().RecordPendingWrites(
+	    std::any_of(stages.begin(), stages.end(), [](const PreparedBindings* stage) {
+		    const auto& program = stage->runtime->module->info;
+		    return program.has_address_writes || program.info.uses_dma;
+	    }));
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::Draws);
 	Common::FrameCost::Add(Common::FrameCost::Counter::Draws);
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::DrawInstances, draw.instance_count);
@@ -1446,7 +1473,9 @@ static std::optional<DrawEmitInfo> ResolveDrawEmit(const HW::UserConfig&        
 	if (indirect.address != 0) {
 		if (!vs.indirect_draw ||
 		    ucfg.GetPrimType() == Prospero::PrimitiveType::kQuadListLegacy ||
-		    vs.indirect_offsets != indirect.offsets) {
+		    vs.indirect_offsets != indirect.offsets ||
+		    (indirect.count_address != 0 && vs.stage.module != nullptr &&
+		     vs.stage.module->info.stage == ShaderType::Mesh)) {
 			return std::nullopt;
 		}
 		return DrawEmitInfo {.indirect = indirect};

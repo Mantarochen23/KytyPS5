@@ -5,6 +5,7 @@
 #include "common/assert.h"
 #include "common/common.h"
 #include "graphics/guest_gpu/hardwareContext.h"
+#include "graphics/host_gpu/renderer/barrierTracker.h"
 #include "graphics/host_gpu/renderer/dispatchGuard.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
@@ -42,10 +43,12 @@ enum class DrawOffsetSource : uint8_t {
 };
 
 // Nonzero address: the GPU reads count Vulkan indirect draw records, stride bytes apart.
+// Nonzero count_address: count is maxDrawCount and the GPU reads the draw count from count_address.
 struct DrawIndirectArgs {
-	uint64_t              address = 0;
-	uint32_t              count   = 0;
-	uint32_t              stride  = 0;
+	uint64_t              address       = 0;
+	uint64_t              count_address = 0;
+	uint32_t              count         = 0;
+	uint32_t              stride        = 0;
 	ShaderIndirectOffsets offsets;
 };
 
@@ -107,7 +110,18 @@ public:
 	void BeginRendering(const RenderState& state) const;
 	void EndRendering() const;
 
-	[[nodiscard]] vk::CommandBuffer Handle() const noexcept { return m_buffer; }
+	// For commands that may access any memory (copies, draws, barriers, emulator passes). With the
+	// barrier-tracker port, guest dispatches recorded before it are ordered first.
+	[[nodiscard]] vk::CommandBuffer Handle() const;
+	// For commands that access no memory when they execute: binding pipelines, descriptors and
+	// vertex/index buffers, push constants, dynamic state.
+	[[nodiscard]] vk::CommandBuffer StateHandle() const noexcept { return m_buffer; }
+	// For one guest dispatch, recorded next with the returned handle. `writes`: the dispatch may
+	// write memory through any path. Ends the render pass (a dispatch is outside one) and records the
+	// barrier it needs against earlier commands.
+	[[nodiscard]] vk::CommandBuffer DispatchHandle(bool writes) const;
+	// Orders guest dispatches recorded so far before everything recorded next.
+	void OrderDispatches() const;
 	[[nodiscard]] GraphicContext&   GetGraphics() const noexcept { return m_graphics; }
 	[[nodiscard]] RenderContext&    GetContext() const noexcept { return m_context; }
 	[[nodiscard]] HW::Context&      GetRegisters() const noexcept { return *m_registers; }
@@ -124,12 +138,15 @@ private:
 
 	void Begin();
 	void End() const;
+	void RecordBarrier(BarrierTracker::Barrier barrier) const;
 
 	RenderContext&      m_context;
 	GraphicContext&     m_graphics;
 	vk::CommandBuffer   m_buffer = nullptr;
 	mutable RenderState m_render_state;
 	mutable bool        m_rendering   = false;
+	// Kept across submissions: barriers order commands in submission order on the queue.
+	mutable BarrierTracker m_barriers;
 	HW::Context*        m_registers   = nullptr;
 	HW::UserConfig*     m_user_config = nullptr;
 	HW::Shader*         m_shaders     = nullptr;

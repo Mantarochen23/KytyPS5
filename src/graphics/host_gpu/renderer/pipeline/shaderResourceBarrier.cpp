@@ -103,6 +103,7 @@ bool HasShaderBufferWrites(const ShaderStageRuntime& runtime) {
 void ShaderAccessBarrier(vk::CommandBuffer vk_buffer, vk::PipelineStageFlags source_stages,
 	                     bool writes_memory) {
 	Common::FrameCost::Add(Common::FrameCost::Counter::BarriersAllCommands);
+	Common::FrameCost::Add(Common::FrameCost::Counter::BarriersGlobal);
 	if (!writes_memory) {
 		vk_buffer.pipelineBarrier(source_stages, vk::PipelineStageFlagBits::eAllCommands,
 		                          vk::DependencyFlags {}, 0, nullptr, 0, nullptr, 0, nullptr);
@@ -118,6 +119,7 @@ void ShaderAccessBarrier(vk::CommandBuffer vk_buffer, vk::PipelineStageFlags sou
 void ShaderWriteHazardBarrier(vk::CommandBuffer      vk_buffer,
                               vk::PipelineStageFlags destination_stages) {
 	Common::FrameCost::Add(Common::FrameCost::Counter::BarriersAllCommands);
+	Common::FrameCost::Add(Common::FrameCost::Counter::BarriersGlobal);
 	const vk::MemoryBarrier barrier {
 	    .srcAccessMask = vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite,
 	    .dstAccessMask = vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite};
@@ -127,6 +129,7 @@ void ShaderWriteHazardBarrier(vk::CommandBuffer      vk_buffer,
 
 void ShaderWriteBarrier(vk::CommandBuffer vk_buffer, vk::PipelineStageFlags source_stages) {
 	const auto barrier = MakeShaderWriteDependency();
+	Common::FrameCost::Add(Common::FrameCost::Counter::BarriersGlobal);
 	vk_buffer.pipelineBarrier(source_stages,
 	                          vk::PipelineStageFlagBits::eComputeShader |
 	                              vk::PipelineStageFlagBits::eAllGraphics |

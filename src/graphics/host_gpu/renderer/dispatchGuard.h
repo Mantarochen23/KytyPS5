@@ -38,7 +38,11 @@ public:
 	// the GPU): the check is then always recorded.
 	[[nodiscard]] std::pair<vk::Buffer, uint64_t> Record(CommandBuffer& buffer, const Buffer& args,
 	                                                     uint64_t offset, uint64_t guest_address,
-	                                                     uint64_t write_stamp = 0);
+	                                                     uint64_t write_stamp = 0,
+	                                                     uint32_t group_x = 1, uint32_t group_y = 1,
+	                                                     uint32_t group_z        = 1,
+	                                                     bool     divide_threads = false,
+	                                                     bool     guard_enabled  = true);
 
 private:
 	static constexpr uint64_t SlotBytes = 16;
