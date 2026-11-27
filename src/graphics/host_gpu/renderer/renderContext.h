@@ -64,6 +64,7 @@ public:
 	// Bytes of guest memory changed through the backing, which raises no fault.
 	void               NoteBackingWrite(uint64_t vaddr, uint64_t size) { m_read_watch.Touched(vaddr, size); }
 	[[nodiscard]] bool IsMapped(uint64_t vaddr, uint64_t size) const noexcept;
+	[[nodiscard]] RangeSet IntersectMappedRanges(const RangeSet& ranges) const;
 	void               MapMemory(uint64_t vaddr, uint64_t size);
 	void               UnmapMemory(uint64_t vaddr, uint64_t size);
 	void               PrepareBda(bool untracked_writes = true);

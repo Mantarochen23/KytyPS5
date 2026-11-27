@@ -181,6 +181,18 @@ bool RenderContext::IsMapped(uint64_t vaddr, uint64_t size) const noexcept {
 	return m_mapped_ranges.Contains(vaddr, size);
 }
 
+RangeSet RenderContext::IntersectMappedRanges(const RangeSet& ranges) const {
+	RangeSet result;
+	std::shared_lock lock(m_mapped_ranges_mutex);
+	ranges.ForEach([&](uint64_t begin, uint64_t end) {
+		m_mapped_ranges.ForEachInRange(begin, end - begin, [&](uint64_t mapped_begin,
+		                                                        uint64_t mapped_end) {
+			result.Add(mapped_begin, mapped_end - mapped_begin);
+		});
+	});
+	return result;
+}
+
 void RenderContext::MapMemory(uint64_t vaddr, uint64_t size) {
 	m_buffer_cache.InvalidateRuntimeTables(vaddr, size);
 	std::lock_guard lock(m_mapped_ranges_mutex);

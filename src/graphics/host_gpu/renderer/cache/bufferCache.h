@@ -174,7 +174,7 @@ public:
 	    RangeSet dependencies, RangeSet write_ranges);
 	// Called only for backing-lifetime changes, not ordinary guest writes.
 	void InvalidateRuntimeTables(uint64_t vaddr, uint64_t size);
-	// Marks the cached candidate-range union once per dispatch, rather than once per candidate.
+	// Marks the cached, mapped candidate-backing union once per dispatch, not once per candidate.
 	void MarkRuntimeTableWritten(const std::shared_ptr<RuntimeTableState>& state);
 	// Uploads the CPU-dirty bytes of the queued ranges `mapped` covers behind one barrier pair.
 	void SynchronizeBda(const RangeSet& mapped);
