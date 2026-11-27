@@ -443,6 +443,7 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 	if constexpr (async) {
 		m_scheduler.DeferPriorityOperation(std::move(publish));
 	} else {
+		Common::FrameCost::Add(Common::FrameCost::Counter::ReadbackSync);
 		Common::FrameCost::ScopedWaitReason wait_reason(Common::FrameCost::WaitReason::Readback);
 		const auto                          tick = m_scheduler.CurrentTick();
 		m_scheduler.Wait(tick);
@@ -507,22 +508,26 @@ BufferCache::~BufferCache() {
 	}
 }
 
-void BufferCache::InvalidateMemory(uint64_t vaddr, uint64_t size) {
+void BufferCache::InvalidateMemory(uint64_t vaddr, uint64_t size,
+                                   Common::FrameCost::ReadbackSite site) {
 	const auto started = FaultStats::NowNs();
-	m_memory_tracker.InvalidateRegion(vaddr, size,
-	                                  [this, vaddr, size] { ReadMemory(vaddr, size, true); });
+	m_memory_tracker.InvalidateRegion(vaddr, size, [this, vaddr, size, site] {
+		ReadMemory(vaddr, size, true, site);
+	});
 	QueueBdaSync(vaddr, size);
 	FaultStats::g_counters.invalidate_ns.fetch_add(FaultStats::NowNs() - started,
 	                                               std::memory_order_relaxed);
 }
 
-void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
+void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write,
+                             Common::FrameCost::ReadbackSite site) {
 	if (!GuestGpu::IsGpuThread() && CommandScheduler::InDeferredOperation()) {
 		EXIT("unsupported buffer readback from an asynchronous GPU completion, "
 		     "addr=0x%016" PRIx64 " size=0x%016" PRIx64 "\n",
 		     vaddr, size);
 	}
-	m_scheduler.Context().GetGpu().SendCommandSync([this, vaddr, size, is_write] {
+	m_scheduler.Context().GetGpu().SendCommandSync([this, vaddr, size, is_write, site] {
+		Common::FrameCost::ScopedReadbackSite active_site(site);
 		if (is_write && !IsRegionRegistered(vaddr, size)) {
 			return;
 		}

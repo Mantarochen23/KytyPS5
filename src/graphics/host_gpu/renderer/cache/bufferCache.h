@@ -3,6 +3,7 @@
 
 #include "common/abi.h"
 #include "common/common.h"
+#include "common/frameCost.h"
 #include "common/lruCache.h"
 #include "common/slotVector.h"
 #include "graphics/host_gpu/memoryTracker.h"
@@ -140,8 +141,12 @@ public:
 	~BufferCache();
 	KYTY_CLASS_NO_COPY(BufferCache);
 
-	void                   InvalidateMemory(uint64_t vaddr, uint64_t size);
-	void                   ReadMemory(uint64_t vaddr, uint64_t size, bool is_write = false);
+	void                   InvalidateMemory(
+	    uint64_t vaddr, uint64_t size,
+	    Common::FrameCost::ReadbackSite site = Common::FrameCost::CurrentReadbackSite());
+	void                   ReadMemory(
+	    uint64_t vaddr, uint64_t size, bool is_write = false,
+	    Common::FrameCost::ReadbackSite site = Common::FrameCost::CurrentReadbackSite());
 	// Ends the draw window, whose draws share the stream copies of CPU-written ranges.
 	void                   EndDrawWindow() noexcept { m_draw_window++; }
 	[[nodiscard]] uint64_t DrawWindow() const noexcept { return m_draw_window; }

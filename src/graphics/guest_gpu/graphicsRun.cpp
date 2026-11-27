@@ -1403,7 +1403,11 @@ void CommandProcessor::DispatchIndirect(uint64_t args_addr, uint32_t mode, const
 		        : 0;
 		const ScopedDispatchOrigin  scope(&origin);
 		vk::DispatchIndirectCommand args;
-		LibKernel::Memory::ReadGuestMemory(args_addr, &args, sizeof(args));
+		{
+			Common::FrameCost::ScopedReadbackSite rb_site(
+			    Common::FrameCost::ReadbackSite::ThreadDim);
+			LibKernel::Memory::ReadGuestMemory(args_addr, &args, sizeof(args));
+		}
 		DispatchDirect(args.x, args.y, args.z, mode, packet);
 		return;
 	}

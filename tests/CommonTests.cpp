@@ -960,4 +960,62 @@ TEST(FrameCost, RecordSubmitAndRenderWaitReasonAccumulateCounters) {
 	          1u);
 }
 
+TEST(FrameCost, ReadbackSiteScopesAndArchFormattingSplitProducers) {
+	using namespace Common::FrameCost;
+	EXPECT_EQ(CurrentReadbackSite(), ReadbackSite::Other);
+	const auto before = SnapshotCounters();
+	{
+		ScopedWaitReason   wait_reason(WaitReason::Readback);
+		ScopedReadbackSite outer(ReadbackSite::ThreadDim);
+		EXPECT_EQ(CurrentReadbackSite(), ReadbackSite::ThreadDim);
+		RecordRenderWaitReason(2'000'000);
+		{
+			ScopedReadbackSite inner(ReadbackSite::Scalar);
+			EXPECT_EQ(CurrentReadbackSite(), ReadbackSite::Scalar);
+			RecordRenderWaitReason(3'000'000);
+		}
+		EXPECT_EQ(CurrentReadbackSite(), ReadbackSite::ThreadDim);
+		RecordRenderWaitReason(1'000'000);
+	}
+	EXPECT_EQ(CurrentReadbackSite(), ReadbackSite::Other);
+	const auto after = SnapshotCounters();
+	EXPECT_EQ(after[static_cast<size_t>(Counter::WaitRbThreadDimCalls)] -
+	              before[static_cast<size_t>(Counter::WaitRbThreadDimCalls)],
+	          2u);
+	EXPECT_EQ(after[static_cast<size_t>(Counter::WaitRbThreadDimNs)] -
+	              before[static_cast<size_t>(Counter::WaitRbThreadDimNs)],
+	          3'000'000u);
+	EXPECT_EQ(after[static_cast<size_t>(Counter::WaitRbScalarCalls)] -
+	              before[static_cast<size_t>(Counter::WaitRbScalarCalls)],
+	          1u);
+	EXPECT_EQ(after[static_cast<size_t>(Counter::WaitRbScalarNs)] -
+	              before[static_cast<size_t>(Counter::WaitRbScalarNs)],
+	          3'000'000u);
+
+	std::array<uint64_t, CounterCount> delta {};
+	const auto set = [&](Counter c, uint64_t v) { delta[static_cast<size_t>(c)] = v; };
+	set(Counter::Frames, 2);
+	set(Counter::WaitRbThreadDimCalls, 4);
+	set(Counter::WaitRbThreadDimNs, 6'000'000);
+	set(Counter::WaitRbReadFaultCalls, 2);
+	set(Counter::WaitRbReadFaultNs, 2'000'000);
+	set(Counter::ReadbackInPlace, 10);
+	set(Counter::ReadbackDetached, 6);
+	set(Counter::ReadbackSync, 4);
+	set(Counter::ReadbackBatchExtra, 8);
+	set(Counter::DispatchIndirectThreadDimGpu, 12);
+	set(Counter::DrawIndirectCountGpu, 14);
+	const auto lines = FormatWindow(delta, 0.1);
+	EXPECT_NE(lines.arch.find("rb_site(tdim=2.00/3.000 lds=0.00/0.000 scalar=0.00/0.000 "
+	                          "heap=0.00/0.000 vattr=0.00/0.000 meta=0.00/0.000 "
+	                          "rfault=1.00/1.000 wfault=0.00/0.000 inv=0.00/0.000 "
+	                          "other=0.00/0.000)"),
+	          std::string::npos)
+	    << lines.arch;
+	EXPECT_NE(lines.arch.find("rb_path(inplace=5.00 detached=3.00 sync=2.00 batch_ex=4.00 "
+	                          "gpu_tdim=6.00 gpu_icount=7.00)"),
+	          std::string::npos)
+	    << lines.arch;
+}
+
 } // namespace

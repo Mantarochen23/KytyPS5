@@ -177,6 +177,34 @@ enum class Counter : uint8_t {
 	TableMarkRanges,
 	// Rebuilt tables of typed or image-synced buffers with a candidate range inside a registered image.
 	TableImageAliased,
+	// Synchronous readback waits split by producer site.
+	WaitRbThreadDimCalls,
+	WaitRbThreadDimNs,
+	WaitRbLdsCalls,
+	WaitRbLdsNs,
+	WaitRbScalarCalls,
+	WaitRbScalarNs,
+	WaitRbHeapCalls,
+	WaitRbHeapNs,
+	WaitRbVertexAttribCalls,
+	WaitRbVertexAttribNs,
+	WaitRbColorMetaCalls,
+	WaitRbColorMetaNs,
+	WaitRbReadFaultCalls,
+	WaitRbReadFaultNs,
+	WaitRbWriteFaultCalls,
+	WaitRbWriteFaultNs,
+	WaitRbInvalidateCalls,
+	WaitRbInvalidateNs,
+	WaitRbOtherCalls,
+	WaitRbOtherNs,
+	// Readback execution paths and GPU-side indirect removals.
+	ReadbackInPlace,
+	ReadbackDetached,
+	ReadbackSync,
+	ReadbackBatchExtra,
+	DispatchIndirectThreadDimGpu,
+	DrawIndirectCountGpu,
 	Count
 };
 
@@ -191,6 +219,19 @@ enum class WaitReason : uint8_t {
 	Rt,
 	Swapchain,
 	PriorityThread,
+};
+
+enum class ReadbackSite : uint8_t {
+	Other,
+	ThreadDim,
+	Lds,
+	Scalar,
+	Heap,
+	VertexAttrib,
+	ColorMeta,
+	ReadFault,
+	WriteFault,
+	Invalidate,
 };
 
 enum class SubmitReason : uint8_t {
@@ -226,6 +267,19 @@ private:
 
 [[nodiscard]] WaitReason CurrentWaitReason() noexcept;
 void                     RecordRenderWaitReason(uint64_t elapsed_ns) noexcept;
+
+class ScopedReadbackSite final {
+public:
+	explicit ScopedReadbackSite(ReadbackSite site) noexcept;
+	~ScopedReadbackSite();
+	ScopedReadbackSite(const ScopedReadbackSite&)            = delete;
+	ScopedReadbackSite& operator=(const ScopedReadbackSite&) = delete;
+
+private:
+	ReadbackSite m_previous;
+};
+
+[[nodiscard]] ReadbackSite CurrentReadbackSite() noexcept;
 
 class ScopedSubmitReason final {
 public:

@@ -238,6 +238,7 @@ bool ImageHeap::Refresh(Memory& memory) {
 		const auto [address, end] = PageRange(memory.base, memory.size, m_runs[run].first,
 		                                      m_runs[run].second);
 		m_scratch.resize((end - address) / 4u);
+		Common::FrameCost::ScopedReadbackSite rb_site(Common::FrameCost::ReadbackSite::Heap);
 		if (!LibKernel::Memory::TryReadBufferBacking(address, m_scratch.data(), end - address)) {
 			std::scoped_lock lock {m_mutex};
 			for (; run < m_runs.size(); ++run) {

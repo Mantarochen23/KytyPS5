@@ -134,11 +134,13 @@ bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr) no
 	}
 	if (access == PageFaultAccess::Write) {
 		m_read_watch.Written(fault_vaddr, fault_size);
-		m_buffer_cache.InvalidateMemory(fault_vaddr, fault_size);
+		m_buffer_cache.InvalidateMemory(fault_vaddr, fault_size,
+		                                Common::FrameCost::ReadbackSite::WriteFault);
 		m_texture_cache.InvalidateMemory(fault_vaddr, fault_size);
 		m_image_heap.InvalidateMemory(fault_vaddr, fault_size);
 	} else {
-		m_buffer_cache.ReadMemory(fault_vaddr, fault_size);
+		m_buffer_cache.ReadMemory(fault_vaddr, fault_size, false,
+		                          Common::FrameCost::ReadbackSite::ReadFault);
 	}
 	finish();
 	return true;
@@ -167,7 +169,7 @@ bool RenderContext::InvalidateMemory(uint64_t vaddr, uint64_t size) {
 		return false;
 	}
 	m_read_watch.Written(vaddr, size);
-	m_buffer_cache.InvalidateMemory(vaddr, size);
+	m_buffer_cache.InvalidateMemory(vaddr, size, Common::FrameCost::ReadbackSite::Invalidate);
 	m_texture_cache.InvalidateMemory(vaddr, size);
 	m_image_heap.InvalidateMemory(vaddr, size);
 	return true;
@@ -224,7 +226,7 @@ void RenderContext::UnmapMemory(uint64_t vaddr, uint64_t size) {
 		}
 		m_read_watch.Written(vaddr, size);
 		m_buffer_cache.InvalidateRuntimeTables(vaddr, size);
-		m_buffer_cache.InvalidateMemory(vaddr, size);
+		m_buffer_cache.InvalidateMemory(vaddr, size, Common::FrameCost::ReadbackSite::Invalidate);
 		m_texture_cache.UnmapMemory(vaddr, size);
 		m_image_heap.UnmapMemory(vaddr, size);
 		std::lock_guard lock(m_mapped_ranges_mutex);

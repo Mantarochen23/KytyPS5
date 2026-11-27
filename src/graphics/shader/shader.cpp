@@ -4,6 +4,7 @@
 #include "common/assert.h"
 #include "common/common.h"
 #include "common/emulatorConfig.h"
+#include "common/frameCost.h"
 #include "common/logging/log.h"
 #include "common/memAccount.h"
 #include "common/profiler.h"
@@ -275,6 +276,7 @@ static void ShaderApplyAttribSemantics(ShaderVertexInputInfo&          info,
                                        std::span<const ShaderSemantic> input_semantics,
                                        uint64_t attrib_address, uint64_t buffer_address) {
 	KYTY_PROFILER_FUNCTION();
+	Common::FrameCost::ScopedReadbackSite rb_site(Common::FrameCost::ReadbackSite::VertexAttrib);
 
 	const bool debug_dump = Config::GraphicsDebugDumpEnabled();
 
