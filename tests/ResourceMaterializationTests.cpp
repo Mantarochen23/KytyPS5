@@ -1647,9 +1647,9 @@ void TestCanonicalSpecializationAcrossBoots() {
   Check(one == two, "boots with another order, table length and addresses specialize one module");
   Check(one_legacy != two_legacy, "the old layout of the same boots specializes two modules");
   Check(one.buffers.size() == 3u && one.images.size() == 3u, "both candidates and kinds stay");
-  auto other_stride = first;
-  other_stride.rows = {16u, 64u};
-  Check(Materialize(plan, other_stride).first != one, "another candidate stride is another module");
+  auto more = first;
+  more.rows = {16u, 32u, 48u};
+  Check(Materialize(plan, more).first != one, "a third candidate is another module");
   auto other_kind = first;
   other_kind.kinds = {BufferFormat::k32Float, BufferFormat::k32UInt};
   Check(Materialize(plan, other_kind).first == one,
