@@ -343,10 +343,19 @@ struct ImageHeapTestAccess {
     return Element(heap, entry).image;
   }
   static size_t IndexCount(const ImageHeap &heap) { return heap.m_index.size(); }
-  static size_t HeldCount(const ImageHeap &heap) { return heap.m_held.size(); }
+  static size_t HeldCount(const ImageHeap &heap) {
+    return std::ranges::count_if(heap.m_retry_elements, [&](uint32_t index) {
+      return heap.m_elements[index].retry == ImageHeap::RetryKind::Held;
+    });
+  }
   static uint64_t ResolveCalls(const ImageHeap &heap) { return heap.m_resolve_calls; }
+  static uint64_t FastRebinds(const ImageHeap &heap) { return heap.m_fast_rebinds; }
+  static uint64_t EntriesVisited(const ImageHeap &heap) { return heap.m_entries_visited; }
+  static uint64_t EntriesSkipped(const ImageHeap &heap) { return heap.m_entries_skipped; }
+  static uint64_t EntriesResolved(const ImageHeap &heap) { return heap.m_entries_resolved; }
   static void RetryEveryDraw(ImageHeap &heap, uint32_t entry) {
-    heap.m_dcc.push_back(entry & ((1u << ShaderRecompiler::IR::ImageHeapKindShift) - 1u));
+    heap.SetRetry(entry & ((1u << ShaderRecompiler::IR::ImageHeapKindShift) - 1u),
+                  ImageHeap::RetryKind::Dcc);
   }
   static const auto &Slots(const ImageHeap &heap, size_t memory) {
     return heap.m_memories.at(memory)->views.at(0)->slots;
@@ -368,6 +377,10 @@ struct TextureCacheTestAccess {
   static void TouchResolution(TextureCache &cache, uint64_t address, uint64_t size) {
     cache.TouchResolutionGeneration(address, size);
   }
+  static size_t JournalSize(const TextureCache &cache) {
+    return cache.m_resolution_changes.size();
+  }
+  static constexpr size_t JournalLimit = TextureCache::MaxResolutionChanges;
   // Suspend points that collect nothing.
   static void SkipFrames(TextureCache &cache, uint64_t frames) {
     cache.m_gc_tick += frames;
@@ -6827,14 +6840,45 @@ public:
       const auto texture = [](uint32_t index) { return base + 0x10000u + index * 0x1000u; };
       ImageHeapTestAccess::RetryEveryDraw(heap, filtered.slots[40]);
       auto resolves = ImageHeapTestAccess::ResolveCalls(heap);
+      const auto fast_rebinds = ImageHeapTestAccess::FastRebinds(heap);
+      auto visited = ImageHeapTestAccess::EntriesVisited(heap);
+      const auto skipped = ImageHeapTestAccess::EntriesSkipped(heap);
       Require(name, "unchanged discovery", acquire(sampled), "the view was declined");
       draw();
-      Require(name, "unchanged entry skipped", ImageHeapTestAccess::ResolveCalls(heap) == resolves,
-              "an unchanged entry was resolved again");
+      Require(name, "unchanged entry skipped",
+              ImageHeapTestAccess::ResolveCalls(heap) == resolves &&
+                  ImageHeapTestAccess::FastRebinds(heap) == fast_rebinds + 1u &&
+                  ImageHeapTestAccess::EntriesVisited(heap) == visited &&
+                  ImageHeapTestAccess::EntriesSkipped(heap) == skipped + 1u,
+              "an unchanged heap did per-entry discovery work");
+      TextureCacheTestAccess::TouchResolution(textures, base + 0x1f0000u, 0x1000u);
+      Require(name, "unrelated generation discovery", acquire(sampled), "the view was declined");
+      draw();
+      Require(name, "unrelated generation skipped",
+              ImageHeapTestAccess::ResolveCalls(heap) == resolves &&
+                  ImageHeapTestAccess::EntriesVisited(heap) == visited,
+              "an unrelated texture-cache range scanned resident entries");
+      // A journal nobody drained is bounded; the entry whose records were dropped still retries.
+      for (size_t i = 0; i < TextureCacheTestAccess::JournalLimit + 8u; ++i) {
+        TextureCacheTestAccess::TouchResolution(textures, base + 0x1f0000u, 0x1000u);
+      }
+      Require(name, "journal bounded",
+              TextureCacheTestAccess::JournalSize(textures) <= TextureCacheTestAccess::JournalLimit,
+              "the texture-cache journal grew without a consumer");
+      Require(name, "overflow discovery", acquire(sampled), "the view was declined");
+      draw();
+      Require(name, "overflow entry resolved",
+              ImageHeapTestAccess::ResolveCalls(heap) > resolves,
+              "dropped journal records left a resident entry unchecked");
+      resolves = ImageHeapTestAccess::ResolveCalls(heap);
+      visited  = ImageHeapTestAccess::EntriesVisited(heap);
       TextureCacheTestAccess::TouchResolution(textures, texture(1), 0x1000u);
       Require(name, "generation discovery", acquire(sampled), "the view was declined");
       draw();
-      Require(name, "generation entry resolved", ImageHeapTestAccess::ResolveCalls(heap) == ++resolves,
+      Require(name, "generation entry resolved",
+              ImageHeapTestAccess::ResolveCalls(heap) == ++resolves &&
+                  ImageHeapTestAccess::EntriesVisited(heap) == visited + 1u &&
+                  ImageHeapTestAccess::EntriesResolved(heap) >= resolves,
               "a relevant texture-cache generation did not resolve the entry");
       write(5, descriptor(2, Format::k8_8_8_8UNorm));
       Require(name, "descriptor discovery", acquire(sampled), "the view was declined");

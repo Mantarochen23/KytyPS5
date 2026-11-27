@@ -4,6 +4,7 @@
 #include "graphics/host_gpu/renderer/pipeline/shaderStoreFile.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderStoreIdentity.h"
 #include "common/ports.h"
+#include "graphics/shader/recompiler/ShaderRecompiler.h"
 #include "graphics/shader/shaderCompiler.h"
 
 #include <algorithm>
@@ -20,6 +21,12 @@
 #include <vector>
 
 using namespace Libs::Graphics;
+
+namespace Libs::Graphics {
+struct PipelineCacheTestAccess {
+	using Program = PipelineCache::Program;
+};
+} // namespace Libs::Graphics
 
 namespace {
 
@@ -384,6 +391,54 @@ void TestBuildTimingLargeModuleWarningLine() {
 
 } // namespace
 
+ShaderModule MakeIndexedModule(uint64_t id, uint32_t buffers, std::vector<uint32_t> callee = {}) {
+	ShaderModule module;
+	module.id = id;
+	module.specialization.buffers.resize(buffers);
+	module.function_code = std::move(callee);
+	return module;
+}
+
+// Every path that puts a module into a program (store load, sync build, async build, lookahead)
+// ends in Program::Adopt; each module must then be found by the lookup of FindModule.
+void TestModulesAreFoundAfterEveryEntryPath() {
+	using Program = PipelineCacheTestAccess::Program;
+	Program program;
+	const char* paths[] = {"store load", "sync build", "async build", "lookahead"};
+	std::vector<ShaderModule*> adopted;
+	for (uint32_t i = 0; i < 4; ++i) {
+		adopted.push_back(&program.Adopt(MakeIndexedModule(100 + i, i + 1)));
+	}
+	for (uint32_t i = 0; i < 4; ++i) {
+		program.specialization      = adopted[i]->specialization;
+		program.specialization_hash = Program::HashSpecialization(program.specialization);
+		const auto* found = program.FindIndexed({}, false, {});
+		std::fprintf(stderr, "entry path %s\n", paths[i]);
+		Check(found == adopted[i], "a module adopted through this path is found by the lookup");
+		Check(program.CheckIndexed(*adopted[i], paths[i]), "an adopted module is in the index");
+	}
+	// A module with calls: found only for its own callee code, and never by a lookup without calls.
+	const std::vector<uint32_t> callee {1, 2, 3};
+	auto& with_calls = program.Adopt(MakeIndexedModule(200, 9, callee));
+	program.specialization      = with_calls.specialization;
+	program.specialization_hash = Program::HashSpecialization(program.specialization);
+	program.function_code_hash  = with_calls.function_code_hash;
+	Check(program.FindIndexed({}, true, callee) == &with_calls, "a module with calls is found for its code");
+	const std::vector<uint32_t> other {1, 2, 4};
+	Check(program.FindIndexed({}, true, other) == nullptr, "a module with calls is not found for other code");
+	Check(program.FindIndexed({}, false, {}) == nullptr, "a lookup without calls skips a module with calls");
+	// A module that entered `modules` around Adopt is the defect: the lookup misses it, the
+	// invariant check finds it, reports once and repairs the index.
+	auto& stray = program.modules.emplace_back(MakeIndexedModule(300, 12));
+	program.specialization      = stray.specialization;
+	program.specialization_hash = Program::HashSpecialization(program.specialization);
+	Check(program.FindIndexed({}, false, {}) == nullptr, "an unindexed module is missed (the old defect)");
+	Check(!program.CheckIndexed(stray, "test"), "the check reports an unindexed module");
+	Check(program.logged_index_bug, "the report is made once per program");
+	Check(program.FindIndexed({}, false, {}) == &stray, "the check repaired the index");
+	Check(program.CheckIndexed(stray, "test"), "a repaired module is indexed");
+}
+
 int main() {
 	TestStoreIdentityIgnoresWideningPorts();
 	TestFailureValidityFollowsWideningPorts();
@@ -393,6 +448,7 @@ int main() {
 	TestLookupCounters();
 	TestCapabilityVersionBumped();
 	TestBuildTimingLargeModuleWarningLine();
+	TestModulesAreFoundAfterEveryEntryPath();
 	std::printf("ShaderStoreTests: ok\n");
 	return 0;
 }

@@ -132,11 +132,13 @@ public:
 		if (heap_refs.load(std::memory_order_relaxed) != 0u) {
 			std::scoped_lock lock {heap_mutex};
 			heap_changes.push_back({info.data, serial});
+			heap_change_generation.fetch_add(1u, std::memory_order_release);
 		}
 	}
 
 	static inline std::mutex              heap_mutex; // After TextureCache::m_lock.
 	static inline std::vector<HeapChange> heap_changes;
+	static inline std::atomic<uint64_t>   heap_change_generation {0};
 	static inline std::atomic<uint64_t>   serials {0};
 
 	// Unique per image, unlike ImageId: freed slots are reused.

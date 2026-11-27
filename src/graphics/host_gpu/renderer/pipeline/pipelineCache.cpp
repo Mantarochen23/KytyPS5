@@ -332,7 +332,8 @@ static uint64_t CallCodeHash(std::span<const uint32_t> function_code) {
 }
 
 bool PipelineCache::Program::UseStoredCallPlan() {
-	const auto found = call_plans.find(CallCodeHash(FunctionCode()));
+	function_code_hash = CallCodeHash(FunctionCode());
+	const auto found = call_plans.find(function_code_hash);
 	if (found == call_plans.end()) return false;
 	ShaderRecompiler::IR::ResourcePlan plan;
 	if (!ShaderRecompiler::IR::LoadResourcePlan(found->second, plan)) {
@@ -350,12 +351,28 @@ bool PipelineCache::Program::RefreshCallSource(const ShaderRecompiler::IR::SrtRu
 	ShaderRecompiler::RefreshShaderSource(*call_source, runtime);
 	resource_plan.source_reads = call_source->reads;
 	const bool changed = revision != call_source->revision;
-	if (changed) InvalidateMaterializationMemo();
+	if (changed) {
+		function_code_hash = CallCodeHash(FunctionCode());
+		InvalidateMaterializationMemo();
+	} else if (function_code_hash == 0) {
+		function_code_hash = CallCodeHash(FunctionCode());
+	}
 	return changed;
 }
 
 bool PipelineCache::Program::Materialize(const ShaderRecompiler::IR::SrtRuntime& runtime,
 	                                      std::string* failure_reason) {
+	const auto begin = std::chrono::steady_clock::now();
+	const auto note = [&](bool hit) {
+		const auto elapsed = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+		                                               std::chrono::steady_clock::now() - begin)
+		                                               .count());
+		Common::FrameCost::Add(hit ? Common::FrameCost::Counter::MaterializationMemoHits
+		                           : Common::FrameCost::Counter::MaterializationMemoMisses);
+		Common::FrameCost::Add(hit ? Common::FrameCost::Counter::MaterializationMemoHitNs
+		                           : Common::FrameCost::Counter::MaterializationMemoMissNs,
+		                       elapsed);
+	};
 	auto& memo = materialization_memo;
 	const auto hash_read = [&](uint64_t address, uint64_t size, uint64_t& hash) {
 		if (size == 0u) {
@@ -388,6 +405,7 @@ bool PipelineCache::Program::Materialize(const ShaderRecompiler::IR::SrtRuntime&
 	};
 	if (same_bound_state()) {
 		++materialization_memo_hits;
+		note(true);
 		return true;
 	}
 	// A memo must observe every resource-walk read, including direct descriptors whose contents
@@ -396,10 +414,13 @@ bool PipelineCache::Program::Materialize(const ShaderRecompiler::IR::SrtRuntime&
 	if (!ShaderRecompiler::IR::MaterializeResources(resource_plan, runtime, resources,
 	                                                specialization, failure_reason)) {
 		memo.valid = false;
+		note(false);
 		return false;
 	}
+	specialization_hash = SpecializationHash(specialization);
 	if (resource_plan.info.uses_image_heap) {
 		memo.valid = false;
+		note(false);
 		return true;
 	}
 	memo.user_data.assign(runtime.user_data.begin(), runtime.user_data.end());
@@ -413,12 +434,50 @@ bool PipelineCache::Program::Materialize(const ShaderRecompiler::IR::SrtRuntime&
 		uint64_t hash = 0;
 		if (!hash_read(address, size, hash)) {
 			memo.valid = false;
+			note(false);
 			return true;
 		}
 		memo.reads.push_back({address, size, hash});
 	}
 	memo.valid = true;
+	note(false);
 	return true;
+}
+
+ShaderModule* PipelineCache::Program::FindIndexed(ShaderRecompiler::IR::PushData::Window push_data,
+                                                  bool has_calls,
+                                                  std::span<const uint32_t> callee_code) {
+	const auto [first, last] = module_index.equal_range(specialization_hash);
+	for (auto found = first; found != last; ++found) {
+		auto&       candidate = *found->second;
+		const auto& layout    = candidate.info.bindings;
+		if (layout.push_data_start_dword !=
+		        push_data.StartFor(layout.ShaderDataDwords(), candidate.info.stage) ||
+		    candidate.specialization != specialization) {
+			continue;
+		}
+		if (has_calls) {
+			if (candidate.function_code_hash != function_code_hash ||
+			    !std::ranges::equal(candidate.function_code, callee_code)) {
+				continue;
+			}
+		} else {
+			if (!candidate.function_code.empty()) continue;
+		}
+		return &candidate;
+	}
+	return nullptr;
+}
+
+uint64_t PipelineCache::Program::HashSpecialization(
+    const ShaderRecompiler::IR::ResourceSpecialization& value) {
+	return SpecializationHash(value);
+}
+
+ShaderModule& PipelineCache::Program::Adopt(ShaderModule&& module) {
+	auto& added = modules.emplace_back(std::move(module));
+	IndexModule(added);
+	return added;
 }
 
 template <bool HasCalls>
@@ -428,6 +487,17 @@ ShaderModule* PipelineCache::Program::FindModule(const ShaderRecompiler::IR::Srt
                                                  std::string* materialization_error) {
 	Common::FrameCost::ScopedTimer timer(Common::FrameCost::Counter::FindModuleNs);
 	Common::FrameCost::Add(Common::FrameCost::Counter::FindModuleCalls);
+	const auto begin = std::chrono::steady_clock::now();
+	const auto note = [&](bool hit) {
+		const auto elapsed = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+		                                               std::chrono::steady_clock::now() - begin)
+		                                               .count());
+		Common::FrameCost::Add(hit ? Common::FrameCost::Counter::FindModuleHits
+		                           : Common::FrameCost::Counter::FindModuleMisses);
+		Common::FrameCost::Add(hit ? Common::FrameCost::Counter::FindModuleHitNs
+		                           : Common::FrameCost::Counter::FindModuleMissNs,
+		                       elapsed);
+	};
 	// The old layout's hash is needed while stored modules wait for their first comparison, and
 	// for the module a miss will build.
 	auto probe        = runtime;
@@ -436,24 +506,15 @@ ShaderModule* PipelineCache::Program::FindModule(const ShaderRecompiler::IR::Srt
 		if (materialized != nullptr) {
 			*materialized = false;
 		}
+		note(false);
 		return nullptr;
 	}
 	if (materialized != nullptr) {
 		*materialized = true;
 	}
-	for (auto& candidate: modules) {
-		const auto& layout = candidate.info.bindings;
-		if (layout.push_data_start_dword !=
-		        push_data.StartFor(layout.ShaderDataDwords(), candidate.info.stage) ||
-		    candidate.specialization != specialization) {
-			continue;
-		}
-		if constexpr (HasCalls) {
-			if (!std::ranges::equal(candidate.function_code, FunctionCode())) continue;
-		} else {
-			if (!candidate.function_code.empty()) continue;
-		}
-		return &candidate;
+	if (auto* candidate = FindIndexed(push_data, HasCalls, FunctionCode())) {
+		note(true);
+		return candidate;
 	}
 	if (!probe.legacy_hash && Config::PortEnabled(Config::Port::CanonicalResources) &&
 	    std::ranges::any_of(resource_plan.descriptor_sources, [](const auto& source) {
@@ -469,6 +530,7 @@ ShaderModule* PipelineCache::Program::FindModule(const ShaderRecompiler::IR::Srt
 		legacy_of_specialization.insert_or_assign(SpecializationHash(specialization),
 		                                          resources.legacy_hash);
 	}
+	note(false);
 	return nullptr;
 }
 
@@ -484,6 +546,28 @@ ShaderModule* PipelineCache::Program::FindCandidate(
 		}
 	}
 	return nullptr;
+}
+
+void PipelineCache::Program::IndexModule(ShaderModule& module) {
+	module.specialization_hash = SpecializationHash(module.specialization);
+	module.function_code_hash  = CallCodeHash(module.function_code);
+	module_index.emplace(module.specialization_hash, &module);
+}
+
+bool PipelineCache::Program::CheckIndexed(ShaderModule& module, const char* path) {
+	const auto [first, last] = module_index.equal_range(SpecializationHash(module.specialization));
+	for (auto found = first; found != last; ++found) {
+		if (found->second == &module) return true;
+	}
+	if (!logged_index_bug) {
+		logged_index_bug = true;
+		Log::WriteToConsoleAndLog(fmt::format(
+		    "[module-index] BUG stage={} hash=0x{:016x} path={}: a module of this program was not in "
+		    "the lookup index (lookups for it miss and request new builds); indexed now\n",
+		    ShaderRecompiler::StageName(module.info.stage), module.info.shader_hash, path));
+	}
+	IndexModule(module);
+	return false;
 }
 
 ShaderModule& PipelineCache::CompileModule(Program& program, const ProgramKey& key,
@@ -584,7 +668,16 @@ void PipelineCache::NoteBuild(BuildTiming::Build build) {
 
 ShaderModule& PipelineCache::AddModule(Program& program, const ProgramKey& key,
                                        CompiledStage compiled) {
-	auto& module = program.modules.emplace_back(std::move(compiled.module));
+#ifndef NDEBUG
+	// A build whose result equals a module the program has: the lookup missed it.
+	if (!program.modules.empty() && !program.logged_index_bug) {
+		const auto existing = program.FindCandidate(compiled.module.specialization, {});
+		if (existing != nullptr && existing->function_code == compiled.module.function_code) {
+			program.CheckIndexed(*existing, "build-duplicate");
+		}
+	}
+#endif
+	auto& module = program.Adopt(std::move(compiled.module));
 	m_compiled[static_cast<size_t>(key.stage)]++;
 	NoteModuleUse(module);
 	if (const auto legacy = program.legacy_of_specialization.find(SpecializationHash(module.specialization));
