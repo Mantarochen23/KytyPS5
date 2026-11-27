@@ -14283,6 +14283,10 @@ void TestIndirectFormattedStride16StoreShader() {
       0x00005204u,
   };
   auto options = MakeCompileOptions(ShaderType::Compute);
+  ShaderComputeInputInfo compute = *options.input_info.compute;
+  compute.thread_ids_num = 1u;
+  compute.threads_num[0] = 64u;
+  options.input_info.compute = &compute;
   options.user_data = user_data;
   const ShaderRecompiler::IR::SrtRuntime runtime{
       .user_data = user_data, .read_specialization_memory = ReadHostTestMemory};
@@ -14295,13 +14299,16 @@ void TestIndirectFormattedStride16StoreShader() {
     ShaderRecompiler::IR::ResourceSnapshot snapshot;
     ShaderRecompiler::IR::ResourceSpecialization specialization;
     std::string reason;
-    Check(!ShaderRecompiler::IR::MaterializeResources(plan, runtime, snapshot, specialization,
-                                                      &reason) &&
-              reason.find("format=k8UInt(5)") != std::string::npos &&
-              reason.find("stride=16") != std::string::npos &&
-              reason.find("nearest=") != std::string::npos &&
-              reason.find("first_diff=") != std::string::npos,
-          "stride-16 formatted indirect store shader did not fail cleanly with port disabled");
+    const bool ok = ShaderRecompiler::IR::MaterializeResources(plan, runtime, snapshot,
+                                                               specialization, &reason);
+    if (ok || reason.find("format=k8UInt(5)") == std::string::npos ||
+        reason.find("stride=16") == std::string::npos ||
+        reason.find("nearest=") == std::string::npos ||
+        reason.find("first_diff=") == std::string::npos) {
+      std::fprintf(stderr, "TestIndirectFormattedStride16StoreShader port-off: ok=%d reason=%s\n",
+                   ok, reason.c_str());
+      Check(false, "stride-16 formatted indirect store shader did not fail cleanly with port disabled");
+    }
   }
 
   // Port ON: full translate -> materialize -> SPIR-V emit -> Vulkan 1.3 spirv-val.
@@ -14317,6 +14324,10 @@ void TestFiniteBufferDescriptorShapesShader() {
                               std::span<const uint32_t> user_data,
                               size_t expected_candidates) {
     auto options = MakeCompileOptions(ShaderType::Compute);
+    ShaderComputeInputInfo compute = *options.input_info.compute;
+    compute.thread_ids_num = 1u;
+    compute.threads_num[0] = 64u;
+    options.input_info.compute = &compute;
     options.user_data = user_data;
 
     // Port OFF: must fail resource tracking with one-line self-explaining diagnostic.
@@ -14329,11 +14340,15 @@ void TestFiniteBufferDescriptorShapesShader() {
       failed = true;
       error = e.what();
     }
-    Check(failed && error.find("buffer descriptor is not a valid runtime value") != std::string::npos &&
-              error.find("bad_dword=") != std::string::npos &&
-              error.find("nearest=") != std::string::npos &&
-              error.find("first_diff=") != std::string::npos,
-          name);
+    if (!failed ||
+        error.find("buffer descriptor is not a valid runtime value") == std::string::npos ||
+        error.find("bad_dword=") == std::string::npos ||
+        error.find("nearest=") == std::string::npos ||
+        error.find("first_diff=") == std::string::npos) {
+      std::fprintf(stderr, "TestFiniteBufferDescriptorShapesShader(%s) port-off: failed=%d err=%s\n",
+                   name, failed, error.c_str());
+      Check(false, name);
+    }
 
     // Port ON: must track, materialize the expected candidate set, and emit valid Vulkan 1.3 SPIR-V.
     Config::SetDisabledPorts({});
@@ -14344,11 +14359,18 @@ void TestFiniteBufferDescriptorShapesShader() {
     const ShaderRecompiler::IR::SrtRuntime runtime{
         .user_data = user_data, .read_specialization_memory = ReadHostTestMemory};
     std::string mat_error;
-    Check(ShaderRecompiler::IR::MaterializeResources(plan, runtime, snapshot, specialization,
-                                                     &mat_error) &&
-              mat_error.empty(),
-          name);
-    Check(specialization.buffers.size() == expected_candidates, name);
+    if (!ShaderRecompiler::IR::MaterializeResources(plan, runtime, snapshot, specialization,
+                                                    &mat_error) ||
+        !mat_error.empty()) {
+      std::fprintf(stderr, "TestFiniteBufferDescriptorShapesShader(%s) mat failed: %s\n", name,
+                   mat_error.c_str());
+      Check(false, name);
+    }
+    if (specialization.buffers.size() != expected_candidates) {
+      std::fprintf(stderr, "TestFiniteBufferDescriptorShapesShader(%s): candidates=%zu expected=%zu\n",
+                   name, specialization.buffers.size(), expected_candidates);
+      Check(false, name);
+    }
     const auto compiled =
         ShaderRecompiler::CompileProgram(std::move(translated), options, specialization);
     spvtools::SpirvTools tools(SPV_ENV_VULKAN_1_3);
@@ -14520,6 +14542,10 @@ void TestFiniteBufferDescriptorShapesShader() {
   };
   Config::SetDisabledPorts({});
   auto options = MakeCompileOptions(ShaderType::Compute);
+  ShaderComputeInputInfo compute = *options.input_info.compute;
+  compute.thread_ids_num = 1u;
+  compute.threads_num[0] = 64u;
+  options.input_info.compute = &compute;
   options.user_data = user_data;
   bool non_finite_failed = false;
   std::string non_finite_error;
