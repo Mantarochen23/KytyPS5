@@ -168,6 +168,10 @@ enum class Counter : uint8_t {
 	CacheBumpClearMeta,
 	CacheBumpTouchMeta,
 	CacheBumpOther,
+	// Runtime-indexed buffer table activity: candidates are paid only on rebuild.
+	TableCandidates,
+	TableDispatches,
+	TableRebuilds,
 	Count
 };
 

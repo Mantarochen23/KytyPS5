@@ -38,6 +38,10 @@ struct ResourceSnapshot {
 		uint32_t                     root_resource = 0;
 		// Word index in flattened_srt holding [table_bda_lo, table_bda_hi, runtime_entry_count].
 		uint32_t                     header_word = 0;
+		// Address-free identity of the normalized candidates and their specialization classes.
+		// The renderer uses both halves, plus the module/root identity, as its persistent BDA-table key.
+		std::array<uint64_t, 2>      candidate_key {};
+		bool                         has_live_range = false;
 		std::vector<DescriptorValue> entries;
 		std::vector<uint32_t>        class_index;
 	};

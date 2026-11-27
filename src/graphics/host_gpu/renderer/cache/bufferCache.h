@@ -13,7 +13,9 @@
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
 
 #include <array>
+#include <atomic>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <span>
@@ -77,6 +79,29 @@ public:
 		uint64_t          guest_address = 0;
 	};
 
+	// Lifetime state shared by one persistent runtime-indexed buffer table. Candidate ranges are
+	// resolved once; only overlapping buffer recreation, map or unmap invalidates the BDA generation.
+	class RuntimeTableState final {
+	public:
+		explicit RuntimeTableState(RangeSet dependencies, RangeSet write_ranges)
+		    : m_dependencies(std::move(dependencies)), m_write_ranges(std::move(write_ranges)) {}
+
+		[[nodiscard]] uint64_t BackingGeneration() const noexcept {
+			return m_backing_generation.load(std::memory_order_relaxed);
+		}
+		bool InvalidateBacking(uint64_t address, uint64_t size) noexcept {
+			if (!m_dependencies.Intersects(address, size)) return false;
+			m_backing_generation.fetch_add(1, std::memory_order_relaxed);
+			return true;
+		}
+		[[nodiscard]] const RangeSet& WriteRanges() const noexcept { return m_write_ranges; }
+
+	private:
+		RangeSet             m_dependencies;
+		RangeSet             m_write_ranges;
+		std::atomic<uint64_t> m_backing_generation {1};
+	};
+
 	class BdaTableValidator {
 	public:
 		[[nodiscard]] std::optional<std::string> ValidateWrite(
@@ -110,7 +135,8 @@ public:
 	[[nodiscard]] std::pair<Buffer*, uint64_t> ObtainBuffer(uint64_t vaddr, uint64_t size,
 	                                                        bool     is_written,
 	                                                        bool     is_texel_buffer = false,
-	                                                        BufferId id              = {});
+	                                                        BufferId id              = {},
+	                                                        bool     allow_stream    = true);
 	[[nodiscard]] StreamBuffer&                GetUtilityBuffer(MemoryUsage usage) noexcept {
 		switch (usage) {
 			case MemoryUsage::Upload: return m_staging_buffer;
@@ -144,6 +170,12 @@ public:
 	// range was not written in between. Ranges over 64 pages count as untracked writes.
 	[[nodiscard]] uint64_t WriteStamp(uint64_t vaddr, uint64_t size) const;
 	void                   NoteUntrackedWrite() noexcept { m_untracked_write_stamp = ++m_write_clock; }
+	[[nodiscard]] std::shared_ptr<RuntimeTableState> RegisterRuntimeTable(
+	    RangeSet dependencies, RangeSet write_ranges);
+	// Called only for backing-lifetime changes, not ordinary guest writes.
+	void InvalidateRuntimeTables(uint64_t vaddr, uint64_t size);
+	// Marks the cached, mapped candidate-backing union once per dispatch, not once per candidate.
+	void MarkRuntimeTableWritten(const std::shared_ptr<RuntimeTableState>& state);
 	// Uploads the CPU-dirty bytes of the queued ranges `mapped` covers behind one barrier pair.
 	void SynchronizeBda(const RangeSet& mapped);
 	// Queue after the range's state change becomes visible, or a drain could consume it first.
@@ -216,6 +248,8 @@ private:
 	BufferMap                                         m_buffers;
 	PageTable                                         m_page_table;
 	RangeSet                                          m_gpu_modified_ranges;
+	std::vector<std::weak_ptr<RuntimeTableState>>     m_runtime_tables;
+	std::mutex                                        m_runtime_tables_mutex;
 	// Render-thread state; see WriteStamp.
 	MultiLevelPageTable<uint64_t, CACHING_PAGEBITS, 44, 20> m_write_stamps;
 	uint64_t                                          m_write_clock           = 1;

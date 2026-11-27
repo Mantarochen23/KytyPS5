@@ -3,6 +3,7 @@
 #include "graphics/host_gpu/faultStats.h"
 #include "graphics/host_gpu/memoryTracker.h"
 #include "graphics/host_gpu/rangeSet.h"
+#include "graphics/host_gpu/renderer/cache/bufferCache.h"
 
 #include <atomic>
 #include <chrono>
@@ -304,6 +305,22 @@ void TestRangeSet() {
             intersections[0].second == 0x1040 &&
             intersections[1].first == 0x1220 && intersections[1].second == 0x1240,
         "range set subtraction did not preserve both exact tails");
+}
+
+void TestRuntimeTableBackingGenerations() {
+  RangeSet candidates;
+  candidates.Add(0x10000, 0x1000);
+  candidates.Add(0x14000, 0x2000);
+  auto write_ranges = candidates;
+  Libs::Graphics::BufferCache::RuntimeTableState state(std::move(candidates),
+                                                        std::move(write_ranges));
+  uint32_t write_range_count = 0;
+  state.WriteRanges().ForEach([&](uint64_t, uint64_t) { ++write_range_count; });
+  Check(write_range_count == 2, "runtime table did not retain its cached write union");
+  Check(!state.InvalidateBacking(0x20000, 0x1000) && state.BackingGeneration() == 1,
+        "unrelated backing change invalidated a runtime table");
+  Check(state.InvalidateBacking(0x10800, 0x10) && state.BackingGeneration() == 2,
+        "candidate backing change did not invalidate the runtime table generation");
 }
 
 void TestGuestRange() {
@@ -1351,6 +1368,7 @@ int main(int argc, char **argv) {
   }
   TestGuestRange();
   TestRangeSet();
+  TestRuntimeTableBackingGenerations();
   TestQueriesDoNotRequireMappedOwnership();
   TestConcurrentRegionPublication();
   TestCpuDirtyUpload();

@@ -181,7 +181,20 @@ bool RenderContext::IsMapped(uint64_t vaddr, uint64_t size) const noexcept {
 	return m_mapped_ranges.Contains(vaddr, size);
 }
 
+RangeSet RenderContext::IntersectMappedRanges(const RangeSet& ranges) const {
+	RangeSet result;
+	std::shared_lock lock(m_mapped_ranges_mutex);
+	ranges.ForEach([&](uint64_t begin, uint64_t end) {
+		m_mapped_ranges.ForEachInRange(begin, end - begin, [&](uint64_t mapped_begin,
+		                                                        uint64_t mapped_end) {
+			result.Add(mapped_begin, mapped_end - mapped_begin);
+		});
+	});
+	return result;
+}
+
 void RenderContext::MapMemory(uint64_t vaddr, uint64_t size) {
+	m_buffer_cache.InvalidateRuntimeTables(vaddr, size);
 	std::lock_guard lock(m_mapped_ranges_mutex);
 	m_mapped_ranges.Add(vaddr, size);
 	m_buffer_cache.QueueBdaSync(vaddr, size);
@@ -206,6 +219,7 @@ void RenderContext::UnmapMemory(uint64_t vaddr, uint64_t size) {
 			m_command_scheduler.WaitPriorityOperations(tick);
 		}
 		m_read_watch.Written(vaddr, size);
+		m_buffer_cache.InvalidateRuntimeTables(vaddr, size);
 		m_buffer_cache.InvalidateMemory(vaddr, size);
 		m_texture_cache.UnmapMemory(vaddr, size);
 		m_image_heap.UnmapMemory(vaddr, size);
@@ -221,13 +235,14 @@ void RenderContext::UnmapMemory(uint64_t vaddr, uint64_t size) {
 	m_gpu->SendCommandSync(unmap);
 }
 
-void RenderContext::PrepareBda() {
+void RenderContext::PrepareBda(bool untracked_writes) {
 	[[maybe_unused]] static const bool logged = [] {
 		Log::WriteToConsoleAndLog("GPU: using buffer device address (BDA) shader memory access.\n");
 		return true;
 	}();
-	// A shader that stores through device addresses may write any range.
-	m_buffer_cache.NoteUntrackedWrite();
+	// DMA/device-address shaders can write any range. Runtime buffer tables pass false because
+	// their exact cached candidate union is stamped by RebindBuffers.
+	if (untracked_writes) m_buffer_cache.NoteUntrackedWrite();
 	std::shared_lock lock(m_mapped_ranges_mutex);
 	m_buffer_cache.SynchronizeBda(m_mapped_ranges);
 	m_fault_process_pending = true;

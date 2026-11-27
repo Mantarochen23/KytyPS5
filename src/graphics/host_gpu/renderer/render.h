@@ -246,6 +246,8 @@ private:
 	// The current draw's targets; PrepareDrawRenderState resolves them again for each draw.
 	DrawTargets                           m_targets;
 	PreparedBindings                     m_compute_bindings;
+	std::vector<RuntimeBufferTableCacheEntry> m_runtime_buffer_tables;
+	uint64_t                                  m_runtime_buffer_table_tick = 0;
 	std::vector<ImageId>                  m_bound_images;
 	std::vector<vk::DescriptorImageInfo>  m_descriptor_images;
 	std::vector<vk::WriteDescriptorSet>   m_descriptor_writes;

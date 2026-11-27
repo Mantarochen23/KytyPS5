@@ -317,6 +317,7 @@ ReportLines FormatWindow(const std::array<uint64_t, CounterCount>& delta, double
 	    "[frame] cuts breadcrumb_ops={:.2f} gpu_invalidate={:.2f} gpu_invalidate_skipped={:.2f} "
 	    "gpu_invalidate_gen_bumps={:.2f} guard_gpu={:.2f} guard_cpu={:.2f} guard_skipped={:.2f} "
 	    "prefetch_scans={:.2f} prefetch_skipped={:.2f} pump={:.2f} pump_skipped={:.2f} "
+	    "table_candidates={:.2f} table_dispatches={:.2f} table_rebuilds={:.2f} "
 	    "timer_sample={} prefetch_backoff={}\n",
 	    Mean(delta, Counter::BreadcrumbOps, frames),
 	    Mean(delta, Counter::GpuInvalidateCalls, frames),
@@ -325,7 +326,9 @@ ReportLines FormatWindow(const std::array<uint64_t, CounterCount>& delta, double
 	    Mean(delta, Counter::GuardGpuRuns, frames), Mean(delta, Counter::GuardCpuChecks, frames),
 	    Mean(delta, Counter::GuardSkipped, frames), Mean(delta, Counter::PrefetchScans, frames),
 	    Mean(delta, Counter::PrefetchSkipped, frames), Mean(delta, Counter::PumpAsyncCalls, frames),
-	    Mean(delta, Counter::PumpAsyncSkipped, frames), Config::FrameTimerSample(),
+	    Mean(delta, Counter::PumpAsyncSkipped, frames), Mean(delta, Counter::TableCandidates, frames),
+	    Mean(delta, Counter::TableDispatches, frames), Mean(delta, Counter::TableRebuilds, frames),
+	    Config::FrameTimerSample(),
 	    Config::PrefetchBackoffExponent());
 	const auto total = [&](Counter counter) { return delta[static_cast<size_t>(counter)]; };
 	lines.heap = fmt::format(

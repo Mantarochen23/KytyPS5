@@ -7825,6 +7825,112 @@ public:
     std::printf("[gpu]     %-32s ok\n", name);
   }
 
+  void CheckRuntimeBufferTableCache() {
+    constexpr const char *name = "RuntimeBufferTableCache";
+    constexpr auto page = BufferCache::CACHING_PAGESIZE;
+    EnsureRuntimeContext();
+    int64_t direct = -1;
+    void *mapped = nullptr;
+    Require(name, "allocation",
+            LibKernel::Memory::KernelAllocateDirectMemory(
+                0, LibKernel::Memory::KernelGetDirectMemorySize(), 3 * page, page, 0,
+                &direct) == 0 &&
+                LibKernel::Memory::KernelMapDirectMemory(&mapped, 3 * page, 0x3, 0, direct,
+                                                         page) == 0,
+            "guest allocation failed");
+    const auto base = reinterpret_cast<uint64_t>(mapped);
+
+    RenderContext context(m_runtime_context);
+    auto &scheduler = context.GetCommandScheduler();
+    auto &cache = context.GetBufferCache();
+    auto &executor = context.GetRenderExecutor();
+    HW::Context registers{};
+    HW::UserConfig user_config{};
+    HW::Shader shaders{};
+    scheduler.Begin(registers, user_config, shaders);
+    context.InitializeGpu(nullptr);
+    context.MapMemory(base, page);
+    context.MapMemory(base + 2 * page, page);
+
+    ShaderModule module;
+    module.id = 1;
+    module.info.stage = ShaderType::Compute;
+    module.info.info.buffers.push_back({.read = true, .written = true, .live = true});
+    module.info.bindings.descriptor_counts[static_cast<size_t>(
+        ShaderRecompiler::IR::DescriptorBindingKind::FlattenedSrt)] = 1;
+    ShaderRecompiler::IR::ResourceSnapshot snapshot;
+    snapshot.flattened_srt.resize(3);
+    auto &table = snapshot.indirect_buffer_tables.emplace_back();
+    table.root_resource = 0;
+    table.candidate_key = {1, 2};
+    table.has_live_range = true;
+    for (const auto address : {base, base + 2 * page}) {
+      ShaderBufferResource descriptor{};
+      descriptor.UpdateAddress48(address);
+      descriptor.fields[1] |= 4u << 16u;
+      descriptor.fields[2] = page / 4u;
+      auto &value = table.entries.emplace_back();
+      value.dword_count = 4;
+      std::copy_n(descriptor.fields, 4, value.dwords.begin());
+      table.class_index.push_back(1);
+    }
+    ShaderStageRuntime runtime{&module, &snapshot};
+    PreparedBindings bindings;
+    executor.PrepareBindings(runtime, bindings);
+    std::array<PreparedBindings *, 1> stages{&bindings};
+
+    executor.FindBuffers(stages);
+    Require(name, "first table", bindings.indirect_tables.size() == 1,
+            "the runtime-indexed table was not bound");
+    const auto first_bda = bindings.indirect_tables[0].table_bda;
+    const auto first_state = bindings.indirect_tables[0].state;
+    const auto first_generation = first_state->BackingGeneration();
+    executor.FindBuffers(stages);
+    Require(name, "cache hit",
+            bindings.indirect_tables[0].table_bda == first_bda &&
+                bindings.indirect_tables[0].state == first_state &&
+                first_state->BackingGeneration() == first_generation,
+            "unchanged candidates rebuilt or re-registered their persistent table");
+
+    // Replacing either candidate's backing invalidates the cached BDA table once; the next bind
+    // rebuilds it against the merged owner and then becomes stable again.
+    (void)cache.FindBuffer(base, 3 * page);
+    Require(name, "backing invalidation",
+            first_state->BackingGeneration() > first_generation,
+            "candidate backing replacement did not invalidate the table");
+    executor.FindBuffers(stages);
+    const auto rebuilt_bda = bindings.indirect_tables[0].table_bda;
+    const auto rebuilt_state = bindings.indirect_tables[0].state;
+    Require(name, "rebuild",
+            rebuilt_bda != first_bda && rebuilt_state != first_state,
+            "an invalid table was reused after candidate backing replacement");
+    executor.FindBuffers(stages);
+    Require(name, "stable rebuild",
+            bindings.indirect_tables[0].table_bda == rebuilt_bda &&
+                bindings.indirect_tables[0].state == rebuilt_state,
+            "the rebuilt table did not become persistent");
+
+    const auto low_stamp = cache.WriteStamp(base, page);
+    const auto high_stamp = cache.WriteStamp(base + 2 * page, page);
+    executor.RebindBuffers(bindings);
+    Require(name, "cached write union",
+            cache.IsRegionGpuModified(base, page) &&
+                !cache.IsRegionGpuModified(base + page, page) &&
+                cache.IsRegionGpuModified(base + 2 * page, page) &&
+                cache.WriteStamp(base, page) > low_stamp &&
+                cache.WriteStamp(base + 2 * page, page) > high_stamp,
+            "a writable table did not preserve GPU ownership and write stamps for later reads");
+
+    context.UnmapMemory(base, page);
+    context.UnmapMemory(base + 2 * page, page);
+    scheduler.Finish();
+    Require(name, "release",
+            LibKernel::Memory::KernelMunmap(base, 3 * page) == 0 &&
+                LibKernel::Memory::KernelReleaseDirectMemory(direct, 3 * page) == 0,
+            "guest allocation release failed");
+    std::printf("[gpu]     %-32s ok\n", name);
+  }
+
   void CheckBdaPageTableUploads() {
     constexpr const char *name = "BdaPageTableUploads";
     constexpr uintptr_t base = 0x0000000207b00000ull;
@@ -60384,6 +60490,11 @@ int main(int argc, char **argv) {
     vulkan.CheckBdaSyncUploads();
     vulkan.CheckFaultBufferScan();
     vulkan.CheckFaultRecordsOverflow();
+    return 0;
+  }
+  if (argc == 2 && std::strcmp(argv[1], "--runtime-table-cache-only") == 0) {
+    VulkanHarness vulkan;
+    vulkan.CheckRuntimeBufferTableCache();
     return 0;
   }
   if (argc == 2 && std::strcmp(argv[1], "--buffer-cache-range-only") == 0) {
