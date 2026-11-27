@@ -1850,7 +1850,7 @@ struct Heap final : ImageHeapSource {
 };
 
 // Buffer 0 from a table of V#s (user data 0..3), image 0 from a resident heap (user data 4..7).
-ResourcePlan TablePlan() {
+ResourcePlan TablePlan(bool indexed_buffer = false, bool formatted_buffer = false) {
   Program program;
   program.stage = Libs::Graphics::ShaderType::Compute;
   program.srt_plan_complete = true;
@@ -1870,11 +1870,14 @@ ResourcePlan TablePlan() {
     indirect.indirect_descriptor = DescriptorSource::IndirectDescriptor{
         .table_source = first == 0u ? 0u : 2u,
         .table_stride = image ? 32u : 16u,
-        .table_record_bytes = image ? 32u : 16u};
+        .table_record_bytes = image ? 32u : 16u,
+        .indexed = !image && indexed_buffer};
     program.descriptor_sources.push_back(indirect);
   }
   BufferResource buffer;
   buffer.source = 1u;
+  buffer.formatted = formatted_buffer;
+  buffer.read = true;
   program.info.buffers.push_back(buffer);
   ImageResource image;
   image.source = 3u;
@@ -1953,8 +1956,8 @@ void TestCanonicalSpecializationAcrossBoots() {
 
 void TestIndirectBufferCandidateBound() {
   Config::SetDisabledPorts({});
-  const auto plan = TablePlan();
-  const auto run_rows = [&](uint32_t row_count, uint32_t distinct_count, uint32_t distinct_strides,
+  const auto plan = TablePlan(/*indexed_buffer=*/true, /*formatted_buffer=*/true);
+  const auto run_rows = [&](uint32_t row_count, uint32_t distinct_count, uint32_t distinct_classes,
                             std::string *error, ResourceSnapshot *out_snapshot,
                             ResourceSpecialization *out_spec) -> bool {
     Memory memory;
@@ -1962,10 +1965,13 @@ void TestIndirectBufferCandidateBound() {
     const uint64_t table = base + 0x10000u;
     for (uint32_t row = 0; row < row_count; ++row) {
       const uint32_t id     = row % distinct_count;
-      const uint32_t stride = 16u + (id % distinct_strides) * 4u;
-      memory.Write(table + static_cast<uint64_t>(row) * 16u,
-                   Buffer(base + 0x1000000ull + static_cast<uint64_t>(id) * 0x1000u, stride, 64u,
-                          BufferFormat::k32UInt));
+      const uint32_t cls    = id % distinct_classes;
+      const uint32_t stride = 4u + (cls % 1024u) * 4u;
+      auto           desc   = Buffer(base + 0x1000000ull + static_cast<uint64_t>(id) * 0x1000u,
+                                     stride, 64u, BufferFormat::k32UInt);
+      const uint32_t sel_w  = (cls / 1024u) < 4u ? (4u + (cls / 1024u)) : ((cls / 1024u) - 4u);
+      desc.dwords[3] = (desc.dwords[3] & ~0xfffu) | Libs::Graphics::DstSel(4, 5, 6, sel_w);
+      memory.Write(table + static_cast<uint64_t>(row) * 16u, desc);
     }
     Heap heap;
     heap.slots      = base + 0xdead0000u;
@@ -2037,6 +2043,14 @@ void TestIndirectBufferCandidateBound() {
 }
 
 } // namespace canonical_boots
+
+#include "common/frameCost.h"
+namespace Common::FrameCost {
+void Add(Counter, uint64_t) noexcept {}
+ScopedTimer::ScopedTimer(Counter duration) noexcept : m_duration(duration) {}
+ScopedTimer::~ScopedTimer() = default;
+void ScopedTimer::Stop() noexcept {}
+} // namespace Common::FrameCost
 
 namespace Common {
 
