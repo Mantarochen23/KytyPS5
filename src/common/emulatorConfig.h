@@ -182,6 +182,9 @@ struct ConfigOptions {
 	// --mem-limit-gb: when the process's RSS + swap passes this, caches are dropped and the memory
 	// table printed; still over 10 s later, the run stops with a message. 0 = off.
 	uint32_t                 mem_limit_gb               = 0;
+	// Set when --loop-guard (or KYTY_LOOP_GUARD) was given, so that an explicit 0 turns off the
+	// default compute-shader loop guard.
+	bool                     loop_guard_explicit        = false;
 };
 
 void Load(const ConfigOptions& cfg);
@@ -283,6 +286,10 @@ bool     BufferProbeShader(uint64_t hash);
 bool     BufferProbeEnabled();
 const std::vector<uint64_t>& BufferProbeHashes();
 uint32_t LoopGuardLimit();
+// Loop exits one invocation of a compute shader may evaluate before every loop is left: the value
+// of --loop-guard when given, else DefaultComputeLoopGuardLimit.
+inline constexpr uint32_t DefaultComputeLoopGuardLimit = 1u << 20u;
+uint32_t ComputeLoopGuardLimit();
 bool ShaderKeyIndexEnabled();
 uint32_t AsyncPumpBudgetMs();
 uint32_t AsyncWorkers();

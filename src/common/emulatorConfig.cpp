@@ -71,6 +71,7 @@ void Load(const ConfigOptions& cfg) {
 			EXIT("invalid KYTY_LOOP_GUARD value: %s\n", env_guard);
 		}
 		g_config->loop_guard_limit = static_cast<uint32_t>(std::min<unsigned long long>(limit, MaxLoopGuardLimit));
+		g_config->loop_guard_explicit = true;
 	}
 	g_config->loop_guard_limit = std::min<uint32_t>(g_config->loop_guard_limit, MaxLoopGuardLimit);
 	SetDisabledPorts(g_config->disabled_ports);
@@ -488,6 +489,11 @@ bool BufferProbeEnabled() {
 
 uint32_t LoopGuardLimit() {
 	return g_config != nullptr ? g_config->loop_guard_limit : 0u;
+}
+
+uint32_t ComputeLoopGuardLimit() {
+	if (g_config == nullptr) return 0u;
+	return g_config->loop_guard_explicit ? g_config->loop_guard_limit : DefaultComputeLoopGuardLimit;
 }
 
 uint32_t HangDumpWaitSeconds() {

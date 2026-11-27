@@ -38,9 +38,10 @@ RenderContext::RenderContext(GraphicContext& graphics, const std::filesystem::pa
 		}
 		Log::WriteToConsoleAndLog(("[buffer-probe] enabled hashes=" + hashes + "\n").c_str());
 	}
-	if (Config::LoopGuardLimit() != 0) {
-		char text[96];
-		std::snprintf(text, sizeof(text), "[loop-guard] enabled limit=%u\n", Config::LoopGuardLimit());
+	if (Config::LoopGuardLimit() != 0 || Config::ComputeLoopGuardLimit() != 0) {
+		char text[128];
+		std::snprintf(text, sizeof(text), "[loop-guard] enabled limit=%u compute-limit=%u\n",
+		              Config::LoopGuardLimit(), Config::ComputeLoopGuardLimit());
 		Log::WriteToConsoleAndLog(text);
 	}
 	if (graphics.ray_query_enabled) {

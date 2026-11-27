@@ -23,8 +23,12 @@ template <class Profile, class Visit> void VisitShaderStoreProfile(const Profile
 }
 
 // File-name part that separates stores whose SPIR-V differs by a debug option. Empty = default.
-[[nodiscard]] inline std::string ShaderStoreSuffix(uint32_t loop_guard_limit) {
-	return loop_guard_limit == 0 ? std::string {} : ".guard" + std::to_string(loop_guard_limit);
+// A limit for every stage selects ".guard<n>"; only the default compute-shader limit ".guardc<n>".
+[[nodiscard]] inline std::string ShaderStoreSuffix(uint32_t loop_guard_limit,
+                                                   uint32_t compute_loop_guard_limit = 0) {
+	if (loop_guard_limit != 0) return ".guard" + std::to_string(loop_guard_limit);
+	return compute_loop_guard_limit == 0 ? std::string {}
+	                                     : ".guardc" + std::to_string(compute_loop_guard_limit);
 }
 
 } // namespace Libs::Graphics

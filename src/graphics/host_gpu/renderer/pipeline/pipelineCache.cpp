@@ -280,7 +280,8 @@ ShaderRecompiler::Spirv::Profile SpirvProfile(const GraphicContext& graphics) {
 	        .relaxed_float          = Config::RelaxedShaderFloatEnabled(),
 	        .ray_query                       = graphics.ray_query_enabled,
 	        .loop_guard_limit                = Config::LoopGuardLimit(),
-	        .fragment_shader_pixel_interlock = graphics.fragment_shader_pixel_interlock_enabled};
+	        .fragment_shader_pixel_interlock = graphics.fragment_shader_pixel_interlock_enabled,
+	        .loop_guard_compute_limit        = Config::ComputeLoopGuardLimit()};
 }
 
 std::filesystem::path ShaderStorePath() {
@@ -298,7 +299,7 @@ std::filesystem::path ShaderStorePath() {
 	const auto ports = Config::ShaderPortMask();
 	return std::filesystem::path("_PipelineCache") /
 	       (title_id + (ports != 0 ? fmt::format(".ports{:x}", ports) : std::string {}) +
-	        ShaderStoreSuffix(Config::LoopGuardLimit()) + ".shaders");
+	        ShaderStoreSuffix(Config::LoopGuardLimit(), Config::ComputeLoopGuardLimit()) + ".shaders");
 }
 
 bool GraphicsPipelineKey::operator==(const GraphicsPipelineKey& other) const {

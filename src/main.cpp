@@ -134,9 +134,10 @@ static void PrintUsage() {
 	::printf("  --buffer-probe <hashes>              Debug: before each dispatch of a listed shader, compare the guest\n"
 	         "                                       memory of every bound buffer with the host copy the GPU reads\n"
 	         "                                       and log the differences. Also reads KYTY_BUFFER_PROBE.\n");
-	::printf("  --loop-guard <n>                     Debug: after n evaluated loop exits an invocation leaves all\n"
-	         "                                       its loops and the shader hash and loop are logged. 0 = off\n"
-	         "                                       (default). Also reads KYTY_LOOP_GUARD.\n");
+	::printf("  --loop-guard <n>                     After n evaluated loop exits an invocation leaves all its\n"
+	         "                                       loops and the shader hash and loop are logged. Given, it\n"
+	         "                                       applies to every shader; 0 = off. Default: compute shaders\n"
+	         "                                       only, n = 1048576. Also reads KYTY_LOOP_GUARD.\n");
 	::printf("  --disable-port <names>               Turn off ported fixes (comma-separated names, or all):\n");
 	for (const auto& port: Config::PORTS) {
 		::printf("                                         %s (%s)\n", port.name, port.source);
@@ -591,6 +592,7 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				::printf("invalid loop guard limit: %s\n", value.c_str());
 				return false;
 			}
+			options.config.loop_guard_explicit = true;
 		} else if (arg == "--disable-port") {
 			if (!Config::ParseDisabledPorts(value, options.config.disabled_ports)) {
 				::printf("unknown port in --disable-port: %s\n", value.c_str());

@@ -29,6 +29,9 @@ struct Profile {
 	uint32_t loop_guard_limit = 0;
 	// VK_EXT_fragment_shader_interlock pixel interlock for emulated 8-bit image atomics in pixel shaders.
 	bool fragment_shader_pixel_interlock = false;
+	// Loop guard limit for compute shaders (the same meaning as loop_guard_limit); a compute shader
+	// uses this, every other stage uses loop_guard_limit.
+	uint32_t loop_guard_compute_limit = 0;
 };
 
 inline constexpr Profile DefaultProfile {};
