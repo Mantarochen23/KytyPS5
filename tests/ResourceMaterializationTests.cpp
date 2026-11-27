@@ -1,3 +1,4 @@
+#include "common/ports.h"
 #include "graphics/shader/recompiler/ir/Serialize.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
@@ -1563,6 +1564,131 @@ void TestIndirectFormattedUInt8RawBoundsBuffer() {
         "zero-stride OOB_SELECT=3 indexed indirect buffer was accepted");
 }
 
+void TestIndirectFormattedStridedAndGeneralStores() {
+  using namespace Libs::Graphics::ShaderRecompiler::IR;
+  using F = Libs::Graphics::Prospero::BufferFormat;
+  using Libs::Graphics::DstSel;
+
+  constexpr uint64_t TableBase = 0x10046f9fb0ull;
+  constexpr uint32_t TableRecords = 16u;
+
+  Program program;
+  program.stage = Libs::Graphics::ShaderType::Compute;
+  program.srt_plan_complete = program.resource_tracking_complete = true;
+  AddValueBlock(program);
+
+  // 16-byte-stride scalar descriptor table matching the evidence table V# format (0x00005204).
+  DescriptorSource table;
+  table.dword_count = 4u;
+  table.dwords = {
+      Value(static_cast<uint32_t>(TableBase)),
+      Value(static_cast<uint32_t>(TableBase >> 32u) | (16u << 16u)),
+      Value(TableRecords),
+      Value(0x00005204u),
+  };
+  program.descriptor_sources.push_back(table);
+
+  DescriptorSource indirect;
+  indirect.dword_count = 4u;
+  indirect.dwords.fill(Value(0u));
+  indirect.indirect_descriptor = DescriptorSource::IndirectDescriptor{
+      .table_maximum = TableRecords - 1u,
+      .table_source = 0u,
+      .table_stride = 16u,
+      .table_scalar = true,
+      .indexed = true,
+  };
+  program.descriptor_sources.push_back(indirect);
+  program.info.buffers.push_back({
+      .source = 1u,
+      .max_byte_extent = 16u,
+      .read = false,
+      .written = true,
+      .formatted = true,
+  });
+
+  const auto plan = Extract(program);
+
+  const auto make_desc = [](uint64_t base, uint32_t stride, uint32_t records, F fmt,
+                            uint32_t swizzle) {
+    return std::array<uint32_t, 4>{
+        static_cast<uint32_t>(base),
+        static_cast<uint32_t>((base >> 32u) & 0xffffu) | (stride << 16u),
+        records,
+        swizzle | (static_cast<uint32_t>(fmt) << 12u),
+    };
+  };
+
+  struct TableData {
+    std::array<std::array<uint32_t, 4>, TableRecords> rows{};
+  } data;
+  data.rows[0] = make_desc(0x1004700000ull, 16u, 196608u, F::k8UInt, DstSel(4, 0, 0, 1));
+  data.rows[1] = make_desc(0x1004800000ull, 16u, 4096u, F::k32Float, DstSel(4, 0, 0, 1));
+  data.rows[2] = make_desc(0x1004900000ull, 16u, 4096u, F::k8_8_8_8UNorm, DstSel(4, 5, 6, 7));
+  data.rows[3] = make_desc(0x1004a00000ull, 16u, 4096u, F::k10_10_10_2UNorm, DstSel(4, 5, 6, 7));
+  data.rows[4] = make_desc(0x1004b00000ull, 16u, 4096u, F::k32_32_32_32Float, DstSel(4, 5, 6, 7));
+
+  const auto read_table = +[](void *userdata, uint64_t address, std::span<uint32_t> words) {
+    const auto &t = *static_cast<const TableData *>(userdata);
+    if (address < TableBase) return false;
+    const uint64_t rel = address - TableBase;
+    if (rel + words.size_bytes() > uint64_t{TableRecords} * 16u) return false;
+    const auto *src = reinterpret_cast<const uint32_t *>(t.rows.data());
+    std::copy_n(src + rel / 4u, words.size(), words.begin());
+    return true;
+  };
+
+  const SrtRuntime runtime{.userdata = &data, .read_specialization_memory = read_table};
+  ResourceSnapshot snapshot;
+  ResourceSpecialization specialization;
+  std::string failure_reason;
+
+  // Port OFF: must fail with legacy message plus self-explaining decoded diagnostic.
+  Config::SetDisabledPorts({"indirect-formatted-stores"});
+  Check(!MaterializeResources(plan, runtime, snapshot, specialization, &failure_reason),
+        "strided formatted indirect store was accepted with port disabled");
+  Check(failure_reason.find("indirect formatted stores require tight identity") != std::string::npos &&
+            failure_reason.find("format=k8UInt(5)") != std::string::npos &&
+            failure_reason.find("stride=16") != std::string::npos &&
+            failure_reason.find("records=196608") != std::string::npos &&
+            failure_reason.find("nearest=") != std::string::npos &&
+            failure_reason.find("first_diff=") != std::string::npos,
+        "port-off formatted store refusal missing decoded format/stride/records/nearest/first_diff");
+
+  // Port ON: all five stride-16 formatted store candidates must materialize cleanly.
+  Config::SetDisabledPorts({});
+  Check(MaterializeResources(plan, runtime, snapshot, specialization, &failure_reason) &&
+            failure_reason.empty(),
+        "general strided formatted indirect store failed materialization with port enabled");
+  Check(specialization.buffers.size() == 6u &&
+            specialization.buffers[1].descriptor_format == F::k8UInt &&
+            specialization.buffers[1].packed_stride == 16u &&
+            specialization.buffers[2].descriptor_format == F::k32Float &&
+            specialization.buffers[3].descriptor_format == F::k8_8_8_8UNorm &&
+            specialization.buffers[4].descriptor_format == F::k10_10_10_2UNorm &&
+            specialization.buffers[5].descriptor_format == F::k32_32_32_32Float,
+        "materialized indirect formatted store candidates lost format or stride");
+
+  // Non-identity active swizzle (BGRA) must still fail with a one-line decoded diagnostic.
+  data.rows[2] = make_desc(0x1004900000ull, 16u, 4096u, F::k8_8_8_8UNorm, DstSel(6, 5, 4, 7));
+  Check(!MaterializeResources(plan, runtime, snapshot, specialization, &failure_reason) &&
+            failure_reason.find("format=k8_8_8_8UNorm(56)") != std::string::npos &&
+            failure_reason.find("stride=16") != std::string::npos &&
+            failure_reason.find("records=4096") != std::string::npos &&
+            failure_reason.find("nearest=") != std::string::npos &&
+            failure_reason.find("first_diff=dst_sel(") != std::string::npos,
+        "non-identity active swizzle on formatted indirect store was accepted or lacked diagnostic");
+
+  // Misaligned stride for a 32-bit format must still fail with decoded diagnostic.
+  data.rows[2] = make_desc(0x1004900000ull, 6u, 4096u, F::k32Float, DstSel(4, 0, 0, 1));
+  Check(!MaterializeResources(plan, runtime, snapshot, specialization, &failure_reason) &&
+            failure_reason.find("indirect formatted buffers require aligned full-format records") !=
+                std::string::npos &&
+            failure_reason.find("format=k32Float(22)") != std::string::npos &&
+            failure_reason.find("first_diff=stride_align(") != std::string::npos,
+        "misaligned stride on formatted indirect store was accepted or lacked diagnostic");
+}
+
 void TestAtomicImageUint8Format() {
   using namespace Libs::Graphics::ShaderRecompiler::IR;
   using F = Libs::Graphics::Prospero::BufferFormat;
@@ -1863,6 +1989,7 @@ int main(int argc, char **argv) {
   for (const bool atomic64 : {false, true}) TestUnreachedImageIgnoresSharedDescriptor(atomic64);
   for (const bool mixed : {false, true}) TestIndirectImageSamplerClasses(mixed);
   TestIndirectFormattedUInt8RawBoundsBuffer();
+  TestIndirectFormattedStridedAndGeneralStores();
   TestAtomicImageUint8Format();
   TestShaderCacheRecords();
   if (!(argc > 1 && std::string_view(argv[1]) == "--old-layout"))

@@ -437,8 +437,10 @@ uint32_t LoadWordPrepared(ValueEmitContext& ctx, const IR::Inst& inst, const IR:
 
 uint32_t LoadWord(ValueEmitContext& ctx, const IR::Inst& inst, IR::MemoryInfo mem) {
 	return EmitValueOrZeroIfCondition(ctx.state, ctx.Arg(inst, inst.NumArgs() - 1), [&]() {
-		const auto resource = PrepareMemoryResourceAccess(ctx.state, mem);
-		return LoadWordPrepared(ctx, inst, mem, resource);
+		return EmitBufferAccess(ctx, inst, mem, 1u, [&](const auto& selected, const auto& resource) {
+			if (resource.object_pointer == 0u) return ConstantU32(ctx.state, 0u);
+			return LoadWordPrepared(ctx, inst, selected, resource);
+		});
 	});
 }
 
@@ -488,8 +490,10 @@ uint32_t LoadSubwordInBounds(ValueEmitContext& ctx, const MemoryResourceAccess& 
 uint32_t LoadSubword(ValueEmitContext& ctx, const IR::Inst& inst, IR::MemoryInfo mem,
                      uint32_t bits) {
 	return EmitValueOrZeroIfCondition(ctx.state, ctx.Arg(inst, inst.NumArgs() - 1), [&]() {
-		const auto resource = PrepareMemoryResourceAccess(ctx.state, mem);
-		return LoadSubwordPrepared(ctx, inst, mem, resource, bits);
+		return EmitBufferAccess(ctx, inst, mem, 1u, [&](const auto& selected, const auto& resource) {
+			if (resource.object_pointer == 0u) return ConstantU32(ctx.state, 0u);
+			return LoadSubwordPrepared(ctx, inst, selected, resource, bits);
+		});
 	});
 }
 
@@ -1585,22 +1589,37 @@ uint32_t EmitAtomic32(ValueEmitContext& ctx, const IR::Inst& inst) {
 uint32_t EmitBufferAtomic64(ValueEmitContext& ctx, const IR::Inst& inst) {
 	const auto& mem   = ctx.Memory(inst);
 	auto&       state = ctx.state;
+	const auto emit_one = [&](IR::MemoryInfo selected) {
+		const auto resource =
+		    PrepareStorageBufferResourceAccess(state, selected, state.storage_buffers[3]);
+		const auto byte_address = ByteAddress(ctx, inst, selected);
+		const auto index = Binary(state, spv::OpShiftRightLogical, TypeU32(state), byte_address,
+		                          ConstantU32(state, 3u));
+		return EmitValueOrDefaultIfCondition(
+		    state, EmitMemoryElementInBounds(state, resource, index), TypeU64(state),
+		    ConstantU64(state, 0), [&]() {
+			    const auto pointer = EmitStorageBufferElementPointer(
+			        state, resource, index, TypeStorageBufferElementPointer(state, 64));
+			    const auto old = EmitAtomicOperation(ctx, inst, pointer, spv::ScopeDevice);
+			    EmitAtomicMemoryBarrier(state, selected.kind);
+			    return old;
+		    });
+	};
 	return EmitValueOrDefaultIfCondition(
 	    state, ctx.Arg(inst, inst.NumArgs() - 1), TypeU64(state), ConstantU64(state, 0), [&]() {
-		    const auto resource =
-		        PrepareStorageBufferResourceAccess(state, mem, state.storage_buffers[3]);
-		    const auto byte_address = ByteAddress(ctx, inst, mem);
-		    const auto index = Binary(state, spv::OpShiftRightLogical, TypeU32(state), byte_address,
-		                              ConstantU32(state, 3u));
-		    return EmitValueOrDefaultIfCondition(
-		        state, EmitMemoryElementInBounds(state, resource, index), TypeU64(state),
-		        ConstantU64(state, 0), [&]() {
-			        const auto pointer = EmitStorageBufferElementPointer(
-			            state, resource, index, TypeStorageBufferElementPointer(state, 64));
-			        const auto old = EmitAtomicOperation(ctx, inst, pointer, spv::ScopeDevice);
-			        EmitAtomicMemoryBarrier(state, mem.kind);
-			        return old;
-		        });
+		    if (mem.kind == IR::ResourceKind::Buffer &&
+		        state.program.info.buffers[mem.resource].indirect_root == mem.resource) {
+			    const auto& buffer = state.program.info.buffers[mem.resource];
+			    const auto& handle = *inst.Arg(0).ResolveInstruction();
+			    const auto  selected = ctx.Arg(handle, 0);
+			    return EmitIndexSwitch(state, selected, buffer.indirect_resources.size(),
+			                           TypeU64(state), [&](uint32_t item) {
+				                           auto candidate = mem;
+				                           candidate.resource = buffer.indirect_resources[item];
+				                           return emit_one(candidate);
+			                           });
+		    }
+		    return emit_one(mem);
 	    });
 }
 

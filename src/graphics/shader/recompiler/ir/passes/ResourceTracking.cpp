@@ -16,6 +16,7 @@
 #include <cstdlib>
 #include <fmt/format.h>
 #include <fmt/ranges.h>
+#include <list>
 #include <map>
 #include <memory>
 #include <numeric>
@@ -3333,7 +3334,9 @@ private:
 		const bool atomic = Config::PortEnabled(Config::Port::GpuSelectedWrites) &&
 		                    (opcode == ValueOpcode::BufferAtomicIAdd32 ||
 		                     opcode == ValueOpcode::BufferAtomicOr32);
+		const bool general_formatted_store = Config::PortEnabled(Config::Port::IndirectFormattedStores);
 		if (!atomic && opcode != ValueOpcode::StoreBufferU32 && opcode != ValueOpcode::StoreBufferU32x2 &&
+		    !(general_formatted_store && opcode == ValueOpcode::StoreBufferU32x3) &&
 		    opcode != ValueOpcode::StoreBufferU8 &&
 		    opcode != ValueOpcode::StoreBufferU32x4 && opcode != ValueOpcode::LoadBufferU32x2 &&
 		    opcode != ValueOpcode::LoadBufferU32x3 && opcode != ValueOpcode::LoadBufferU32x4) return false;
@@ -3348,14 +3351,24 @@ private:
 		// Atomics follow the raw indexed DWORD store: the selected candidate receives the update.
 		if (atomic) return memory.idxen && !memory.formatted;
 		if (opcode == ValueOpcode::StoreBufferU32)
-			return !memory.formatted || (memory.idxen && memory.data_bits == 32u && memory.data_dwords == 1u);
+			return !memory.formatted ||
+			       (memory.idxen && memory.data_dwords == 1u &&
+			        (memory.data_bits == 32u || (general_formatted_store && memory.data_bits == 16u)));
 		if (!memory.idxen) return false;
 		if (opcode == ValueOpcode::StoreBufferU8)
 			return !memory.formatted && memory.data_bits == 8u;
 		const auto components = BufferComponentCount(opcode);
-		if (opcode == ValueOpcode::StoreBufferU32x2 || opcode == ValueOpcode::StoreBufferU32x4)
+		if (opcode == ValueOpcode::StoreBufferU32x2 || opcode == ValueOpcode::StoreBufferU32x3 ||
+		    opcode == ValueOpcode::StoreBufferU32x4) {
+			if (general_formatted_store && memory.formatted) {
+				return memory.data_dwords == components &&
+				       ((memory.data_bits == 32u && memory.component_count == components) ||
+				        (opcode == ValueOpcode::StoreBufferU32x2 && memory.data_bits == 16u &&
+				         (memory.component_count == 3u || memory.component_count == 4u)));
+			}
 			return memory.data_bits == 32u && memory.data_dwords == components &&
 			       (!memory.formatted || (components == 4u && memory.component_count == 4u));
+		}
 		return memory.formatted && memory.data_dwords == components &&
 		       ((memory.data_bits == 32u && memory.component_count == components) ||
 		        (opcode == ValueOpcode::LoadBufferU32x2 && memory.data_bits == 16u &&
@@ -4461,6 +4474,563 @@ private:
 		return true;
 	}
 
+	static constexpr uint32_t MaxFiniteBufferChoices    = 64u;
+	static constexpr uint32_t MaxFiniteBufferCandidates = 64u;
+	static constexpr uint32_t MaxFiniteBufferExprDepth  = 16u;
+
+	std::string FirstNonRuntimeLeaf(Value value, uint32_t depth = 0u) const {
+		if (depth > MaxFiniteBufferExprDepth) return "depth_limit";
+		value = value.Resolve();
+		const auto* inst = value.TryInstruction();
+		if (inst == nullptr) {
+			return value.IsEmpty() ? "Empty" : std::string(TypeName(value.GetType()));
+		}
+		if (ValidateRuntimeValue(m_program, value, RuntimeValueType::Any, true)) return {};
+		const auto op = inst->GetOpcode();
+		if (op == ValueOpcode::SelectU32) {
+			if (!ValidateRuntimeValue(m_program, inst->Arg(0), RuntimeValueType::Any, true)) {
+				const auto cond = FirstNonRuntimeLeaf(inst->Arg(0), depth + 1u);
+				return cond.empty() ? "SelectU32" : fmt::format("SelectU32.cond({})", cond);
+			}
+			for (uint32_t arg = 1u; arg < 3u; ++arg) {
+				const auto arm = FirstNonRuntimeLeaf(inst->Arg(arg), depth + 1u);
+				if (!arm.empty()) return arm;
+			}
+			return "SelectU32";
+		}
+		if (IsRuntimeUniformOp(op)) {
+			for (size_t arg = 0u; arg < inst->NumArgs(); ++arg) {
+				const auto sub = FirstNonRuntimeLeaf(inst->Arg(arg), depth + 1u);
+				if (!sub.empty()) return sub;
+			}
+		}
+		return std::string(ValueOpcodeName(op));
+	}
+
+	// Enumerates bounded GPU-selected buffer descriptors across ReadFirstLane, SelectU32, acyclic
+	// Phi, and runtime-uniform arithmetic/bitop wrappers (such as IAdd32 address/carry chains).
+	// Transactional: leaves m_program untouched when any leaf is non-finite or exceeds bounds.
+	bool TryMakeFiniteBufferDescriptor(Inst& handle, const DescriptorSource& initial_descriptor,
+	                                   IndirectDescriptorPlan& plan) {
+		if (!Config::PortEnabled(Config::Port::FiniteBufferDescriptors)) return false;
+		if (handle.GetOpcode() != ValueOpcode::GetBufferResource || handle.NumArgs() != 4u ||
+		    handle.Uses().empty()) {
+			return false;
+		}
+		const auto record_fail = [&](std::string reason) {
+			m_finite_buffer_failures[&handle] = std::move(reason);
+			return false;
+		};
+		for (const auto& use: handle.Uses()) {
+			if (use.operand != 0u || BufferAccessOf(use.user->GetOpcode()) == BufferAccess::None) {
+				return record_fail(fmt::format("non_buffer_use({})", ValueOpcodeName(use.user->GetOpcode())));
+			}
+			const auto idx = use.user->Flags<MemoryFlags>().index;
+			if (idx >= m_program.memory_info.size() ||
+			    m_program.memory_info[idx].kind != ResourceKind::Buffer) {
+				return record_fail("non_buffer_resource_kind");
+			}
+		}
+
+		std::list<Inst> scratch;
+		struct ScratchGuard {
+			std::list<Inst>& list;
+			~ScratchGuard() {
+				for (auto& inst: list) inst.Invalidate();
+			}
+		} scratch_guard {scratch};
+		const auto make_inst = [&](ValueOpcode op, uint64_t flags,
+		                           std::span<const Value> args) -> Value {
+			if (op == ValueOpcode::SelectU32 && args.size() == 3u) {
+				if (args[0] == Value(true)) return args[1];
+				if (args[0] == Value(false)) return args[2];
+				if (args[1] == args[2]) return args[1];
+			}
+			for (auto& existing: scratch) {
+				if (existing.GetOpcode() != op || existing.Flags<uint64_t>() != flags ||
+				    existing.NumArgs() != args.size()) {
+					continue;
+				}
+				bool same = true;
+				for (size_t i = 0u; i < args.size(); ++i) {
+					if (existing.Arg(i) != args[i]) {
+						same = false;
+						break;
+					}
+				}
+				if (same) return Value(&existing);
+			}
+			auto& created = scratch.emplace_back(op, flags);
+			for (size_t i = 0u; i < args.size(); ++i) created.SetArg(i, args[i]);
+			return Value(&created);
+		};
+
+		const auto simplify_active = [&](Value root_val, Value guard) -> Value {
+			if (guard.IsEmpty()) return root_val.Resolve();
+			std::unordered_map<const Inst*, Value> memo;
+			const auto run = [&](const auto& self, Value v, uint32_t depth) -> Value {
+				v = v.Resolve();
+				if (depth > MaxFiniteBufferExprDepth) return v;
+				const auto* inst = v.TryInstruction();
+				if (inst == nullptr) return v;
+				if (const auto it = memo.find(inst); it != memo.end()) return it->second;
+				const auto op = inst->GetOpcode();
+				if (op == ValueOpcode::SelectU32) {
+					if (Implies(guard, inst->Arg(0))) {
+						const auto res = self(self, inst->Arg(1), depth + 1u);
+						memo.emplace(inst, res);
+						return res;
+					}
+					if (inst->Arg(0).Resolve() == Value(false)) {
+						const auto res = self(self, inst->Arg(2), depth + 1u);
+						memo.emplace(inst, res);
+						return res;
+					}
+					if (inst->Arg(1).Resolve() == inst->Arg(2).Resolve()) {
+						const auto res = self(self, inst->Arg(1), depth + 1u);
+						memo.emplace(inst, res);
+						return res;
+					}
+				}
+				if (!IsRuntimeUniformOp(op)) return v;
+				std::array<Value, 4> args {};
+				const size_t n = inst->NumArgs();
+				if (n > args.size()) return v;
+				bool changed = false;
+				for (size_t i = 0u; i < n; ++i) {
+					args[i] = self(self, inst->Arg(i), depth + 1u);
+					changed |= args[i] != inst->Arg(i).Resolve();
+				}
+				const auto res = changed
+				                     ? make_inst(op, inst->Flags<uint64_t>(), std::span(args).first(n))
+				                     : v;
+				memo.emplace(inst, res);
+				return res;
+			};
+			return run(run, root_val, 0u);
+		};
+
+		const auto find_choice = [&](const auto& self, Value v, uint32_t depth) -> const Inst* {
+			if (depth > MaxFiniteBufferExprDepth) return nullptr;
+			v = v.Resolve();
+			const auto* inst = v.TryInstruction();
+			if (inst == nullptr) return nullptr;
+			if (ValidateRuntimeValue(m_program, v, RuntimeValueType::Any, true)) return nullptr;
+			const auto op = inst->GetOpcode();
+			if (op == ValueOpcode::Phi) {
+				return inst->Parent() != nullptr ? inst : nullptr;
+			}
+			if (op == ValueOpcode::ReadFirstLane) {
+				// Only treat ReadFirstLane as a descriptor choice when its active-simplified
+				// operand can actually resolve to runtime values or further choices (not an
+				// arbitrary GPU scalar like ReadFirstLane(v0) feeding a SelectU32 predicate).
+				const auto peeled = simplify_active(inst->Arg(0), inst->Arg(1));
+				if (ValidateRuntimeValue(m_program, peeled, RuntimeValueType::Any, true) ||
+				    self(self, peeled, depth + 1u) != nullptr) {
+					return inst;
+				}
+				return nullptr;
+			}
+			if (op == ValueOpcode::SelectU32) {
+				if (!ValidateRuntimeValue(m_program, inst->Arg(0), RuntimeValueType::Any, true)) {
+					if (const auto* inner = self(self, inst->Arg(0), depth + 1u)) return inner;
+					return inst;
+				}
+				if (const auto* a = self(self, inst->Arg(1), depth + 1u)) return a;
+				return self(self, inst->Arg(2), depth + 1u);
+			}
+			if (IsRuntimeUniformOp(op)) {
+				for (size_t i = 0u; i < inst->NumArgs(); ++i) {
+					if (const auto* inner = self(self, inst->Arg(i), depth + 1u)) return inner;
+				}
+			}
+			return nullptr;
+		};
+
+		const auto matches_branch = [&](const Inst* inst, const Inst* branch) {
+			if (inst->GetOpcode() != branch->GetOpcode()) return false;
+			if (branch->GetOpcode() == ValueOpcode::Phi) {
+				return inst->Parent() != nullptr && inst->Parent() == branch->Parent() &&
+				       inst->NumArgs() == branch->NumArgs() &&
+				       inst->NumPhiBlocks() == branch->NumPhiBlocks();
+			}
+			const uint32_t key_arg = branch->GetOpcode() == ValueOpcode::ReadFirstLane ? 1u : 0u;
+			return EquivalentValue(m_program, inst->Arg(key_arg), branch->Arg(key_arg));
+		};
+
+		const auto substitute_branch = [&](Value root_val, const Inst* branch, uint32_t arm,
+		                                   Value peeled_exec, const Inst*& latest_matched,
+		                                   bool& matched_any, bool& bad_phi) -> Value {
+			std::unordered_map<const Inst*, Value> memo;
+			const auto run = [&](const auto& self, Value v, uint32_t depth) -> Value {
+				v = v.Resolve();
+				if (depth > MaxFiniteBufferExprDepth) return v;
+				const auto* inst = v.TryInstruction();
+				if (inst == nullptr) return v;
+				if (const auto it = memo.find(inst); it != memo.end()) return it->second;
+				if (matches_branch(inst, branch)) {
+					matched_any = true;
+					if (branch->GetOpcode() != ValueOpcode::Phi && inst->Parent() != nullptr &&
+					    (latest_matched->Parent() == nullptr ||
+					     AvailableBefore(*latest_matched, *inst))) {
+						latest_matched = inst;
+					}
+					uint32_t incoming = 0u;
+					if (branch->GetOpcode() == ValueOpcode::Phi) {
+						while (incoming < inst->NumArgs() &&
+						       inst->PhiBlock(incoming) != branch->PhiBlock(arm)) {
+							++incoming;
+						}
+						if (incoming == inst->NumArgs()) {
+							bad_phi = true;
+							return v;
+						}
+					} else if (branch->GetOpcode() == ValueOpcode::SelectU32) {
+						incoming = arm + 1u;
+					}
+					auto replacement = inst->Arg(incoming).Resolve();
+					if (branch->GetOpcode() == ValueOpcode::ReadFirstLane) {
+						replacement = simplify_active(replacement, peeled_exec);
+					} else if (branch->GetOpcode() == ValueOpcode::SelectU32) {
+						replacement = self(self, replacement, depth + 1u);
+					}
+					memo.emplace(inst, replacement);
+					return replacement;
+				}
+				const auto op = inst->GetOpcode();
+				if (!IsRuntimeUniformOp(op)) return v;
+				std::array<Value, 4> args {};
+				const size_t n = inst->NumArgs();
+				if (n > args.size()) return v;
+				bool changed = false;
+				for (size_t i = 0u; i < n; ++i) {
+					args[i] = self(self, inst->Arg(i), depth + 1u);
+					changed |= args[i] != inst->Arg(i).Resolve();
+				}
+				const auto res = changed
+				                     ? make_inst(op, inst->Flags<uint64_t>(), std::span(args).first(n))
+				                     : v;
+				memo.emplace(inst, res);
+				return res;
+			};
+			return run(run, root_val, 0u);
+		};
+
+		struct Choice {
+			DescriptorSource      descriptor;
+			const Inst*           branch = nullptr;
+			std::vector<uint32_t> children;
+			Value                 key;
+		};
+		std::vector<Choice> choices;
+		uint32_t            leaf_count = 0u;
+		std::string         fail_reason;
+
+		const auto visit = [&](const auto& self, DescriptorSource descriptor,
+		                       Value active_guard) -> uint32_t {
+			for (uint32_t w = 0u; w < 4u; ++w) descriptor.dwords[w] = descriptor.dwords[w].Resolve();
+			for (uint32_t i = 0u; i < choices.size(); ++i) {
+				if (choices[i].descriptor.dwords == descriptor.dwords) return i;
+			}
+			uint32_t bad = 0u;
+			if (ValidateSource(descriptor, bad)) {
+				if (++leaf_count > MaxFiniteBufferCandidates) {
+					fail_reason = fmt::format("exceeded_candidates_bound(>{})", MaxFiniteBufferCandidates);
+					return UINT32_MAX;
+				}
+				const auto index = static_cast<uint32_t>(choices.size());
+				choices.push_back({descriptor});
+				return index;
+			}
+			if (choices.size() >= MaxFiniteBufferChoices) {
+				fail_reason = fmt::format("exceeded_choices_bound(>{})", MaxFiniteBufferChoices);
+				return UINT32_MAX;
+			}
+			const auto index = static_cast<uint32_t>(choices.size());
+			choices.push_back({descriptor});
+
+			std::array<const Inst*, 4> word_choices {};
+			std::array<bool, 4>        word_valid {};
+			const Inst*                branch = nullptr;
+			for (uint32_t w = 0u; w < 4u; ++w) {
+				if (ValidateRuntimeValue(m_program, descriptor.dwords[w], RuntimeValueType::Any, true)) {
+					word_valid[w] = true;
+					continue;
+				}
+				word_choices[w] = find_choice(find_choice, descriptor.dwords[w], 0u);
+				if (word_choices[w] == nullptr) {
+					fail_reason = fmt::format("non_finite_leaf(dword{}:{})", w,
+					                          FirstNonRuntimeLeaf(descriptor.dwords[w]));
+					return UINT32_MAX;
+				}
+				if (branch == nullptr ||
+				    (branch->GetOpcode() != ValueOpcode::ReadFirstLane &&
+				     word_choices[w]->GetOpcode() == ValueOpcode::ReadFirstLane)) {
+					branch = word_choices[w];
+				}
+			}
+			if (branch == nullptr) {
+				fail_reason = fmt::format("no_choice_node(dword{})", bad);
+				return UINT32_MAX;
+			}
+			const auto op   = branch->GetOpcode();
+			const bool phi  = op == ValueOpcode::Phi;
+			const bool lane = op == ValueOpcode::ReadFirstLane;
+			if (phi) {
+				if (branch->NumPhiBlocks() != branch->NumArgs() || branch->NumArgs() == 0u) {
+					fail_reason = "malformed_phi";
+					return UINT32_MAX;
+				}
+				if (InCycle(branch->Parent())) {
+					fail_reason = fmt::format("cyclic_phi(dword{})", bad);
+					return UINT32_MAX;
+				}
+			}
+			if (lane) {
+				const bool guard_ok =
+				    (!active_guard.IsEmpty() && Implies(active_guard, branch->Arg(1))) ||
+				    std::ranges::all_of(handle.Uses(), [&](const Use& use) {
+					    return Implies(use.user->Arg(use.user->NumArgs() - 1u), branch->Arg(1));
+				    });
+				if (!guard_ok) {
+					fail_reason = "readfirstlane_exec_not_implied";
+					return UINT32_MAX;
+				}
+			}
+
+			const uint32_t count  = phi ? static_cast<uint32_t>(branch->NumArgs()) : lane ? 1u : 2u;
+			const Inst*    anchor = branch;
+			const Value    next_guard = lane ? branch->Arg(1).Resolve() : active_guard;
+			choices[index].children.reserve(count);
+
+			for (uint32_t arm = 0u; arm < count; ++arm) {
+				if (phi && ImpossibleSwitchEdge(branch->PhiBlock(arm), branch->Parent())) {
+					choices[index].children.push_back(UINT32_MAX);
+					continue;
+				}
+				DescriptorSource child = descriptor;
+				for (uint32_t w = 0u; w < 4u; ++w) {
+					if (word_valid[w]) continue;
+					bool matched = false;
+					bool bad_phi = false;
+					child.dwords[w] = substitute_branch(descriptor.dwords[w], branch, arm,
+					                                    next_guard, anchor, matched, bad_phi);
+					if (bad_phi) {
+						fail_reason = fmt::format("mismatched_phi_blocks(dword{})", w);
+						return UINT32_MAX;
+					}
+					if (!lane && !matched) {
+						fail_reason = fmt::format("mismatched_{}_across_dwords(dword{})",
+						                          phi ? "phi" : "select_cond", w);
+						return UINT32_MAX;
+					}
+				}
+				const auto next = self(self, child, next_guard);
+				if (next == UINT32_MAX) return UINT32_MAX;
+				choices[index].children.push_back(next);
+			}
+			choices[index].branch = anchor;
+			return index;
+		};
+
+		DescriptorSource root = initial_descriptor;
+		root.dword_count      = 4u;
+		if (visit(visit, root, {}) == UINT32_MAX || choices.front().branch == nullptr) {
+			return record_fail(fail_reason.empty() ? "finite_enumeration_failed" : std::move(fail_reason));
+		}
+
+		// Collect unique leaf candidate sources (still without mutating m_program IR).
+		DescriptorSource finite_source;
+		finite_source.dword_count = 4u;
+		finite_source.dwords.fill(Value(0u));
+		finite_source.indirect_descriptor.emplace(DescriptorSource::IndirectDescriptor {});
+		std::vector<DescriptorSource> leaf_descriptors;
+		for (auto& choice: choices) {
+			if (choice.branch != nullptr) continue;
+			auto found = std::ranges::find_if(leaf_descriptors, [&](const DescriptorSource& other) {
+				for (uint32_t w = 0u; w < 4u; ++w) {
+					if (!EquivalentValue(m_program, other.dwords[w], choice.descriptor.dwords[w]))
+						return false;
+				}
+				return true;
+			});
+			choice.key = Value(static_cast<uint32_t>(found - leaf_descriptors.begin()));
+			if (found == leaf_descriptors.end()) {
+				if (leaf_descriptors.size() >= MaxFiniteBufferCandidates) {
+					return record_fail(fmt::format("exceeded_candidates_bound(>{})",
+					                               MaxFiniteBufferCandidates));
+				}
+				leaf_descriptors.push_back(choice.descriptor);
+			}
+		}
+		if (leaf_descriptors.empty()) return record_fail("no_leaf_candidates");
+
+		// Determine placement order for key instructions before mutating any blocks.
+		// If only one distinct candidate survives (e.g. ReadFirstLane active-mask simplification),
+		// no runtime selection instructions are needed at all.
+		std::vector<uint32_t> phi_indices;
+		std::vector<uint32_t> non_phi_order;
+		if (leaf_descriptors.size() > 1u) {
+			std::vector<uint8_t> state(choices.size(), 0u);
+			bool                 has_cycle = false;
+			const auto dfs = [&](const auto& self, uint32_t idx) -> void {
+				if (idx == UINT32_MAX || choices[idx].branch == nullptr) return;
+				if (state[idx] == 2u) return;
+				if (state[idx] == 1u) {
+					has_cycle = true;
+					return;
+				}
+				state[idx] = 1u;
+				for (const auto child: choices[idx].children) self(self, child);
+				state[idx] = 2u;
+				if (choices[idx].branch->GetOpcode() == ValueOpcode::Phi) {
+					phi_indices.push_back(idx);
+				} else {
+					non_phi_order.push_back(idx);
+				}
+			};
+			dfs(dfs, 0u);
+			if (has_cycle) return record_fail("cyclic_choice_graph");
+
+			// Non-Phi choices placed before a Phi must sit at their branch anchor; others can
+			// sit directly before handle in post-order where every operand already dominates handle.
+			std::vector<bool> used_by_phi(choices.size(), false);
+			for (const auto idx: phi_indices) {
+				for (const auto child: choices[idx].children) {
+					if (child != UINT32_MAX) used_by_phi[child] = true;
+				}
+			}
+			// Propagate used_by_phi to descendants so children of a phi-used select stay before it.
+			for (auto it = non_phi_order.rbegin(); it != non_phi_order.rend(); ++it) {
+				if (!used_by_phi[*it]) continue;
+				for (const auto child: choices[*it].children) {
+					if (child != UINT32_MAX && choices[child].branch != nullptr)
+						used_by_phi[child] = true;
+				}
+			}
+			for (const auto idx: non_phi_order) {
+				if (used_by_phi[idx] && choices[idx].branch->Parent() == nullptr) {
+					return record_fail("scratch_choice_under_phi");
+				}
+				const auto* anchor = used_by_phi[idx] ? choices[idx].branch : &handle;
+				const auto  op     = choices[idx].branch->GetOpcode();
+				const Value cond   = op == ValueOpcode::ReadFirstLane ? choices[idx].branch->Arg(1)
+				                                                      : choices[idx].branch->Arg(0);
+				if (const auto* cond_inst = cond.Resolve().TryInstruction();
+				    cond_inst != nullptr &&
+				    (cond_inst->Parent() == nullptr || !AvailableBefore(*cond_inst, *anchor))) {
+					return record_fail("dominance_order(cond)");
+				}
+				if (used_by_phi[idx]) {
+					for (const auto child: choices[idx].children) {
+						if (child != UINT32_MAX && choices[child].branch != nullptr &&
+						    (choices[child].branch->Parent() == nullptr ||
+						     !AvailableBefore(*choices[child].branch, *anchor))) {
+							return record_fail("dominance_order(child)");
+						}
+					}
+				}
+			}
+
+			// Commit scratch instructions and intern candidate sources now that every check passed.
+			m_program.value_storage.splice(m_program.value_storage.end(), scratch);
+			auto& sources = finite_source.indirect_descriptor->sources;
+			for (const auto& leaf: leaf_descriptors) sources.push_back(InternSource(leaf));
+
+			for (const auto idx: phi_indices) {
+				auto*      block = choices[idx].branch->Parent();
+				const auto where = std::ranges::find_if(block->Instructions(), [&](const Inst& inst) {
+					return &inst == choices[idx].branch;
+				});
+				auto& key = *block->PrependNewInst(where, ValueOpcode::Phi);
+				key.SetFlags(Type::U32);
+				choices[idx].key = Value(&key);
+			}
+			for (const auto idx: non_phi_order) {
+				const auto* anchor = used_by_phi[idx] ? choices[idx].branch : &handle;
+				auto*       block  = anchor->Parent();
+				const auto  where  = std::ranges::find_if(block->Instructions(), [&](const Inst& inst) {
+                    return &inst == anchor;
+                });
+				const auto  op     = choices[idx].branch->GetOpcode();
+				auto&       key    = *(op == ValueOpcode::ReadFirstLane
+                                           ? block->PrependNewInst(where, op,
+                                                                   {Value(0u), choices[idx].branch->Arg(1)})
+                                           : block->PrependNewInst(
+                                                 where, op,
+                                                 {choices[idx].branch->Arg(0), Value(0u), Value(0u)}));
+				choices[idx].key   = Value(&key);
+			}
+			for (const auto& choice: choices) {
+				if (choice.branch == nullptr) continue;
+				auto*      key  = choice.key.Instruction();
+				const bool phi  = choice.branch->GetOpcode() == ValueOpcode::Phi;
+				const bool lane = choice.branch->GetOpcode() == ValueOpcode::ReadFirstLane;
+				for (uint32_t arm = 0u; arm < choice.children.size(); ++arm) {
+					const auto child = choice.children[arm];
+					const auto value = child == UINT32_MAX ? Value(0u) : choices[child].key;
+					if (phi) key->AddPhiOperand(choice.branch->PhiBlock(arm), value);
+					else key->SetArg(lane ? 0u : arm + 1u, value);
+				}
+			}
+			plan.key = choices.front().key;
+		} else {
+			m_program.value_storage.splice(m_program.value_storage.end(), scratch);
+			finite_source.indirect_descriptor->sources.push_back(InternSource(leaf_descriptors[0]));
+			plan.key = Value(0u);
+		}
+
+		plan.handle = &handle;
+		plan.source = InternSource(finite_source);
+		plan.roots  = finite_source.dwords;
+		plan.reads.fill(nullptr);
+		m_finite_buffer_failures.erase(&handle);
+		return true;
+	}
+
+	std::string DiagnoseBufferDescriptorFailure(const Inst& handle, const Inst& inst,
+	                                            const MemoryInfo& memory) const {
+		DescriptorSource descriptor;
+		descriptor.dword_count = std::min<uint32_t>(4u, static_cast<uint32_t>(handle.NumArgs()));
+		for (uint32_t w = 0u; w < descriptor.dword_count; ++w) descriptor.dwords[w] = handle.Arg(w);
+		uint32_t bad_dword = 0u;
+		(void)ValidateSource(descriptor, bad_dword);
+		const std::string bad_shape =
+		    bad_dword < descriptor.dword_count ? ValueShape(descriptor.dwords[bad_dword]) : "none";
+		std::string nearest = "GetBufferResource->(ReadFirstLane|SelectU32|Phi|RuntimeOp)*->RuntimeValue";
+		std::string first_diff;
+		if (const auto found = m_finite_buffer_failures.find(&handle);
+		    found != m_finite_buffer_failures.end()) {
+			first_diff = found->second;
+		} else if (!Config::PortEnabled(Config::Port::FiniteBufferDescriptors)) {
+			first_diff = "port_disabled(finite-buffer-descriptors)";
+		} else {
+			const auto* bad_inst = bad_dword < descriptor.dword_count
+			                           ? descriptor.dwords[bad_dword].Resolve().TryInstruction()
+			                           : nullptr;
+			uint32_t mem_idx = 0u;
+			if (bad_inst != nullptr && ScalarReadMemory(*bad_inst, mem_idx) != nullptr) {
+				nearest = "GetBufferResource->ReadConstBuffer|LoadAddressU32(table_stride>=16)";
+				first_diff = !IndirectBufferAccess(inst)
+				                 ? fmt::format("access_not_indirect_buffer_op({})",
+				                               ValueOpcodeName(inst.GetOpcode()))
+				                 : "table_offset_or_bound_unmatched";
+			} else {
+				first_diff = fmt::format("dword{}_non_runtime({})", bad_dword,
+				                         FirstNonRuntimeLeaf(descriptor.dwords[bad_dword]));
+			}
+		}
+		return fmt::format(
+		    "buffer descriptor is not a valid runtime value (shape {}); "
+		    "bad_dword={} access={}({},{},{}b,x{}) nearest={} first_diff={} bad_shape={}; "
+		    "GPU-selected access requires a scalar, raw 8/16-bit, "
+		    "raw DWORD x1/x2/x3/x4, or formatted DWORD load",
+		    ValueShape(Value(const_cast<Inst*>(&handle))), bad_dword,
+		    ValueOpcodeName(inst.GetOpcode()), memory.formatted ? "fmt" : "raw",
+		    memory.idxen ? "idx" : "byte", memory.data_bits, memory.data_dwords, nearest,
+		    first_diff, bad_shape);
+	}
+
 	const IndirectDescriptorPlan* FindIndirectDescriptor(const Inst& handle) const {
 		const auto found = m_indirect_descriptor_map.find(&handle);
 		return found == m_indirect_descriptor_map.end() ? nullptr
@@ -4484,13 +5054,20 @@ private:
 		m_loop_proofs.clear();
 		for (auto* block: m_program.blocks) {
 			for (auto& inst: *block) {
-				const bool atomic = BufferAccessOf(inst.GetOpcode()) == BufferAccess::Atomic;
+				const auto buffer_access = BufferAccessOf(inst.GetOpcode());
+				const bool atomic        = buffer_access == BufferAccess::Atomic;
+				const auto flags         = inst.Flags<MemoryFlags>();
+				const bool finite_buffer_candidate =
+				    Config::PortEnabled(Config::Port::FiniteBufferDescriptors) &&
+				    buffer_access != BufferAccess::None &&
+				    flags.index < m_program.memory_info.size() &&
+				    m_program.memory_info[flags.index].kind == ResourceKind::Buffer &&
+				    !m_program.memory_info[flags.index].SupportsIndirectBufferLoad(inst.GetOpcode());
 				if ((ImageOpcodeInfoOf(inst.GetOpcode()).access == ImageAccess::None &&
-				     !IndirectBufferAccess(inst) && !atomic) ||
+				     !IndirectBufferAccess(inst) && !atomic && !finite_buffer_candidate) ||
 				    inst.NumArgs() == 0u) {
 					continue;
 				}
-				const auto flags = inst.Flags<MemoryFlags>();
 				const auto& memory = m_program.memory_info[flags.index];
 				const auto plan_handle = [&](Value value, uint32_t width, uint32_t base, bool sampler) {
 					auto* handle = value.Resolve().TryInstruction();
@@ -4524,12 +5101,19 @@ private:
 						    })) return;
 						plan.read_dwords = 4u;
 					}
-					if (atomic ? TryMakeFiniteDescriptor(*handle, plan) :
-					    TryMakeNestedDescriptor(*handle, descriptor, plan) ||
-					    (sampler && TryMakeFiniteDescriptor(*handle, plan)) ||
-					    TryMakeTableDescriptor(*handle, descriptor, plan) ||
-					    (!sampler && (TryMakeFiniteDescriptor(*handle, plan) ||
-					                  TryMakeIndirectBuffer(*handle, descriptor, plan)))) {
+					const bool planned =
+					    atomic ? (TryMakeFiniteDescriptor(*handle, plan) ||
+					              TryMakeFiniteBufferDescriptor(*handle, descriptor, plan) ||
+					              (IndirectBufferAccess(inst) &&
+					               TryMakeIndirectBuffer(*handle, descriptor, plan)))
+					           : (TryMakeNestedDescriptor(*handle, descriptor, plan) ||
+					              (sampler && TryMakeFiniteDescriptor(*handle, plan)) ||
+					              TryMakeTableDescriptor(*handle, descriptor, plan) ||
+					              (!sampler &&
+					               (TryMakeFiniteDescriptor(*handle, plan) ||
+					                TryMakeIndirectBuffer(*handle, descriptor, plan) ||
+					                TryMakeFiniteBufferDescriptor(*handle, descriptor, plan))));
+					if (planned) {
 						for (const auto& previous: m_indirect_descriptors) {
 							if (plan.reads[0] != nullptr && previous.reads[0] == plan.reads[0] &&
 							    !EquivalentValue(m_program, previous.key, plan.key))
@@ -4548,7 +5132,8 @@ private:
 				if (inst.GetOpcode() == ValueOpcode::ImageSampleRaw) {
 					plan_handle(inst.Arg(1), 4u, memory.sampler * 4u, true);
 				}
-				plan_handle(inst.Arg(0), atomic || IndirectBufferAccess(inst) ? 4u : 8u,
+				plan_handle(inst.Arg(0),
+				            atomic || IndirectBufferAccess(inst) || finite_buffer_candidate ? 4u : 8u,
 				            memory.resource * 4u, false);
 			}
 		}
@@ -4824,11 +5409,7 @@ private:
 				}
 				source = buffer != BufferAccess::Read ? CarriedBufferSource(*handle) : UINT32_MAX;
 				if (source == UINT32_MAX) {
-					Fail(flags.pc,
-					     fmt::format("buffer descriptor is not a valid runtime value (shape {}); "
-					                 "GPU-selected access requires a scalar, raw 8/16-bit, "
-					                 "raw DWORD x1/x2/x3/x4, or formatted DWORD load",
-					                 ValueShape(inst.Arg(0))));
+					Fail(flags.pc, DiagnoseBufferDescriptorFailure(*handle, inst, memory));
 				}
 			}
 			resource = AddBuffer(source, memory, op, flags.pc);
@@ -4980,6 +5561,7 @@ private:
 	std::unordered_map<uint32_t, size_t>                                          m_memory_patch_map;
 	std::vector<IndirectDescriptorPlan>                                           m_indirect_descriptors;
 	std::unordered_map<const Inst*, size_t>                                       m_indirect_descriptor_map;
+	std::unordered_map<const Inst*, std::string>                                  m_finite_buffer_failures;
 	std::unordered_set<uint32_t>                                                  m_indirect_planning_memory;
 	std::map<const Block*, DescriptorValues>                                      m_descriptor_values;
 	std::optional<DescriptorSource>                                               m_sampler_fallback;
