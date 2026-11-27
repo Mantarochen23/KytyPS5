@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <unistd.h>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -128,6 +129,7 @@ size_t CountOf(const char* text, const char* needle) {
 // Builds the host fault report into a static buffer, checks it and ends the process: 0 when it names
 // the thread, its tag, this module, the faulting function and at least three frames.
 bool ReportAndExit(const Common::HostException::ExceptionInfo& info) {
+	(void)!::write(2, "handler entered\n", 16);
 	Common::FaultReport::Registers regs {};
 	regs.pc  = info.exception_address;
 	regs.rsp = info.rsp;
