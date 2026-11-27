@@ -136,7 +136,7 @@ void TestBuildLine() {
 	build.number = 3;
 	Check(BuildTiming::Line(build).ends_with(" repeat=#3"), "a repeat is named");
 	build.number = 1;
-	Check(!BuildTiming::Line(build).contains("repeat"), "the first build is not a repeat");
+	Check(BuildTiming::Line(build).find("repeat") == std::string::npos, "the first build is not a repeat");
 
 	BuildTiming::Totals totals;
 	Check(totals.Empty(), "empty");
@@ -150,8 +150,9 @@ void TestBuildLine() {
 	Check(totals.render_builds == 1 && totals.render_us == 700000, "render thread builds");
 	Check(!totals.Empty(), "not empty");
 	const auto text = totals.Text();
-	Check(text.contains("1 modules") && text.contains("1 pipelines") &&
-	          text.contains("1 on the render thread"),
+	Check(text.find("1 modules") != std::string::npos &&
+	          text.find("1 pipelines") != std::string::npos &&
+	          text.find("1 on the render thread") != std::string::npos,
 	      "totals text");
 }
 
