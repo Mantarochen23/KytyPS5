@@ -1187,9 +1187,9 @@ int SelfTest() {
 		std::string line;
 		while (std::getline(summary, line)) std::printf("%s\n", line.c_str());
 	}
+	const bool have_profile = std::filesystem::exists(output / "spirv-profile.jsonl");
 	std::error_code ignored;
 	std::filesystem::remove_all(root, ignored);
-	const bool have_profile = std::filesystem::exists(output / "spirv-profile.jsonl");
 	if (status != 0 || !read || results.size() != 3 || !have_emitted || !have_rejected ||
 	    !have_runtime || !have_profile) {
 		std::fprintf(stderr,
