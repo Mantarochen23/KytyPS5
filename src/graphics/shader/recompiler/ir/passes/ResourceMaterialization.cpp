@@ -1080,7 +1080,6 @@ bool MaterializeIndirectDescriptor(const ResourcePlan& program, uint32_t source_
 					if (entry.SameInputs(cache_key)) {
 						cache_slot = &entry;
 						cache_hit  = entry.content_stamp != nullptr && entry.content_stamp->Unchanged();
-						if (cache_hit && runtime.skipped_reads != nullptr) *runtime.skipped_reads = true;
 						break;
 					}
 				}

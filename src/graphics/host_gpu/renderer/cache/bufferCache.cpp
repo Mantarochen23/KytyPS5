@@ -391,7 +391,6 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 			    total_size += Common::AlignUp(end - start, 64);
 		    });
 		    m_gpu_modified_ranges.Subtract(address, bytes);
-		    ++m_ownership_release_epoch;
 		    ForgetColorMetadataChecks(address, bytes);
 	    });
 	if (copies.empty()) {
@@ -535,7 +534,6 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 			if (DownloadBufferMemory<false>(buffer, start, end - start)) {
 				WaitDiag::Global().NoteReadback(start, end - start, WaitDiag::NowMs());
 				m_memory_tracker.UnmarkRegionAsGpuModified(start, end - start);
-				++m_ownership_release_epoch;
 			}
 		}
 		if (is_write) {
@@ -937,7 +935,7 @@ void BufferCache::InvalidateRuntimeTables(uint64_t vaddr, uint64_t size) {
 }
 
 void BufferCache::MarkRuntimeTableWritten(const std::shared_ptr<RuntimeTableState>& state) {
-	if (state == nullptr || !state->BeginMark(m_scheduler.CurrentTick(), m_ownership_release_epoch)) return;
+	if (state == nullptr || !state->BeginMark(m_scheduler.CurrentTick())) return;
 	Common::FrameCost::Add(Common::FrameCost::Counter::TableMarks);
 	Common::FrameCost::Add(Common::FrameCost::Counter::TableMarkRanges);
 	state->WriteRanges().ForEach([&](uint64_t begin, uint64_t end) {
@@ -1019,7 +1017,6 @@ void BufferCache::RunGarbageCollector() {
 	for (const auto id: dirty_buffers) {
 		auto& buffer = m_slot_buffers[id];
 		m_memory_tracker.UnmarkRegionAsGpuModified(buffer.CpuAddress(), buffer.Size());
-		++m_ownership_release_epoch;
 		m_memory_tracker.MarkRegionAsCpuModified(buffer.CpuAddress(), buffer.Size());
 		Unregister(id);
 		EraseBufferSlot(id);
