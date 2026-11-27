@@ -3,13 +3,16 @@
 
 #include "common/abi.h"
 #include "common/common.h"
+#include "common/frameCost.h"
 #include "common/lruCache.h"
 #include "common/slotVector.h"
 #include "graphics/host_gpu/memoryTracker.h"
 #include "graphics/host_gpu/rangeSet.h"
 #include "graphics/host_gpu/renderer/cache/faultManager.h"
+#include "graphics/host_gpu/renderer/cache/hotReadbackTable.h"
 #include "graphics/host_gpu/renderer/cache/loopGuardReport.h"
 #include "graphics/host_gpu/renderer/cache/multiLevelPageTable.h"
+#include "graphics/host_gpu/renderer/cache/recentGpuWrites.h"
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
 
 #include <array>
@@ -140,8 +143,12 @@ public:
 	~BufferCache();
 	KYTY_CLASS_NO_COPY(BufferCache);
 
-	void                   InvalidateMemory(uint64_t vaddr, uint64_t size);
-	void                   ReadMemory(uint64_t vaddr, uint64_t size, bool is_write = false);
+	void                   InvalidateMemory(
+	    uint64_t vaddr, uint64_t size,
+	    Common::FrameCost::ReadbackSite site = Common::FrameCost::CurrentReadbackSite());
+	void                   ReadMemory(
+	    uint64_t vaddr, uint64_t size, bool is_write = false,
+	    Common::FrameCost::ReadbackSite site = Common::FrameCost::CurrentReadbackSite());
 	// Ends the draw window, whose draws share the stream copies of CPU-written ranges.
 	void                   EndDrawWindow() noexcept { m_draw_window++; }
 	[[nodiscard]] uint64_t DrawWindow() const noexcept { return m_draw_window; }
@@ -184,7 +191,13 @@ public:
 	// stores through device addresses (NoteUntrackedWrite). Equal stamps taken at two times mean the
 	// range was not written in between. Ranges over 64 pages count as untracked writes.
 	[[nodiscard]] uint64_t WriteStamp(uint64_t vaddr, uint64_t size) const;
-	void                   NoteUntrackedWrite() noexcept { m_untracked_write_stamp = ++m_write_clock; }
+	void                   NoteUntrackedWrite() noexcept;
+	// GPU thread, between commands (every write marked so far is recorded): the buffers written
+	// since the last boundary take the current tick as the tick of their latest write.
+	void                   NoteCommandBoundary();
+	// Called after recording a draw or dispatch: the ranges bound for writing, and any address
+	// writes (which can reach untracked ranges), belong to the current command buffer.
+	void                   RecordPendingWrites(bool address_writes = false);
 	[[nodiscard]] std::shared_ptr<RuntimeTableState> RegisterRuntimeTable(
 	    RangeSet dependencies, RangeSet write_ranges = {});
 	// Called only for backing-lifetime changes, not ordinary guest writes.
@@ -249,7 +262,52 @@ private:
 	[[nodiscard]] bool SynchronizeBufferFromImage(Buffer& buffer, uint64_t vaddr, uint64_t size);
 	// Synchronous downloads publish before returning; asynchronous callers wait before reuse.
 	template <bool async>
-	[[nodiscard]] bool DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t size);
+	[[nodiscard]] bool DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t size,
+	                                        BufferId main_id = {});
+	struct PendingDownload {
+		std::vector<vk::BufferCopy> copies;
+		uint64_t                    total_size     = 0;
+		uint64_t                    buffer_address = 0;
+		uint64_t                    offset         = 0;
+		uint8_t*                    mapped         = nullptr;
+		std::shared_ptr<Buffer>     temporary;
+	};
+	struct BatchedDownload {
+		Buffer*         buffer = nullptr;
+		PendingDownload pending;
+		uint64_t        unmark_address = 0;
+		uint64_t        unmark_size    = 0;
+	};
+	[[nodiscard]] PendingDownload CollectDownloadCopies(const Buffer& buffer, uint64_t vaddr,
+	                                                    uint64_t size);
+	void                          ReserveDownloadMemory(std::span<PendingDownload* const> items);
+	void                          RecordDownload(vk::CommandBuffer native, const Buffer& buffer,
+	                                             const PendingDownload& pending);
+	void                          PublishDownload(const PendingDownload& pending);
+	[[nodiscard]] BufferId        FindHotBuffer(uint64_t address, uint64_t size);
+	[[nodiscard]] uint64_t        EstimateDownloadBytes(uint64_t address, uint64_t size) const;
+	void                          CollectHotDownloads(BufferId main_id, uint64_t& budget,
+	                                                  std::vector<BatchedDownload>& batch);
+	void                          CollectRecentWrites(RangeSet& claimed, uint64_t& budget,
+	                                                  std::vector<BatchedDownload>& batch);
+	void                          CollectRecentPiece(uint64_t address, uint64_t size,
+	                                                 uint64_t& budget,
+	                                                 std::vector<BatchedDownload>& batch);
+	void                          NoteHotReadback(uint64_t address, uint64_t size);
+	void                          NoteRecentWrite(uint64_t address, uint64_t size);
+	// Reads the GPU-dirty bytes of [vaddr, size) of a host-readable buffer straight from its
+	// mapping into guest memory, after waiting only for the submission that holds the buffer's
+	// latest GPU write (not for the work queued behind it).
+	[[nodiscard]] bool        ReadBackInPlace(Buffer& buffer, uint64_t vaddr, uint64_t size);
+	// GPU writes of the current command buffer, and bound writes not recorded yet.
+	void                      MarkUnsubmittedWrite(uint64_t vaddr, uint64_t size);
+	[[nodiscard]] bool        HasPendingWrite(uint64_t vaddr, uint64_t size) const;
+	[[nodiscard]] bool        HasUnsubmittedWrite(uint64_t vaddr, uint64_t size) const;
+	[[nodiscard]] bool        CanDownloadDetached(uint64_t                        buffer_address,
+	                                              std::span<const vk::BufferCopy> copies);
+	void                      NoteOpenWrite(Buffer& buffer, BufferId id);
+	void                      NoteOpenWritesInRange(uint64_t vaddr, uint64_t size);
+	static constexpr uint64_t MaxInPlaceReadback = uint64_t {512} << 10u;
 	void               ForgetColorMetadataChecks(uint64_t vaddr, uint64_t size);
 	void               NoteWrite(uint64_t vaddr, uint64_t size);
 
@@ -263,6 +321,9 @@ private:
 	BufferMap                                         m_buffers;
 	PageTable                                         m_page_table;
 	RangeSet                                          m_gpu_modified_ranges;
+	RangeSet                                          m_unsubmitted_writes;
+	RangeSet                                          m_pending_writes;
+	uint64_t                                          m_unsubmitted_tick = 0;
 	// Bumped whenever GPU ownership of a range is given up (render thread / GPU thread, under the same
 	// serialization as m_gpu_modified_ranges).
 	uint64_t                                          m_ownership_release_epoch = 0;
@@ -272,6 +333,9 @@ private:
 	MultiLevelPageTable<uint64_t, CACHING_PAGEBITS, 44, 20> m_write_stamps;
 	uint64_t                                          m_write_clock           = 1;
 	uint64_t                                          m_untracked_write_stamp = 1;
+	uint64_t                                          m_address_write_tick    = 0;
+	std::vector<uint8_t>                              m_in_place_scratch;
+	std::vector<BufferId>                             m_open_writes;
 	// One per TileManager::ColorClearSlots key slot.
 	std::array<RangeSet, 8>                           m_checked_color_metadata;
 	MemoryTracker                                     m_memory_tracker;
@@ -284,6 +348,8 @@ private:
 	std::array<StreamCopy, 1u << STREAM_COPY_BITS>    m_stream_copies {};
 	uint64_t                                          m_draw_window = 0;
 	TextureCache&                                     m_texture_cache;
+	HotReadbackTable                                  m_hot_readbacks;
+	RecentGpuWriteRing                                m_recent_writes;
 	uint64_t                                          m_total_used_memory  = 0;
 	uint64_t m_trigger_gc_memory  = 1ull * 1024 * 1024 * 1024;
 	uint64_t m_critical_gc_memory = 2ull * 1024 * 1024 * 1024;

@@ -282,8 +282,13 @@ void DefineDescriptors(EmitterState& state) {
 		bindings.ray_query_dword = bindings.memory_offset_dword;
 		bindings.memory_offset_dword += 2u;
 	}
+	const bool force_shader_data_buffer =
+	    state.input_info.compute != nullptr &&
+	    state.input_info.compute->indirect_thread_dimensions && info.uses_dispatch_threads;
 	bindings.push_data_start_dword =
-	    state.push_data.StartFor(bindings.ShaderDataDwords(), state.program.stage);
+	    force_shader_data_buffer
+	        ? IR::PushData::NoStart
+	        : state.push_data.StartFor(bindings.ShaderDataDwords(), state.program.stage);
 	counts[static_cast<size_t>(Kind::ShaderData)] =
 	    bindings.ShaderDataDwords() != 0 && !bindings.UsesPushData();
 	if (state.program.bindings.UsesPushData() || state.program.stage == ShaderType::Mesh ||

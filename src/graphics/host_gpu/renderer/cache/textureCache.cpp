@@ -1277,7 +1277,8 @@ void TextureCache::MaterializeColorClear(ImageId id, const ImageDesc& desc,
 		Common::DebugCounters::ScopedTimer timer(
 		    Common::DebugCounters::Counter::ColorMetadataReadbacks,
 		    Common::DebugCounters::Counter::ColorMetadataReadbackNs);
-		m_buffer_cache.ReadMemory(viewed.address, viewed.size, false);
+		m_buffer_cache.ReadMemory(viewed.address, viewed.size, false,
+		                          Common::FrameCost::ReadbackSite::ColorMeta);
 	}
 	for (uint32_t slice = 0; slice < count; slice++) {
 		const auto address = run(slice);
@@ -2057,6 +2058,8 @@ bool BufferCache::SynchronizeBufferFromImage(Buffer& buffer, uint64_t vaddr, uin
 	}
 	ForgetColorMetadataChecks(image.info.data.address, copy_size);
 	m_texture_cache.DownloadImage(image, buffer, buf_offset, copy_size, levels);
+	NoteOpenWritesInRange(image.info.data.address, copy_size);
+	MarkUnsubmittedWrite(image.info.data.address, copy_size);
 	return true;
 }
 

@@ -27,6 +27,11 @@ enum class Port : uint32_t {
 	ImageHeapIncremental, // rediscover resident images only after relevant cache changes
 	RuntimeTableCache, // reuse runtime-indexed buffer tables while their candidate backing is unchanged
 	BarrierTracker,   // order guest dispatches with deferred, narrowed barriers instead of all-commands pairs
+	GpuIndirectThreadDim, // compute thread-dimension indirect dispatch counts and LDS bounds on the GPU
+	GpuDrawIndirectCount, // keep multi-draw indirect counts on the GPU via vkCmdDraw[Indexed]IndirectCount
+	InPlaceReadback, // read finished GPU writes in place from host-visible device memory (resizable BAR)
+	DetachedReadback, // read back submitted buffer data via a detached submit without flushing the open command buffer
+	BatchedReadback, // co-download hot readback buffers and recent finished small GPU writes during forced sync readbacks
 	Count
 };
 
@@ -57,6 +62,11 @@ inline constexpr PortInfo PORTS[] = {
     {Port::ImageHeapIncremental, "image-heap-incremental", "upstream PR 1289 (NeySlim)", false, false},
     {Port::RuntimeTableCache, "runtime-table-cache", "this tree (table1)", false, false},
     {Port::BarrierTracker, "barrier-tracker", "CarRamRod-963/KytyPS5@f80443cf88", false, false},
+    {Port::GpuIndirectThreadDim, "gpu-indirect-thread-dim", "this tree (readback1)", false, false},
+    {Port::GpuDrawIndirectCount, "gpu-draw-indirect-count", "this tree (readback1)", false, false},
+    {Port::InPlaceReadback, "inplace-readback", "CarRamRod-963/KytyPS5@4c4300d87d", false, false},
+    {Port::DetachedReadback, "detached-readback", "upstream PR 1254 (NeySlim)", false, false},
+    {Port::BatchedReadback, "batched-readback", "upstream PR 2093 (MrBigBritches)", false, false},
 };
 static_assert(std::size(PORTS) == static_cast<size_t>(Port::Count));
 

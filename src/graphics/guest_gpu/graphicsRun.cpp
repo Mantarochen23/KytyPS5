@@ -7,6 +7,7 @@
 #include "common/frameCost.h"
 #include "common/emulatorConfig.h"
 #include "common/logging/log.h"
+#include "common/ports.h"
 #include "common/profiler.h"
 #include "common/stringUtils.h"
 #include "common/threads.h"
@@ -231,6 +232,7 @@ void CommandProcessor::Reset() {
 	m_index_base_addr                  = 0;
 	m_num_instances                    = 1;
 	m_num_instances_addr               = 0;
+	m_num_instances_count_addr         = 0;
 	m_predicate_skip                   = false;
 	m_draw_indirect_args_base_addr     = 0;
 	m_dispatch_indirect_args_base_addr = 0;
@@ -668,6 +670,7 @@ void GuestGpu::ThreadRun(void* data) {
 		}
 
 		if (command) {
+			gpu->m_renderer.GetBufferCache().NoteCommandBoundary();
 			RenderActivity::Note("cp-command", 0, "-", "host command");
 			{
 				Common::DebugCounters::ScopedTimer busy(
@@ -737,6 +740,7 @@ bool GuestGpu::Process(Submission& submission) {
 			    cp.Process(submission.execution, submission.commands) == Pm4ProcessResult::Complete;
 			cp.SetSubmitter(nullptr);
 			if (submission.execution.MadeProgress()) {
+				m_renderer.GetBufferCache().NoteCommandBoundary();
 				Common::FrameCost::ScopedSubmitReason submit_reason(
 				    Common::FrameCost::SubmitReason::Slice);
 				cp.BufferFlush();
@@ -1044,6 +1048,8 @@ void CommandProcessor::ScanComputeShaders(std::span<const uint32_t> commands) {
 void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 	const bool debug_dump = graphics_debug_dump_enabled();
 	while (!execution.m_buffer_stack.empty()) {
+		// The previous packet recorded every GPU write it marked.
+		m_renderer.GetBufferCache().NoteCommandBoundary();
 		if (g_gpu_state != nullptr) {
 			g_gpu_state->ProcessCommands();
 		}
@@ -1149,11 +1155,22 @@ void CommandProcessor::SetNumInstances(uint32_t num_instances) {
 		num_instances = 1;
 	}
 
-	m_num_instances      = num_instances;
-	m_num_instances_addr = 0;
+	m_num_instances            = num_instances;
+	m_num_instances_addr       = 0;
+	m_num_instances_count_addr = 0;
 }
 
 uint32_t CommandProcessor::NumInstances() {
+	if (m_num_instances_count_addr != 0) {
+		const uint32_t raw_count = *reinterpret_cast<const uint32_t*>(m_num_instances_count_addr);
+		const uint32_t draw_count = std::min(raw_count, m_num_instances_max_count);
+		m_num_instances_count_addr = 0;
+		if (draw_count != 0) {
+			m_num_instances_addr = m_num_instances_args_addr +
+			                       static_cast<uint64_t>(draw_count - 1) * m_num_instances_stride +
+			                       offsetof(vk::DrawIndirectCommand, instanceCount);
+		}
+	}
 	if (m_num_instances_addr != 0) {
 		m_num_instances      = *reinterpret_cast<const uint32_t*>(m_num_instances_addr);
 		m_num_instances_addr = 0;
@@ -1292,6 +1309,51 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 	                     stride_in_bytes < (indexed ? sizeof(vk::DrawIndexedIndirectCommand)
 	                                                : sizeof(vk::DrawIndirectCommand)));
 
+	auto&      executor  = m_renderer.GetRenderExecutor();
+	const auto args_addr = m_draw_indirect_args_base_addr + data_offset;
+	const auto record_size =
+	    indexed ? sizeof(vk::DrawIndexedIndirectCommand) : sizeof(vk::DrawIndirectCommand);
+	if (count_addr != nullptr && Config::PortEnabled(Config::Port::GpuDrawIndirectCount) &&
+	    m_renderer.GetGraphics().draw_indirect_count_enabled) {
+		if (max_count_or_count == 0) {
+			Common::FrameCost::Add(Common::FrameCost::Counter::DrawsIndirectZero);
+			return;
+		}
+		const auto count_vaddr = reinterpret_cast<uint64_t>(count_addr);
+		const auto& limits     = m_renderer.GetGraphics().GetPhysicalDeviceProperties().limits;
+		const auto args_size =
+		    static_cast<uint64_t>(max_count_or_count - 1) * stride_in_bytes + record_size;
+		DrawIndirectArgs records {args_addr, count_vaddr, max_count_or_count, stride_in_bytes};
+		if ((count_vaddr & 3u) == 0 && max_count_or_count <= limits.maxDrawIndirectCount &&
+		    IndirectDrawOffsets(registers, records.offsets) &&
+		    m_renderer.IsMapped(args_addr, args_size) &&
+		    m_renderer.IsMapped(count_vaddr, sizeof(uint32_t))) {
+			const bool issued =
+			    !indexed
+			        ? executor.DrawAuto(CurrentBuffer(), {.indirect = records})
+			        : (m_index_buffer_size != 0 &&
+			           executor.DrawIndex(CurrentBuffer(),
+			                              {.index_count         = m_index_buffer_size,
+			                               .index_addr          = IndexAddress(0),
+			                               .index_type_and_size = m_index_type_and_size,
+			                               .indirect            = records}));
+			if (issued) {
+				m_num_instances_addr       = 0;
+				m_num_instances_count_addr = count_vaddr;
+				m_num_instances_args_addr  = args_addr;
+				m_num_instances_max_count  = max_count_or_count;
+				m_num_instances_stride     = stride_in_bytes;
+				Common::DebugCounters::Add(Common::DebugCounters::Counter::IndirectDraws,
+				                           max_count_or_count);
+				Common::FrameCost::Add(Common::FrameCost::Counter::DrawsIndirectGpuPackets);
+				Common::FrameCost::Add(Common::FrameCost::Counter::DrawsIndirectGpuSubdraws,
+				                       max_count_or_count);
+				Common::FrameCost::Add(Common::FrameCost::Counter::DrawIndirectCountGpu);
+				return;
+			}
+		}
+	}
+
 	const auto draw_count = count_addr == nullptr
 	                            ? max_count_or_count
 	                            : std::min(uint32_t {*count_addr}, max_count_or_count);
@@ -1301,14 +1363,13 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 	}
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::IndirectDraws, draw_count);
 
-	auto&      executor  = m_renderer.GetRenderExecutor();
-	const auto args_addr = m_draw_indirect_args_base_addr + data_offset;
 	// NUM_INSTANCES keeps the last draw's instance count.
+	m_num_instances_count_addr = 0;
 	m_num_instances_addr = args_addr + static_cast<uint64_t>(draw_count - 1) * stride_in_bytes +
 	                       offsetof(vk::DrawIndirectCommand, instanceCount);
 	// The GPU reads the records if the shaders allow; the VS prolog removes Vulkan's bases
 	// from the index VGPRs and copies them only to the user SGPRs the packet patches.
-	DrawIndirectArgs records {args_addr, draw_count, stride_in_bytes};
+	DrawIndirectArgs records {args_addr, 0, draw_count, stride_in_bytes};
 	if (IndirectDrawOffsets(registers, records.offsets)) {
 		if (!indexed && executor.DrawAuto(CurrentBuffer(), {.indirect = records})) {
 			Common::FrameCost::Add(Common::FrameCost::Counter::DrawsIndirectGpuPackets);
@@ -1390,6 +1451,28 @@ void CommandProcessor::DispatchIndirect(uint64_t args_addr, uint32_t mode, const
 	EXIT_NOT_IMPLEMENTED(args_addr == 0 || (args_addr & 3u) != 0);
 	if ((mode & Pm4::COMPUTE_DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS) != 0) {
 		Common::FrameCost::Add(Common::FrameCost::Counter::DispatchesIndirectThreadDim);
+		constexpr uint32_t DISPATCH_INITIATOR_ORDERED_APPEND_ENABLE = 1u << 3u;
+		const bool args_gpu_modified =
+		    m_renderer.GetBufferCache().IsRegionGpuModified(args_addr, sizeof(vk::DispatchIndirectCommand));
+		if (Config::PortEnabled(Config::Port::GpuIndirectThreadDim) && args_gpu_modified &&
+		    (mode & DISPATCH_INITIATOR_ORDERED_APPEND_ENABLE) == 0 &&
+		    m_renderer.GetTextureCache().WriteBackTick(args_addr, sizeof(vk::DispatchIndirectCommand)) == 0) {
+			DispatchOrigin origin {};
+			origin.packet           = packet;
+			origin.submitter        = m_submitter;
+			origin.args_addr        = args_addr;
+			origin.args_gpu_written = 1;
+			const ScopedDispatchOrigin scope(&origin);
+			m_sh_ctx.SetCsWaveSize(Pm4::ComputeWaveSize(mode));
+			const bool allow_async = g_current_execution != nullptr;
+			if (!m_renderer.GetRenderExecutor().DispatchIndirect(CurrentBuffer(), args_addr, mode,
+			                                                     IsAsyncComputeQueue(), allow_async)) {
+				SuspendOrSkipDispatch();
+			} else {
+				NoteDispatchDone();
+			}
+			return;
+		}
 		// The thread counts are read here, on the command processor, from guest memory (a GPU
 		// written range is downloaded first). The dispatch keeps the argument address: its report
 		// says `source=indirect-threads`, and a skipped producer of the counts skips it.
@@ -1397,13 +1480,14 @@ void CommandProcessor::DispatchIndirect(uint64_t args_addr, uint32_t mode, const
 		origin.packet           = packet;
 		origin.submitter        = m_submitter;
 		origin.args_addr        = args_addr;
-		origin.args_gpu_written =
-		    m_renderer.GetBufferCache().IsRegionGpuModified(args_addr, sizeof(vk::DispatchIndirectCommand))
-		        ? 1
-		        : 0;
+		origin.args_gpu_written = args_gpu_modified ? 1 : 0;
 		const ScopedDispatchOrigin  scope(&origin);
 		vk::DispatchIndirectCommand args;
-		LibKernel::Memory::ReadGuestMemory(args_addr, &args, sizeof(args));
+		{
+			Common::FrameCost::ScopedReadbackSite rb_site(
+			    Common::FrameCost::ReadbackSite::ThreadDim);
+			LibKernel::Memory::ReadGuestMemory(args_addr, &args, sizeof(args));
+		}
 		DispatchDirect(args.x, args.y, args.z, mode, packet);
 		return;
 	}

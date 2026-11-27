@@ -28,6 +28,7 @@ Clock::time_point                  g_window_start {};
 thread_local ScopedTimer*          g_active_timer   = nullptr;
 thread_local bool                  g_render_thread  = false;
 thread_local WaitReason            g_wait_reason    = WaitReason::Other;
+thread_local ReadbackSite          g_readback_site  = ReadbackSite::Other;
 thread_local SubmitReason          g_submit_reason  = SubmitReason::Other;
 
 ThreadCounters& Local() {
@@ -85,14 +86,70 @@ WaitReason CurrentWaitReason() noexcept {
 	return g_wait_reason;
 }
 
+ScopedReadbackSite::ScopedReadbackSite(ReadbackSite site) noexcept: m_previous(g_readback_site) {
+	g_readback_site = site;
+}
+
+ScopedReadbackSite::~ScopedReadbackSite() {
+	g_readback_site = m_previous;
+}
+
+ReadbackSite CurrentReadbackSite() noexcept {
+	return g_readback_site;
+}
+
 void RecordRenderWaitReason(uint64_t elapsed_ns) noexcept {
 	Counter calls = Counter::WaitOtherCalls;
 	Counter ns    = Counter::WaitOtherNs;
 	switch (g_wait_reason) {
-		case WaitReason::Readback:
+		case WaitReason::Readback: {
 			calls = Counter::WaitReadbackCalls;
 			ns    = Counter::WaitReadbackNs;
+			Counter site_calls = Counter::WaitRbOtherCalls;
+			Counter site_ns    = Counter::WaitRbOtherNs;
+			switch (g_readback_site) {
+				case ReadbackSite::ThreadDim:
+					site_calls = Counter::WaitRbThreadDimCalls;
+					site_ns    = Counter::WaitRbThreadDimNs;
+					break;
+				case ReadbackSite::Lds:
+					site_calls = Counter::WaitRbLdsCalls;
+					site_ns    = Counter::WaitRbLdsNs;
+					break;
+				case ReadbackSite::Scalar:
+					site_calls = Counter::WaitRbScalarCalls;
+					site_ns    = Counter::WaitRbScalarNs;
+					break;
+				case ReadbackSite::Heap:
+					site_calls = Counter::WaitRbHeapCalls;
+					site_ns    = Counter::WaitRbHeapNs;
+					break;
+				case ReadbackSite::VertexAttrib:
+					site_calls = Counter::WaitRbVertexAttribCalls;
+					site_ns    = Counter::WaitRbVertexAttribNs;
+					break;
+				case ReadbackSite::ColorMeta:
+					site_calls = Counter::WaitRbColorMetaCalls;
+					site_ns    = Counter::WaitRbColorMetaNs;
+					break;
+				case ReadbackSite::ReadFault:
+					site_calls = Counter::WaitRbReadFaultCalls;
+					site_ns    = Counter::WaitRbReadFaultNs;
+					break;
+				case ReadbackSite::WriteFault:
+					site_calls = Counter::WaitRbWriteFaultCalls;
+					site_ns    = Counter::WaitRbWriteFaultNs;
+					break;
+				case ReadbackSite::Invalidate:
+					site_calls = Counter::WaitRbInvalidateCalls;
+					site_ns    = Counter::WaitRbInvalidateNs;
+					break;
+				case ReadbackSite::Other: break;
+			}
+			Add(site_calls);
+			Add(site_ns, elapsed_ns);
 			break;
+		}
 		case WaitReason::StreamWrap:
 			calls = Counter::WaitStreamCalls;
 			ns    = Counter::WaitStreamNs;
@@ -262,7 +319,12 @@ ReportLines FormatWindow(const std::array<uint64_t, CounterCount>& delta, double
 	    "barriers_all={:.2f} barriers(global={:.2f} buffer={:.2f} image={:.2f}) "
 	    "pass_breaks={:.2f} barriers_dropped={:.2f} "
 	    "draw_ns(n={} prog={:.0f} rt={:.0f} pipe={:.0f} bind={:.0f} commit={:.0f} rec={:.0f}) "
-	    "disp_ns(n={} prog={:.0f} pipe={:.0f} bind={:.0f} guard={:.0f} commit={:.0f} rec={:.0f})\n",
+	    "disp_ns(n={} prog={:.0f} pipe={:.0f} bind={:.0f} guard={:.0f} commit={:.0f} rec={:.0f}) "
+	    "rb_site(tdim={:.2f}/{:.3f} lds={:.2f}/{:.3f} scalar={:.2f}/{:.3f} heap={:.2f}/{:.3f} "
+	    "vattr={:.2f}/{:.3f} meta={:.2f}/{:.3f} rfault={:.2f}/{:.3f} wfault={:.2f}/{:.3f} "
+	    "inv={:.2f}/{:.3f} other={:.2f}/{:.3f}) "
+	    "rb_path(inplace={:.2f} detached={:.2f} sync={:.2f} batch_ex={:.2f} gpu_tdim={:.2f} "
+	    "gpu_icount={:.2f})\n",
 	    wait_gpu_bg_ms, Milliseconds(delta, Counter::WaitReadbackNs, frames),
 	    Milliseconds(delta, Counter::WaitStreamNs, frames),
 	    Milliseconds(delta, Counter::WaitUnmapNs, frames),
@@ -316,7 +378,33 @@ ReportLines FormatWindow(const std::array<uint64_t, CounterCount>& delta, double
 	    NanosecondsPerCall(delta, Counter::DispatchStepBindNs, Counter::DispatchStepSamples),
 	    NanosecondsPerCall(delta, Counter::DispatchStepGuardNs, Counter::DispatchStepSamples),
 	    NanosecondsPerCall(delta, Counter::DispatchStepCommitNs, Counter::DispatchStepSamples),
-	    NanosecondsPerCall(delta, Counter::DispatchStepRecordNs, Counter::DispatchStepSamples));
+	    NanosecondsPerCall(delta, Counter::DispatchStepRecordNs, Counter::DispatchStepSamples),
+	    Mean(delta, Counter::WaitRbThreadDimCalls, frames),
+	    Milliseconds(delta, Counter::WaitRbThreadDimNs, frames),
+	    Mean(delta, Counter::WaitRbLdsCalls, frames),
+	    Milliseconds(delta, Counter::WaitRbLdsNs, frames),
+	    Mean(delta, Counter::WaitRbScalarCalls, frames),
+	    Milliseconds(delta, Counter::WaitRbScalarNs, frames),
+	    Mean(delta, Counter::WaitRbHeapCalls, frames),
+	    Milliseconds(delta, Counter::WaitRbHeapNs, frames),
+	    Mean(delta, Counter::WaitRbVertexAttribCalls, frames),
+	    Milliseconds(delta, Counter::WaitRbVertexAttribNs, frames),
+	    Mean(delta, Counter::WaitRbColorMetaCalls, frames),
+	    Milliseconds(delta, Counter::WaitRbColorMetaNs, frames),
+	    Mean(delta, Counter::WaitRbReadFaultCalls, frames),
+	    Milliseconds(delta, Counter::WaitRbReadFaultNs, frames),
+	    Mean(delta, Counter::WaitRbWriteFaultCalls, frames),
+	    Milliseconds(delta, Counter::WaitRbWriteFaultNs, frames),
+	    Mean(delta, Counter::WaitRbInvalidateCalls, frames),
+	    Milliseconds(delta, Counter::WaitRbInvalidateNs, frames),
+	    Mean(delta, Counter::WaitRbOtherCalls, frames),
+	    Milliseconds(delta, Counter::WaitRbOtherNs, frames),
+	    Mean(delta, Counter::ReadbackInPlace, frames),
+	    Mean(delta, Counter::ReadbackDetached, frames),
+	    Mean(delta, Counter::ReadbackSync, frames),
+	    Mean(delta, Counter::ReadbackBatchExtra, frames),
+	    Mean(delta, Counter::DispatchIndirectThreadDimGpu, frames),
+	    Mean(delta, Counter::DrawIndirectCountGpu, frames));
 	lines.cuts = fmt::format(
 	    "[frame] cuts breadcrumb_ops={:.2f} gpu_invalidate={:.2f} gpu_invalidate_skipped={:.2f} "
 	    "gpu_invalidate_gen_bumps={:.2f} guard_gpu={:.2f} guard_cpu={:.2f} guard_skipped={:.2f} "

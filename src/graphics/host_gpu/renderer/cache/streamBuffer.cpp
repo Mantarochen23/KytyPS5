@@ -7,7 +7,11 @@
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/commandScheduler.h"
 
+#include <algorithm>
 #include <cstring>
+#if defined(__SSE4_1__)
+#include <immintrin.h>
+#endif
 #include <numeric>
 #include <vk_mem_alloc.h>
 
@@ -60,7 +64,7 @@ constexpr vk::AccessFlags MEMORY_ACCESS =
 } // namespace
 
 Buffer::Buffer(GraphicContext& graphics, CommandScheduler& scheduler, MemoryUsage usage,
-               uint64_t cpu_address, vk::BufferUsageFlags flags, uint64_t size)
+               uint64_t cpu_address, vk::BufferUsageFlags flags, uint64_t size, bool host_readable)
     : m_graphics(&graphics), m_scheduler(&scheduler), m_usage(usage), m_cpu_address(cpu_address),
       m_size(size) {
 	KYTY_PROFILER_FUNCTION();
@@ -78,12 +82,28 @@ Buffer::Buffer(GraphicContext& graphics, CommandScheduler& scheduler, MemoryUsag
 	allocation_info.preferredFlags = usage == MemoryUsage::DeviceLocal
 	                                     ? VkMemoryPropertyFlags {}
 	                                     : VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+	const bool want_mapping = host_readable && usage == MemoryUsage::DeviceLocal;
+	if (want_mapping) {
+		allocation_info.flags |=
+		    VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT;
+		allocation_info.requiredFlags =
+		    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
+	}
 
 	VmaAllocationInfo allocation_result {};
 	VkBuffer          native_buffer = VK_NULL_HANDLE;
-	const auto        result        = static_cast<vk::Result>(vmaCreateBuffer(
+	auto              result        = static_cast<vk::Result>(vmaCreateBuffer(
 	    graphics.allocator, static_cast<const VkBufferCreateInfo*>(buffer_info), &allocation_info,
 	    &native_buffer, &m_allocation, &allocation_result));
+	if (result != vk::Result::eSuccess && want_mapping) {
+		// No mappable device-local memory, or no budget left in it: fall back to device-local.
+		allocation_info.flags &=
+		    ~(VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT);
+		allocation_info.requiredFlags = 0;
+		result = static_cast<vk::Result>(vmaCreateBuffer(
+		    graphics.allocator, static_cast<const VkBufferCreateInfo*>(buffer_info),
+		    &allocation_info, &native_buffer, &m_allocation, &allocation_result));
+	}
 	if (result != vk::Result::eSuccess) {
 		graphics.LogMemoryBudget();
 	}
@@ -119,6 +139,37 @@ void Buffer::Flush(uint64_t offset, uint64_t size) {
 		    vmaFlushAllocation(m_graphics->allocator, m_allocation, offset, size);
 		EXIT_NOT_IMPLEMENTED(static_cast<vk::Result>(result) != vk::Result::eSuccess);
 	}
+}
+
+void Buffer::ReadMapped(uint64_t offset, uint64_t size, void* destination) const {
+	EXIT_IF(!IsHostReadable() || offset > Size() || size > Size() - offset);
+	if (size == 0) {
+		return;
+	}
+	if (!IsCoherent()) {
+		const auto result =
+		    vmaInvalidateAllocation(m_graphics->allocator, m_allocation, offset, size);
+		EXIT_NOT_IMPLEMENTED(static_cast<vk::Result>(result) != vk::Result::eSuccess);
+	}
+	const auto* source = m_mapped.data() + offset;
+	auto*       target = static_cast<uint8_t*>(destination);
+#if defined(__SSE4_1__)
+	// Streaming loads may be served from fill buffers that predate the GPU's write: the fence
+	// orders them after every earlier load and store, so they observe the completed write.
+	_mm_mfence();
+	const auto lead =
+	    std::min<uint64_t>(size, (16u - reinterpret_cast<uintptr_t>(source) % 16u) % 16u);
+	std::memcpy(target, source, static_cast<size_t>(lead));
+	uint64_t done = lead;
+	for (; done + 16 <= size; done += 16) {
+		const auto value =
+		    _mm_stream_load_si128(reinterpret_cast<__m128i*>(const_cast<uint8_t*>(source + done)));
+		_mm_storeu_si128(reinterpret_cast<__m128i*>(target + done), value);
+	}
+	std::memcpy(target + done, source + done, static_cast<size_t>(size - done));
+#else
+	std::memcpy(target, source, static_cast<size_t>(size));
+#endif
 }
 
 void Buffer::Invalidate(uint64_t offset, uint64_t size) {
