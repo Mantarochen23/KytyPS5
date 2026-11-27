@@ -17,6 +17,7 @@
 #include <memory>
 #include <mutex>
 #include <nlohmann/json.hpp>
+#include <optional>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -73,6 +74,23 @@ bool                              g_dump_stop = false;
 std::atomic<uint64_t>             g_dump_written {0};
 std::atomic<uint64_t>             g_dump_dropped {0};
 std::atomic<uint64_t>             g_dump_high_water {0};
+
+// First-use records: a second bounded queue handled by the same writer thread.
+constexpr size_t   UseQueueCapacity = 128;
+constexpr uint64_t UseQueueBytes    = 256ull << 20;
+std::deque<UseRecord>             g_use_queue;
+uint64_t                          g_use_queue_bytes = 0;
+std::unordered_set<std::string>   g_use_seen;
+std::unordered_map<std::string, uint64_t> g_use_skipped;
+std::atomic<uint64_t>             g_use_written {0};
+std::atomic<uint64_t>             g_use_dropped {0};
+std::atomic<uint64_t>             g_use_high_water {0};
+std::atomic<uint64_t>             g_use_order {0};
+
+uint64_t UseBytes(const UseRecord& record) {
+	return record.memory.size() + record.input_info.size() +
+	       (record.user_data.size() + record.back_code.size()) * sizeof(uint32_t);
+}
 
 int64_t NowMs() {
 	return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -155,7 +173,9 @@ void WriteDumpEntry(const DumpEntry& entry, std::ofstream& index) {
 	      {"group_id", std::array {entry.info.group_id[0], entry.info.group_id[1],
 	                                entry.info.group_id[2]}},
 	      {"thread_ids_num", entry.info.thread_ids_num},
-	      {"tg_size_en", entry.info.tg_size_en}}},
+	      {"tg_size_en", entry.info.tg_size_en},
+	      {"workgroup_register", entry.info.workgroup_register},
+	      {"dispatch_thread_dimensions", entry.info.dispatch_thread_dimensions}}},
 	    {"missing_inputs", MissingInputs(entry)}};
 	index << record.dump() << '\n';
 	index.flush();
@@ -163,22 +183,93 @@ void WriteDumpEntry(const DumpEntry& entry, std::ofstream& index) {
 	else g_dump_dropped.fetch_add(1, std::memory_order_relaxed);
 }
 
+void SerializeUse(const UseRecord& record, uint64_t order, std::string& line,
+                  std::vector<uint8_t>& blob) {
+	blob.clear();
+	const auto put = [&](const void* data, uint64_t bytes) {
+		const auto begin = static_cast<uint64_t>(blob.size());
+		const auto* first = static_cast<const uint8_t*>(data);
+		if (bytes != 0) blob.insert(blob.end(), first, first + bytes);
+		return nlohmann::ordered_json {{"offset", begin}, {"bytes", bytes}};
+	};
+	auto input  = put(record.input_info.data(), record.input_info.size());
+	auto memory = put(record.memory.data(), record.memory.size());
+	auto back   = put(record.back_code.data(), record.back_code.size() * sizeof(uint32_t));
+	nlohmann::ordered_json ranges = nlohmann::ordered_json::array();
+	for (const auto& range: record.ranges) ranges.push_back({range.address, range.bytes});
+	nlohmann::ordered_json json {
+	    {"kind", "use"},
+	    {"order", order},
+	    {"hash", fmt::format("0x{:016x}", record.hash)},
+	    {"stage", record.stage},
+	    {"file", fmt::format("use_{}_{:016x}.bin", record.stage, record.hash)},
+	    {"options_wave_size", record.options_wave_size},
+	    {"user_data_base", record.user_data_base},
+	    {"user_data", record.user_data},
+	    {"push_window", {record.push_begin, record.push_end}},
+	    {"workgroup_counts", {record.workgroup_counts[0], record.workgroup_counts[1],
+	                          record.workgroup_counts[2]}},
+	    {"indirect_args_address", record.indirect_args_address},
+	    {"shader_base", record.shader_base},
+	    {"uses_image_heap", record.uses_image_heap},
+	    {"memory_truncated", record.memory_truncated},
+	    {"input_info", input},
+	    {"memory", memory},
+	    {"back_code", back},
+	    {"ranges", ranges}};
+	line = json.dump();
+}
+
+void WriteUseRecord(const UseRecord& record, uint64_t order, std::ofstream& index) {
+	std::string          line;
+	std::vector<uint8_t> blob;
+	SerializeUse(record, order, line, blob);
+	const auto name = fmt::format("use_{}_{:016x}.bin", record.stage, record.hash);
+	std::ofstream file(g_dump_dir / name, std::ios::binary | std::ios::trunc);
+	if (file) {
+		file.write(reinterpret_cast<const char*>(blob.data()),
+		           static_cast<std::streamsize>(blob.size()));
+		file.flush();
+	}
+	if (!file) {
+		g_use_dropped.fetch_add(1, std::memory_order_relaxed);
+		return;
+	}
+	file.close();
+	index << line << '\n';
+	index.flush();
+	if (index) g_use_written.fetch_add(1, std::memory_order_relaxed);
+	else g_use_dropped.fetch_add(1, std::memory_order_relaxed);
+}
+
 void DumpWorker() {
 	std::ofstream index(g_dump_dir / "index.jsonl", std::ios::app);
+	std::ofstream use_index(g_dump_dir / "use.jsonl", std::ios::app);
 	if (!index) {
 		g_dump_dropped.fetch_add(1, std::memory_order_relaxed);
 		return;
 	}
 	for (;;) {
-		DumpEntry entry;
+		std::optional<DumpEntry> entry;
+		std::optional<UseRecord> use;
 		{
 			std::unique_lock lock(g_dump_mutex);
-			g_dump_ready.wait(lock, [] { return g_dump_stop || !g_dump_queue.empty(); });
-			if (g_dump_queue.empty() && g_dump_stop) return;
-			entry = std::move(g_dump_queue.front());
-			g_dump_queue.pop_front();
+			g_dump_ready.wait(lock, [] {
+				return g_dump_stop || !g_dump_queue.empty() || !g_use_queue.empty();
+			});
+			if (g_dump_queue.empty() && g_use_queue.empty() && g_dump_stop) return;
+			if (!g_dump_queue.empty()) {
+				entry = std::move(g_dump_queue.front());
+				g_dump_queue.pop_front();
+			} else {
+				use = std::move(g_use_queue.front());
+				g_use_queue.pop_front();
+				g_use_queue_bytes -= std::min(g_use_queue_bytes, UseBytes(*use));
+			}
 		}
-		WriteDumpEntry(entry, index);
+		if (entry) WriteDumpEntry(*entry, index);
+		else if (use && use_index) WriteUseRecord(*use, g_use_order.fetch_add(1), use_index);
+		else g_use_dropped.fetch_add(1, std::memory_order_relaxed);
 	}
 }
 
@@ -246,6 +337,45 @@ void DumpRegistration(uint64_t hash, const DumpRegistrationInfo& info,
 	const auto size = static_cast<uint64_t>(g_dump_queue.size());
 	auto high = g_dump_high_water.load(std::memory_order_relaxed);
 	while (size > high && !g_dump_high_water.compare_exchange_weak(
+	                          high, size, std::memory_order_relaxed)) {}
+	lock.unlock();
+	g_dump_ready.notify_one();
+}
+
+void SerializeUseRecord(const UseRecord& record, uint64_t order, std::string& line,
+                        std::vector<uint8_t>& blob) {
+	SerializeUse(record, order, line, blob);
+}
+
+bool UseDumpEnabled() {
+	return !g_dump_dir.empty();
+}
+
+bool WantUse(uint64_t hash, std::string_view stage) {
+	if (g_dump_dir.empty()) return false;
+	std::lock_guard lock(g_dump_mutex);
+	return g_use_seen.insert(fmt::format("{}:{:016x}", stage, hash)).second;
+}
+
+void NoteUseSkipped(std::string_view reason) {
+	std::lock_guard lock(g_dump_mutex);
+	++g_use_skipped[std::string(reason)];
+}
+
+void DumpUse(UseRecord&& record) {
+	if (g_dump_dir.empty()) return;
+	std::unique_lock lock(g_dump_mutex, std::try_to_lock);
+	const auto bytes = UseBytes(record);
+	if (!lock.owns_lock() || g_use_queue.size() >= UseQueueCapacity ||
+	    g_use_queue_bytes + bytes > UseQueueBytes) {
+		g_use_dropped.fetch_add(1, std::memory_order_relaxed);
+		return;
+	}
+	g_use_queue_bytes += bytes;
+	g_use_queue.push_back(std::move(record));
+	const auto size = static_cast<uint64_t>(g_use_queue.size());
+	auto high = g_use_high_water.load(std::memory_order_relaxed);
+	while (size > high && !g_use_high_water.compare_exchange_weak(
 	                          high, size, std::memory_order_relaxed)) {}
 	lock.unlock();
 	g_dump_ready.notify_one();
@@ -326,6 +456,20 @@ void PrintSummary() {
 		           g_dump_written.load(std::memory_order_relaxed),
 		           g_dump_dropped.load(std::memory_order_relaxed),
 		           g_dump_high_water.load(std::memory_order_relaxed), DumpQueueCapacity);
+	}
+	if (!g_dump_dir.empty()) {
+		std::string skipped;
+		{
+			std::lock_guard lock(g_dump_mutex);
+			for (const auto& [reason, count]: g_use_skipped) {
+				skipped += fmt::format(" {}={}", reason, count);
+			}
+		}
+		AppendLine(text, "use dump: written={} dropped={} queue_high_water={}/{} skipped:{}",
+		           g_use_written.load(std::memory_order_relaxed),
+		           g_use_dropped.load(std::memory_order_relaxed),
+		           g_use_high_water.load(std::memory_order_relaxed), UseQueueCapacity,
+		           skipped.empty() ? " none" : skipped);
 	}
 	text += "[shader-reg] === end shader registration ledger ===\n";
 

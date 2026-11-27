@@ -165,7 +165,11 @@ void ShaderMapUserData(uint64_t addr, const ShaderMappedData& data) {
 	                               data.registration_compute_input.group_id[2]},
 	     .thread_ids_num        = static_cast<uint32_t>(
 	         std::max(data.registration_compute_input.thread_ids_num, 0)),
-	     .tg_size_en            = data.registration_compute_input.tg_size_en},
+	     .tg_size_en            = data.registration_compute_input.tg_size_en,
+	     .workgroup_register    = static_cast<uint32_t>(
+	         std::max(data.registration_compute_input.workgroup_register, 0)),
+	     .dispatch_thread_dimensions =
+	         data.registration_compute_input.dispatch_thread_dimensions},
 	    code_copy);
 	mapped.vertex_error =
 	    ShaderReadVertexMetadata(data, HW::UserSgprInfo::SGPRS_MAX, mapped.vertex);

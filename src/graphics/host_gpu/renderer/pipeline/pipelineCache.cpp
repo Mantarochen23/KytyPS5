@@ -39,6 +39,7 @@
 #include <cstring>
 #include <fmt/format.h>
 #include <limits>
+#include <set>
 #include <ranges>
 #include <span>
 #include <spirv-tools/libspirv.hpp>
@@ -144,6 +145,45 @@ bool ReadShaderGuestMemory(void*, uint64_t address, std::span<uint32_t> values) 
 	// Image synchronization belongs to formatted buffer bindings, not these reads.
 	return !values.empty() &&
 	       Libs::LibKernel::Memory::TryReadBufferBacking(address, values.data(), values.size_bytes());
+}
+
+// Collects the guest memory a first-use materialization reads, for --dump-registered-shaders.
+struct UseMemoryRecorder {
+	static constexpr uint64_t MaxBytes  = 16ull << 20;
+	static constexpr size_t   MaxRanges = 65536;
+	std::vector<Common::ShaderRegLedger::UseRange> ranges;
+	std::vector<uint8_t>                           memory;
+	std::set<std::pair<uint64_t, uint64_t>>        seen;
+	bool                                           truncated = false;
+};
+
+bool RecordingGuestRead(void* userdata, uint64_t address, std::span<uint32_t> values) {
+	if (!ReadShaderGuestMemory(nullptr, address, values)) return false;
+	auto&      recorder = *static_cast<UseMemoryRecorder*>(userdata);
+	const auto bytes    = static_cast<uint64_t>(values.size_bytes());
+	if (!recorder.seen.emplace(address, bytes).second) return true;
+	if (recorder.ranges.size() >= UseMemoryRecorder::MaxRanges ||
+	    recorder.memory.size() + bytes > UseMemoryRecorder::MaxBytes) {
+		recorder.truncated = true;
+		return true;
+	}
+	recorder.ranges.push_back({address, bytes});
+	const auto* begin = reinterpret_cast<const uint8_t*>(values.data());
+	recorder.memory.insert(recorder.memory.end(), begin, begin + bytes);
+	return true;
+}
+
+const char* UseStageName(ShaderType stage) {
+	switch (stage) {
+		case ShaderType::Compute: return "cs";
+		case ShaderType::Pixel: return "ps";
+		case ShaderType::Vertex: return "vs";
+		case ShaderType::Local: return "ls";
+		case ShaderType::TessellationControl: return "hs";
+		case ShaderType::TessellationEvaluation: return "tes";
+		case ShaderType::Mesh: return "ms";
+		default: return "unknown";
+	}
 }
 
 void DumpShader(std::span<const uint32_t> words, const std::string& name) {
@@ -625,6 +665,61 @@ const ShaderModule* PipelineCache::GetProgramImpl(const ShaderParams& params, In
 		module.info.bindings.AdvancePushData(push_data, module.info.stage);
 		return &module;
 	};
+	// --dump-registered-shaders: at the first use of a (stage, hash) whose plan exists, replay its
+	// materialization over a recording reader and queue what the translator and the plan read.
+	const auto capture_use = [&] {
+		if (!Common::ShaderRegLedger::UseDumpEnabled() || entry == m_program_cache.end()) return;
+		if (!Common::ShaderRegLedger::WantUse(params.hash, UseStageName(options.stage))) return;
+		auto& program = entry->second;
+		if (program.skip_dispatch) return;
+		if (program.call_source) {
+			Common::ShaderRegLedger::NoteUseSkipped("call_targets");
+			return;
+		}
+		if constexpr (std::is_trivially_copyable_v<InputInfo>) {
+			UseMemoryRecorder recorder;
+			auto              replay = runtime;
+			replay.userdata                   = &recorder;
+			replay.read_specialization_memory = RecordingGuestRead;
+			replay.image_heap                 = nullptr;
+			ShaderRecompiler::IR::ResourceSnapshot       snapshot;
+			ShaderRecompiler::IR::ResourceSpecialization specialization;
+			if (!ShaderRecompiler::IR::MaterializeResources(program.resource_plan, replay, snapshot,
+			                                                specialization)) {
+				Common::ShaderRegLedger::NoteUseSkipped("materialization_failed");
+				return;
+			}
+			Common::ShaderRegLedger::UseRecord record;
+			record.stage             = UseStageName(options.stage);
+			record.hash              = params.hash;
+			record.options_wave_size = options.wave_size;
+			record.user_data_base    = options.user_data_base;
+			record.push_begin        = push_data.begin;
+			record.push_end          = push_data.end;
+			record.shader_base       = params.Base();
+			record.uses_image_heap   = std::ranges::any_of(
+                program.resource_plan.info.images, &ShaderRecompiler::IR::ImageResource::heap);
+			record.memory_truncated  = recorder.truncated;
+			record.user_data.assign(user_data.begin(), user_data.end());
+			record.back_code.assign(params.back_code.begin(), params.back_code.end());
+			record.ranges = std::move(recorder.ranges);
+			record.memory = std::move(recorder.memory);
+			if constexpr (std::is_same_v<InputInfo, ShaderComputeInputInfo>) {
+				for (size_t axis = 0; axis < 3; axis++) {
+					record.workgroup_counts[axis] = input_info.workgroup_counts[axis];
+				}
+				record.indirect_args_address = input_info.indirect_args_address;
+			}
+			InputInfo copy = input_info;
+			copy.stage     = {};
+			record.input_info.resize(sizeof(InputInfo));
+			std::memcpy(record.input_info.data(), &copy, sizeof(InputInfo));
+			Common::ShaderRegLedger::DumpUse(std::move(record));
+		} else {
+			Common::ShaderRegLedger::NoteUseSkipped("input_not_copyable");
+		}
+	};
+	capture_use();
 	const auto finish_options = [&] {
 		options.shader_hash     = params.hash;
 		options.user_data       = user_data;
@@ -857,6 +952,7 @@ const ShaderModule* PipelineCache::GetProgramImpl(const ShaderParams& params, In
 			StoreFailedProgram(m_lookup_key, program.failure_reason);
 			return nullptr;
 		}
+		capture_use();
 	} else if (source_changed) {
 		entry->second.resource_plan = ShaderRecompiler::IR::ExtractResourcePlan(translated.program);
 		if (const auto* module = entry->second.FindModule<true>(runtime, push_data)) {
