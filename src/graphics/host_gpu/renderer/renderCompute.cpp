@@ -664,6 +664,18 @@ static std::vector<SkipTaint::Use> ComputeBufferUses(const ShaderStageRuntime& s
 		uses.push_back({descriptor.Base48(), size, metadata[i].read || !metadata[i].written,
 		                metadata[i].written});
 	}
+	for (const auto& table: stage.resources->indirect_buffer_tables) {
+		if (table.root_resource >= metadata.size()) continue;
+		const auto& meta = metadata[table.root_resource];
+		if (!meta.written) continue;
+		for (const auto& entry: table.entries) {
+			const auto descriptor = DecodeNativeDescriptor<ShaderBufferResource>(entry);
+			auto       size       = ShaderRecompiler::IR::BufferBindingSize(meta, descriptor);
+			if (descriptor.NumRecords() == UINT32_MAX) size = std::min<uint64_t>(size, 256u << 20u);
+			if (descriptor.Base48() == 0 || size == 0) continue;
+			uses.push_back({descriptor.Base48(), size, meta.read || !meta.written, meta.written});
+		}
+	}
 	return uses;
 }
 
