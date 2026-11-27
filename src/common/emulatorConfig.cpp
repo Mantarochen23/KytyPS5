@@ -618,4 +618,8 @@ uint32_t CatchupMaxAgeMs() {
 	return g_config != nullptr ? g_config->catchup_max_age_ms : 0u;
 }
 
+bool RuntimeTableMark() {
+	return g_config == nullptr || g_config->runtime_table_mark != 0;
+}
+
 } // namespace Config

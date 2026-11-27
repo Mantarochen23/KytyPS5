@@ -1415,6 +1415,7 @@ void BufferCache::AddTableWriteUnion(const RangeSet& ranges) {
 
 void BufferCache::MarkRuntimeTableWritten(const std::shared_ptr<RuntimeTableState>& state) {
 	if (state == nullptr || state->WriteRanges().Empty()) return;
+	if (!Config::RuntimeTableMark()) return;
 	Common::FrameCost::Add(Common::FrameCost::Counter::TableMarks);
 	// The write itself is one clock tick for the whole union (see WriteStamp), so a repeated mark
 	// is still a visible GPU write to anything reading a stamp over a written candidate.
