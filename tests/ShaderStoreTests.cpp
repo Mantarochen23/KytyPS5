@@ -335,7 +335,7 @@ void TestBuildTimingLargeModuleWarningLine() {
 	BuildTiming::Build small {
 	    .stage = "CS",
 	    .hash  = 0xaaaa000000000002ull,
-	    .words = BuildTiming::LargeModuleWarningWords,
+	    .words = BuildTiming::OversizedModuleWarningWords,
 	};
 	Check(BuildTiming::WarningLine(small).empty(),
 	      "module at or below 1,000,000 words must not emit [build] WARNING");
@@ -371,13 +371,13 @@ void TestBuildTimingLargeModuleWarningLine() {
 	const auto warn = BuildTiming::WarningLine(large);
 	Check(warn.find("[build] WARNING CS hash=0xaaaa000000000002 words=12000000") != std::string::npos,
 	      "warning line missing stage/hash/words header");
-	Check(warn.find("indirect-buffer#0(words=11600000 candidates=2000 accesses=20 words/access=580000)") !=
+	Check(warn.find("#1 indirect-buffer[res=0]: candidates=2000 accesses=20 words=11600000 (~580000/access)") !=
 	          std::string::npos,
 	      "warning line missing top contributor breakdown");
-	Check(warn.find("indirect-image#1(words=240000 candidates=32 accesses=4 words/access=60000)") !=
+	Check(warn.find("#2 indirect-image[res=1]: candidates=32 accesses=4 words=240000 (~60000/access)") !=
 	          std::string::npos,
 	      "warning line missing second contributor breakdown");
-	Check(warn.find("other#0(words=160000 candidates=0 accesses=1 words/access=160000)") !=
+	Check(warn.find("#3 other[res=0]: candidates=0 accesses=1 words=160000 (~160000/access)") !=
 	          std::string::npos,
 	      "warning line missing third contributor breakdown");
 }

@@ -1131,9 +1131,18 @@ const ShaderModule* PipelineCache::GetProgramImpl(const ShaderParams& params, In
 		    .words             = e.words,
 		    .where             = "render",
 		    .reason            = "budget-refused",
-		    .top_contributors  = e.emit_stats.top_contributors,
 		    .contributor_count = e.emit_stats.contributor_count,
 		};
+		for (uint32_t i = 0; i < e.emit_stats.contributor_count && i < oversized.top_contributors.size(); ++i) {
+			const auto& src = e.emit_stats.top_contributors[i];
+			oversized.top_contributors[i] = {
+			    .kind       = src.kind,
+			    .resource   = src.resource,
+			    .candidates = src.candidates,
+			    .accesses   = src.accesses,
+			    .words      = src.words,
+			};
+		}
 		if (const auto warn = BuildTiming::WarningLine(oversized); !warn.empty()) {
 			Log::WriteToConsoleAndLog(warn + "\n");
 		}
