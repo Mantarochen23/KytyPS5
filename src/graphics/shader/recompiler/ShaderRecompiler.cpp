@@ -761,8 +761,9 @@ CompileResult CompileProgram(TranslateResult translated, const CompileOptions& o
 
 	LOGF("ShaderRecompiler %s phase begin: hash=0x%016" PRIx64 " SPIR-V EmitProgram\n", stage,
 	     ir.shader_hash);
+	Spirv::EmitStats emit_stats;
 	auto spirv = Spirv::EmitProgram(ir, options.input_info, push_data, *options.profile,
-	                                options.emit_debug_info);
+	                                options.emit_debug_info, &emit_stats);
 	if (Config::SpirvCompactEnabled()) {
 		const auto before = spirv.size();
 		std::vector<uint32_t> compact;
@@ -789,8 +790,10 @@ CompileResult CompileProgram(TranslateResult translated, const CompileOptions& o
 	                               std::chrono::steady_clock::now() - emit_begin)
 	                               .count()));
 	CompileResult result;
-	result.spirv   = std::move(spirv);
-	result.program = std::move(ir);
+	result.spirv      = std::move(spirv);
+	result.program    = std::move(ir);
+	result.emit_stats = emit_stats;
+	result.emit_stats.total_words = result.spirv.size();
 	if (options.dump_ir) {
 		result.decoded_dump = std::move(translated.decoded_dump);
 		result.ir_dump      = std::move(ir_dump);

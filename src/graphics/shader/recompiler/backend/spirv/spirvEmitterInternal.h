@@ -178,7 +178,21 @@ struct EmitterState {
 	std::vector<InputBinding>  inputs;
 	std::vector<OutputBinding> outputs;
 	std::vector<uint32_t>      interface_variables;
+	std::unordered_map<uint64_t, EmitContributor> emit_contributors;
 };
+
+inline void RecordEmitContributor(EmitterState& state, const char* kind, uint32_t resource,
+                                  uint32_t candidates, uint32_t accesses, uint64_t words) {
+	if (words == 0u) return;
+	const uint64_t key =
+	    (static_cast<uint64_t>(reinterpret_cast<uintptr_t>(kind)) * 1099511628211ull) ^ resource;
+	auto& entry      = state.emit_contributors[key];
+	entry.kind       = kind;
+	entry.resource   = resource;
+	entry.candidates = std::max(entry.candidates, candidates);
+	entry.accesses += accesses;
+	entry.words += words;
+}
 
 uint32_t TypeVoid(EmitterState& state);
 uint32_t TypeBool(EmitterState& state);

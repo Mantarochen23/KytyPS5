@@ -40,6 +40,7 @@ struct CompileResult {
 	std::string            decoded_dump;
 	std::string            ir_dump;
 	IR::Program            program;
+	Spirv::EmitStats       emit_stats;
 };
 
 // Decoded source and typed scalar call queries are retained once per cache source.

@@ -1,6 +1,7 @@
 #ifndef EMULATOR_SRC_GRAPHICS_HOST_GPU_RENDERER_PIPELINE_BUILDTIMING_H_
 #define EMULATOR_SRC_GRAPHICS_HOST_GPU_RENDERER_PIPELINE_BUILDTIMING_H_
 
+#include <array>
 #include <chrono>
 #include <cinttypes>
 #include <cstdint>
@@ -36,6 +37,16 @@ struct Steps {
 	uint64_t total_us = 0;
 };
 
+inline constexpr uint64_t OversizedModuleWarningWords = 1'000'000u;
+
+struct Contributor {
+	const char* kind       = "";
+	uint32_t    resource   = 0;
+	uint32_t    candidates = 0;
+	uint32_t    accesses   = 0;
+	uint64_t    words      = 0;
+};
+
 struct Build {
 	// "cs", "vs", "ps", ... for a module, "pipeline-cs" or "pipeline-gfx" for a pipeline.
 	const char* stage = "";
@@ -47,10 +58,36 @@ struct Build {
 	// "dispatch", "draw", "prefetch" or "warmup".
 	const char* reason = "";
 	// How often this hash was built in this run, 1 for the first; 0 = not counted.
-	uint32_t    number = 0;
+	uint32_t                   number            = 0;
+	std::array<Contributor, 3> top_contributors {};
+	uint32_t                   contributor_count = 0;
 };
 
 [[nodiscard]] inline double Ms(uint64_t us) { return static_cast<double>(us) / 1000.0; }
+
+[[nodiscard]] inline std::string FormatContributors(const std::array<Contributor, 3>& contributors,
+                                                    uint32_t count) {
+	if (count == 0u) return "none";
+	std::string out;
+	for (uint32_t i = 0; i < count && i < contributors.size(); ++i) {
+		const auto& c = contributors[i];
+		const uint64_t per_access = c.accesses != 0u ? c.words / c.accesses : c.words;
+		if (i != 0u) out += "; ";
+		out += fmt::format("#{} {}[res={}]: candidates={} accesses={} words={} (~{}/access)",
+		                   i + 1u, c.kind, c.resource, c.candidates, c.accesses, c.words,
+		                   per_access);
+	}
+	return out;
+}
+
+[[nodiscard]] inline std::string WarningLine(const Build& build) {
+	if (build.words <= OversizedModuleWarningWords) {
+		return {};
+	}
+	return fmt::format("[build] WARNING {} hash=0x{:016x} words={} (>{}) top contributors: {}",
+	                   build.stage, build.hash, build.words, OversizedModuleWarningWords,
+	                   FormatContributors(build.top_contributors, build.contributor_count));
+}
 
 [[nodiscard]] inline std::string Line(const Build& build) {
 	const auto& s = build.steps;

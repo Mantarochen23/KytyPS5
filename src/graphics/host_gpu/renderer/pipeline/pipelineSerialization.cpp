@@ -74,7 +74,7 @@ template <class S, class Key> void IoKey(S& io, Key& key) {
 template <class S, class Module> void IoModule(S& io, Module& stage) {
 	// The handle comes from the SPIR-V. Function code: the callee code of a module with calls.
 	auto& [id, handle, info, specialization, function_code, rect_parameters, mesh_task,
-	       legacy_hash, legacy_checked] = stage;
+	       legacy_hash, legacy_checked, spirv_words] = stage;
 	IoAll(io, id, info, specialization, function_code, rect_parameters, mesh_task, legacy_hash);
 }
 
@@ -301,7 +301,8 @@ void PipelineCache::PrepareStoreModule(StoreItem& item, bool keep, WarmUpTimes& 
 		times.plans += Nanoseconds(begin);
 		if (item.failed) return;
 	}
-	item.spirv_words = item.spirv.size();
+	item.spirv_words        = item.spirv.size();
+	item.module.spirv_words = item.spirv_words;
 	const auto begin = Clock::now();
 	if (keep) {
 		Common::RecoverableScope scope;

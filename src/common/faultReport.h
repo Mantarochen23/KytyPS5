@@ -16,6 +16,24 @@ namespace Common::FaultReport {
 // With `name` the host thread is also given that name (at most 15 characters).
 void SetThreadTag(const char* tag, const char* name = nullptr) noexcept;
 
+// Sets a per-thread activity detail printed alongside the thread tag on a fault (for example the
+// shader hash, stage and word count a worker is compiling). Passing nullptr or "" clears it.
+// Allocation-free and signal-safe.
+void SetThreadActivity(const char* detail) noexcept;
+
+// RAII guard for SetThreadActivity; restores the previous activity on exit.
+class ScopedActivity {
+public:
+	explicit ScopedActivity(const char* detail) noexcept;
+	~ScopedActivity() noexcept;
+	ScopedActivity(const ScopedActivity&)            = delete;
+	ScopedActivity& operator=(const ScopedActivity&) = delete;
+
+private:
+	char m_previous[160] {};
+	bool m_had_previous = false;
+};
+
 // Reads the loaded modules (and, once, the symbol table of the main executable). Call at startup
 // and after a dlopen; faults at an address no table knows fall back to reading /proc/self/maps.
 void RefreshModules();

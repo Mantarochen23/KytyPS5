@@ -85,6 +85,7 @@ public:
 	DeferredPhi AddDeferredPhi(uint32_t type, uint32_t result, size_t incoming_count);
 	void        PatchDeferredPhi(DeferredPhi phi, size_t incoming, uint32_t value, uint32_t parent);
 
+	[[nodiscard]] size_t                FunctionWordCount() const noexcept { return m_functions.size(); }
 	[[nodiscard]] std::vector<uint32_t> Build() const;
 
 private:

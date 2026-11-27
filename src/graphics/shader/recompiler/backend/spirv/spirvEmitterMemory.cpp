@@ -363,6 +363,18 @@ auto EmitBufferAccess(ValueEmitContext& ctx, const IR::Inst& inst, IR::MemoryInf
 	const auto& buffer = state.program.info.buffers[root_resource];
 	const auto& handle = *inst.Arg(0).ResolveInstruction();
 	const auto selected = ctx.Arg(handle, 0);
+	const auto words_before = state.builder.FunctionWordCount();
+	struct ContributorGuard {
+		EmitterState& state;
+		uint32_t      resource;
+		uint32_t      candidates;
+		size_t        before;
+		~ContributorGuard() {
+			RecordEmitContributor(state, "indirect-buffer", resource, candidates, 1u,
+			                      state.builder.FunctionWordCount() - before);
+		}
+	} contributor_guard {state, root_resource, static_cast<uint32_t>(buffer.indirect_resources.size()),
+	                     words_before};
 	const auto representative = SharedIndirectBufferResource(state, root_resource);
 	const auto shared = representative != UINT32_MAX;
 	const auto empty_root = shared && EmptyIndirectBufferCandidate(state, root_resource);
@@ -1470,6 +1482,8 @@ void EmitLoopGuardReport(EmitterState& state) {
 
 void DefineIndirectBufferLoads(ValueEmitContext& ctx) {
 	auto& state = ctx.state;
+	const auto words_before = state.builder.FunctionWordCount();
+	uint32_t   defined = 0u;
 	for (const auto* block: state.program.blocks) {
 		for (const auto& inst: *block) {
 			const auto components = IR::BufferComponentCount(inst.GetOpcode());
@@ -1506,7 +1520,12 @@ void DefineIndirectBufferLoads(ValueEmitContext& ctx) {
 			    : LoadIndirectBuffer(ctx, buffer, memory.data_bits, components, memory.coherent);
 			state.builder.AddFunction(spv::OpReturnValue, result);
 			state.builder.AddFunction(spv::OpFunctionEnd);
+			++defined;
 		}
+	}
+	if (defined != 0u) {
+		RecordEmitContributor(state, "indirect-buffer-load-helper", 0u, 0u, defined,
+		                      state.builder.FunctionWordCount() - words_before);
 	}
 }
 
@@ -1612,12 +1631,17 @@ uint32_t EmitBufferAtomic64(ValueEmitContext& ctx, const IR::Inst& inst) {
 			    const auto& buffer = state.program.info.buffers[mem.resource];
 			    const auto& handle = *inst.Arg(0).ResolveInstruction();
 			    const auto  selected = ctx.Arg(handle, 0);
-			    return EmitIndexSwitch(state, selected, buffer.indirect_resources.size(),
+			    const auto  words_before = state.builder.FunctionWordCount();
+			    const auto  result = EmitIndexSwitch(state, selected, buffer.indirect_resources.size(),
 			                           TypeU64(state), [&](uint32_t item) {
 				                           auto candidate = mem;
 				                           candidate.resource = buffer.indirect_resources[item];
 				                           return emit_one(candidate);
 			                           });
+			    RecordEmitContributor(state, "indirect-buffer-atomic64", mem.resource,
+			                          static_cast<uint32_t>(buffer.indirect_resources.size()), 1u,
+			                          state.builder.FunctionWordCount() - words_before);
+			    return result;
 		    }
 		    return emit_one(mem);
 	    });
