@@ -1502,9 +1502,15 @@ void TestShaderCacheRecords() {
 
 namespace Common {
 
-void DbgExitHandler(const char *, int, std::string_view) { std::abort(); }
+void DbgExitHandler(const char *file, int line, std::string_view) {
+  std::fprintf(stderr, "ResourceMaterializationTests: exit at %s:%d\n", file, line);
+  std::abort();
+}
 
-void DbgExitIfHandler(const char *, const char *, int) { std::abort(); }
+void DbgExitIfHandler(const char *file, const char *, int line) {
+  std::fprintf(stderr, "ResourceMaterializationTests: exit at %s:%d\n", file, line);
+  std::abort();
+}
 
 } // namespace Common
 
