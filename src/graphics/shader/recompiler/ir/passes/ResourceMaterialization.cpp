@@ -241,6 +241,17 @@ bool BufferWriteOverlaps(const BufferResource& resource, const DescriptorValue& 
 	});
 }
 
+bool NormalizeIndexedRawBuffer(DescriptorValue& value, ShaderBufferResource& descriptor) {
+	// With OOB_SELECT=3 and swizzle off, NUM_RECORDS is a raw byte bound [0, NUM_RECORDS).
+	// When STRIDE divides NUM_RECORDS evenly (including STRIDE=1), NUM_RECORDS / STRIDE records
+	// of STRIDE bytes span the exact same byte range under linear index bounds (OOB_SELECT=0).
+	const auto stride = descriptor.Stride();
+	if (stride == 0u || descriptor.NumRecords() % stride != 0u) return false;
+	value.dwords[2] = descriptor.NumRecords() / stride;
+	value.dwords[3] &= ~(3u << 28u);
+	return DecodeBufferDescriptor(value, descriptor);
+}
+
 bool NormalizeIndirectBuffer(DescriptorValue& value, bool indexed, const BufferResource& resource) {
 	ShaderBufferResource descriptor;
 	if (!DecodeBufferDescriptor(value, descriptor)) return false;
@@ -265,6 +276,10 @@ bool NormalizeIndirectBuffer(DescriptorValue& value, bool indexed, const BufferR
 		value.dwords[3] |= 3u << 28u;
 		if (!DecodeBufferDescriptor(value, descriptor)) return false;
 	}
+	if (indexed && !descriptor.SwizzleEnabled() && !descriptor.AddTid() &&
+	    descriptor.OutOfBounds() == 3u) {
+		(void)NormalizeIndexedRawBuffer(value, descriptor);
+	}
 	if (descriptor.SwizzleEnabled() || descriptor.AddTid() ||
 	    descriptor.OutOfBounds() != (indexed ? 0u : 3u)) {
 		return SpecializationFail(fmt::format(
@@ -282,6 +297,7 @@ bool NormalizeIndirectBuffer(DescriptorValue& value, bool indexed, const BufferR
 		if (!formatted_read) {
 			const bool scalar = resource.max_byte_extent == 4u &&
 			    (descriptor.Format() == Prospero::BufferFormat::k32UInt ||
+			     descriptor.Format() == Prospero::BufferFormat::k8UInt ||
 			     descriptor.Format() == Prospero::BufferFormat::k8SInt);
 			const bool rgba16 = resource.max_byte_extent == 16u &&
 			    descriptor.Format() == Prospero::BufferFormat::k16_16_16_16Float;
@@ -290,7 +306,7 @@ bool NormalizeIndirectBuffer(DescriptorValue& value, bool indexed, const BufferR
 			const bool identity = rgba16 ? swizzle == DstSel(4, 5, 6, 7)
 			                             : (swizzle & ~DstSel(0, 1, 1, 1)) == DstSel(4);
 			if ((!scalar && !rgba16) || descriptor.Stride() != format.byte_size || !identity)
-				return SpecializationFail("indirect formatted stores require tight identity SInt8, UInt32 or RGBA16Float records");
+				return SpecializationFail("indirect formatted stores require tight identity UInt8, SInt8, UInt32 or RGBA16Float records");
 		}
 		if (formatted_read &&
 		    (descriptor.Base48() == 0u || descriptor.Stride() == 0u || descriptor.NumRecords() == 0u)) {
