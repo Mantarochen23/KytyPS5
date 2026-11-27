@@ -125,6 +125,13 @@ void TestStoreIdentity() {
 	Check(ShaderStoreSuffix(0).empty(), "default store file name is unchanged");
 	Check(ShaderStoreSuffix(200000) == ".guard200000" && ShaderStoreSuffix(200000) != ShaderStoreSuffix(5),
 	      "each loop-guard limit selects its own store file");
+	Check(ShaderStoreSuffix(0, 0).empty(), "no guard at all keeps the plain store name");
+	Check(ShaderStoreSuffix(0, 1048576) == ".guardc1048576" &&
+	          ShaderStoreSuffix(0, 1048576) != ShaderStoreSuffix(0, 5) &&
+	          ShaderStoreSuffix(0, 1048576) != ShaderStoreSuffix(1048576, 0),
+	      "the compute-only default limit has its own store file");
+	Check(ShaderStoreSuffix(200000, 1048576) == ShaderStoreSuffix(200000),
+	      "an explicit all-stage limit decides the store name");
 }
 
 void TestLoopGuardReport() {
