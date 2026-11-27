@@ -439,5 +439,38 @@ class FaultCostTest(unittest.TestCase):
         self.assertEqual(sections(text)['FAULT COST'], ['no data'])
 
 
+class FrameCostArchTest(unittest.TestCase):
+    def test_frame_summary_and_arch_lines_are_captured(self):
+        log = (
+            "@@T 10.0\n"
+            "[frame] seconds=5.00 frames=4 draws=100.00 dispatches=200.00 rebind=10.00 "
+            "rebind_fast=9.00 entries=20.00 rebind_skipped=18.00 rebind_resolved=2.00 "
+            "resolve=2.00 find_image=50.00 find_hits=50.00 materialize=300.00 "
+            "materialize_hits=299.00 materialize_misses=1.00 find_module=300.00 "
+            "module_hits=300.00 module_misses=0.00 ms/frame rebind=1.000 resolve=0.500 "
+            "find_image=1.000 materialize=2.000 find_module=3.000 wait_gpu=5.000 "
+            "wait_guest=0.100 wait_lock=0.100 idle=0.000 other=12.300 total=25.000 "
+            "ns/call materialize_hit=500 materialize_miss=5000 module_hit=1000 module_miss=0\n"
+            "[frame] arch wait_gpu_bg=15.000 wait_ms(rb=3.000 stream=0.000 unmap=1.000 "
+            "gds=0.000 fault=0.000 gc=0.000 rt=0.000 swap=0.000 prio=1.000 other=0.000) "
+            "wait_n(rb=2.00 stream=0.00 unmap=0.50 gds=0.00 fault=0.00 gc=0.00 rt=0.00 "
+            "swap=0.00 prio=1.00 other=0.00) submits=6.00(slice=4.00 flip=1.00 susp=0.50 "
+            "sync=0.50 wb=0.00 fdraw=0.00 pres=0.00 other=0.00) calls_draw(dir=50.00 "
+            "ind_gpu=2.00/20.00 ind_cpu=1.00/48.00 ind_zero=0.00 coal=5.00 quad_ex=0.00 "
+            "skip=3.00) calls_disp(dir=20.00 ind=180.00 ind_tdim=0.00 guard=180.00 "
+            "oa_ex=0.00 skip=0.00 bvh=4.00) barriers_all=500.00 draw_ns(n=2 prog=1000 "
+            "rt=400 pipe=300 bind=2000 commit=1200 rec=800) disp_ns(n=3 prog=900 pipe=250 "
+            "bind=1800 guard=1400 commit=1100 rec=1600)\n"
+        )
+        text, data = run_triage(log)
+        self.assertEqual(data['parse_errors'], 0)
+        self.assertEqual(len(data['findings']['frame_cost']), 2)
+        fc = '\n'.join(sections(text)['FRAME COST'])
+        self.assertIn('[frame] seconds=5.00', fc)
+        self.assertIn('[frame] arch wait_gpu_bg=15.000', fc)
+        self.assertIn('draw_ns(n=2', fc)
+        self.assertIn('disp_ns(n=3', fc)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -2,6 +2,7 @@
 
 #include "common/assert.h"
 #include "common/debugCounters.h"
+#include "common/frameCost.h"
 #include "graphics/host_gpu/graphicContext.h"
 
 #include <algorithm>
@@ -149,6 +150,8 @@ void CommandScheduler::Flush(SubmitInfo& submit) {
 void CommandScheduler::Finish() {
 	CheckActive();
 	if (!m_command.IsInvalid()) {
+		Common::FrameCost::ScopedSubmitReason submit_reason(
+		    Common::FrameCost::SubmitReason::Sync);
 		Submit();
 	}
 	m_master.Wait(CurrentTick() - 1);
@@ -163,7 +166,12 @@ void CommandScheduler::Wait(uint64_t tick) {
 		// A stream-buffer wrap can wait while a draw is being prepared through a reference to
 		// Current(). The wrapper stays stable while its pooled Vulkan buffer is retired. Deferred
 		// resources are released only at the next GPU operation boundary.
-		const auto submitted_tick = Submit();
+		uint64_t submitted_tick = 0;
+		{
+			Common::FrameCost::ScopedSubmitReason submit_reason(
+			    Common::FrameCost::SubmitReason::Sync);
+			submitted_tick = Submit();
+		}
 		EXIT_IF(submitted_tick != tick);
 		m_master.Wait(tick);
 		BeginNext();
@@ -237,7 +245,11 @@ void CommandScheduler::PriorityOperationsThread(std::stop_token stop) {
 			m_priority_operations.pop();
 			m_priority_active_tick = operation.tick;
 		}
-		m_master.Wait(operation.tick);
+		{
+			Common::FrameCost::ScopedWaitReason wait_reason(
+			    Common::FrameCost::WaitReason::PriorityThread);
+			m_master.Wait(operation.tick);
+		}
 		if (!stop.stop_requested()) {
 			RunOperation(std::move(operation.callback));
 		}
@@ -259,13 +271,24 @@ void CommandScheduler::DrainPriorityOperations() {
 void CommandScheduler::WaitPriorityOperations(uint64_t tick) {
 	EXIT_IF(g_deferred_callback_scheduler == this);
 	std::unique_lock lock(m_operation_mutex);
-	m_operation_available.wait(lock, [this, tick] {
-		const bool active_before_or_at =
-		    m_priority_active_tick != 0 && m_priority_active_tick <= tick;
-		const bool queued_before_or_at =
-		    !m_priority_operations.empty() && m_priority_operations.front().tick <= tick;
-		return !active_before_or_at && !queued_before_or_at;
-	});
+	auto             done = [this, tick] {
+        const bool active_before_or_at =
+            m_priority_active_tick != 0 && m_priority_active_tick <= tick;
+        const bool queued_before_or_at =
+            !m_priority_operations.empty() && m_priority_operations.front().tick <= tick;
+        return !active_before_or_at && !queued_before_or_at;
+    };
+	if (done()) {
+		return;
+	}
+	if (Common::FrameCost::IsRenderThread()) {
+		Common::FrameCost::Add(Common::FrameCost::Counter::WaitPriorityOpCalls);
+		Common::FrameCost::ScopedTimer wait_timer(
+		    Common::FrameCost::Counter::GpuPriorityOpWaitNs);
+		m_operation_available.wait(lock, done);
+	} else {
+		m_operation_available.wait(lock, done);
+	}
 }
 
 void CommandScheduler::RunOperation(Common::UniqueFunction<void>&& operation) {
@@ -335,6 +358,7 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 		result = graphics.queue.submit(1, &submit_info, nullptr);
 	}
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::QueueSubmits);
+	Common::FrameCost::RecordSubmit();
 
 	if (result != vk::Result::eSuccess) {
 		if (result == vk::Result::eErrorDeviceLost) {

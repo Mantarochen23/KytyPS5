@@ -2,6 +2,7 @@
 #include "common/common.h"
 #include "common/debugCounters.h"
 #include "common/emulatorConfig.h"
+#include "common/frameCost.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
 #include "common/threads.h"
@@ -49,7 +50,11 @@ public:
 	FramePool(WindowContext& window, CommandScheduler& scheduler)
 	    : m_window(window), m_scheduler(scheduler) {}
 	~FramePool() {
-		m_scheduler.Wait(m_scheduler.CurrentTick() - 1);
+		{
+			Common::FrameCost::ScopedWaitReason wait_reason(
+			    Common::FrameCost::WaitReason::Swapchain);
+			m_scheduler.Wait(m_scheduler.CurrentTick() - 1);
+		}
 		for (auto& frame: m_frames) {
 			m_window.graphic_ctx.device.destroyImageView(frame->view, nullptr);
 			if (frame->image.image != nullptr) {
@@ -102,7 +107,11 @@ public:
 		frame->busy = true;
 		m_mutex.Unlock();
 
-		m_scheduler.Wait(frame->present_tick);
+		{
+			Common::FrameCost::ScopedWaitReason wait_reason(
+			    Common::FrameCost::WaitReason::Swapchain);
+			m_scheduler.Wait(frame->present_tick);
+		}
 		return frame;
 	}
 
@@ -576,7 +585,10 @@ bool Swapchain::NeedsResize() const {
 Swapchain::Status Swapchain::AcquireNextImage(CommandScheduler& scheduler) {
 	// Repeated frames can wrap the semaphore ring without acquiring a new source frame.
 	// Wait for the submission that consumed this slot before signaling it again.
-	scheduler.Wait(m_image_acquired_ticks[m_frame_index]);
+	{
+		Common::FrameCost::ScopedWaitReason wait_reason(Common::FrameCost::WaitReason::Swapchain);
+		scheduler.Wait(m_image_acquired_ticks[m_frame_index]);
+	}
 	const auto result = m_window.graphic_ctx.device.acquireNextImageKHR(
 	    m_handle, std::numeric_limits<uint64_t>::max(), m_image_acquired[m_frame_index], nullptr,
 	    &m_image_index);
@@ -896,7 +908,8 @@ uint64_t Swapchain::Submit(CommandScheduler& scheduler) {
 	SubmitInfo submit;
 	submit.AddWait(m_image_acquired[m_frame_index], 1, vk::PipelineStageFlagBits::eTransfer);
 	submit.AddSignal(m_render_complete[m_image_index]);
-	const auto tick                       = scheduler.Submit(submit);
+	Common::FrameCost::ScopedSubmitReason submit_reason(Common::FrameCost::SubmitReason::Present);
+	const auto                            tick = scheduler.Submit(submit);
 	m_image_acquired_ticks[m_frame_index] = tick;
 	return tick;
 }
@@ -985,8 +998,10 @@ Presenter::Frame& Presenter::PrepareBlankFrame(uint32_t width, uint32_t height, 
 		frame->Clear(*producer, clear);
 	} else {
 		Common::LockGuard lock(m_impl->present_mutex);
-		auto& command = m_impl->present_scheduler.BeginCommand();
+		auto&             command = m_impl->present_scheduler.BeginCommand();
 		frame->Clear(command, clear);
+		Common::FrameCost::ScopedSubmitReason submit_reason(
+		    Common::FrameCost::SubmitReason::Present);
 		frame->present_tick = m_impl->present_scheduler.Submit();
 	}
 	return *frame;

@@ -2,6 +2,7 @@
 
 #include "common/assert.h"
 #include "common/emulatorConfig.h"
+#include "common/frameCost.h"
 #include "common/logging/log.h"
 #include "common/ports.h"
 #include "graphics/guest_gpu/graphicsRun.h"
@@ -199,7 +200,8 @@ void RenderContext::UnmapMemory(uint64_t vaddr, uint64_t size) {
 		    (m_buffer_cache.IsRegionRegistered(vaddr, size) ||
 		     m_texture_cache.IsRegionRegistered(vaddr, size) ||
 		     m_command_scheduler.HasPendingPriorityOperations())) {
-			const auto tick = m_command_scheduler.CurrentTick();
+			Common::FrameCost::ScopedWaitReason wait_reason(Common::FrameCost::WaitReason::Unmap);
+			const auto                          tick = m_command_scheduler.CurrentTick();
 			m_command_scheduler.Finish();
 			m_command_scheduler.WaitPriorityOperations(tick);
 		}
