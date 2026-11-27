@@ -4621,7 +4621,15 @@ private:
 				return inst->Parent() != nullptr ? inst : nullptr;
 			}
 			if (op == ValueOpcode::ReadFirstLane) {
-				return inst;
+				// Only treat ReadFirstLane as a descriptor choice when its active-simplified
+				// operand can actually resolve to runtime values or further choices (not an
+				// arbitrary GPU scalar like ReadFirstLane(v0) feeding a SelectU32 predicate).
+				const auto peeled = simplify_active(inst->Arg(0), inst->Arg(1));
+				if (ValidateRuntimeValue(m_program, peeled, RuntimeValueType::Any, true) ||
+				    self(self, peeled, depth + 1u) != nullptr) {
+					return inst;
+				}
+				return nullptr;
 			}
 			if (op == ValueOpcode::SelectU32) {
 				if (!ValidateRuntimeValue(m_program, inst->Arg(0), RuntimeValueType::Any, true)) {
@@ -5014,13 +5022,13 @@ private:
 		}
 		return fmt::format(
 		    "buffer descriptor is not a valid runtime value (shape {}); "
-		    "bad_dword={} bad_shape={} access={}(fmt={},idx={},bits={},dw={}) "
-		    "nearest={} first_diff={}; "
+		    "bad_dword={} access={}({},{},{}b,x{}) nearest={} first_diff={} bad_shape={}; "
 		    "GPU-selected access requires a scalar, raw 8/16-bit, "
 		    "raw DWORD x1/x2/x3/x4, or formatted DWORD load",
-		    ValueShape(Value(const_cast<Inst*>(&handle))), bad_dword, bad_shape,
-		    ValueOpcodeName(inst.GetOpcode()), memory.formatted, memory.idxen, memory.data_bits,
-		    memory.data_dwords, nearest, first_diff);
+		    ValueShape(Value(const_cast<Inst*>(&handle))), bad_dword,
+		    ValueOpcodeName(inst.GetOpcode()), memory.formatted ? "fmt" : "raw",
+		    memory.idxen ? "idx" : "byte", memory.data_bits, memory.data_dwords, nearest,
+		    first_diff, bad_shape);
 	}
 
 	const IndirectDescriptorPlan* FindIndirectDescriptor(const Inst& handle) const {
