@@ -856,8 +856,10 @@ void RenderExecutor::FindBuffers(std::span<PreparedBindings* const> stages) {
 				       entry.candidate_key == candidates.key && entry.reads_key == reads_key;
 			});
 			if (found == m_runtime_buffer_tables.end()) {
-				constexpr size_t MaxCachedRuntimeTables = 64;
+				constexpr size_t MaxCachedRuntimeTables = 256;
+				Common::FrameCost::Add(Common::FrameCost::Counter::TableRebuildKey);
 				if (m_runtime_buffer_tables.size() >= MaxCachedRuntimeTables) {
+					Common::FrameCost::Add(Common::FrameCost::Counter::TableRebuildEvicted);
 					auto oldest = std::ranges::min_element(
 					    m_runtime_buffer_tables, {}, &RuntimeBufferTableCacheEntry::last_use);
 					auto retired = std::move(oldest->buffer);
@@ -876,10 +878,23 @@ void RenderExecutor::FindBuffers(std::span<PreparedBindings* const> stages) {
 				                                   });
 			}
 			found->last_use = ++m_runtime_buffer_table_tick;
-			const bool rebuild = !Config::PortEnabled(Config::Port::RuntimeTableCache) ||
-			                     found->buffer == nullptr || found->state == nullptr ||
-			                     found->built_generation != found->state->BackingGeneration();
+			const bool port_off = !Config::PortEnabled(Config::Port::RuntimeTableCache);
+			const bool fresh   = found->buffer == nullptr || found->state == nullptr;
+			const bool backing_moved =
+			    !fresh && found->built_generation != found->state->BackingGeneration();
+			const bool buffer_moved =
+			    !fresh && !backing_moved &&
+			    found->built_buffer_generation != found->state->BufferGeneration();
+			const bool rebuild = port_off || fresh || backing_moved || buffer_moved;
 			if (rebuild) {
+				// One reason per rebuild; a fresh entry was counted as a key miss above.
+				if (port_off) {
+					Common::FrameCost::Add(Common::FrameCost::Counter::TableRebuildDisabled);
+				} else if (backing_moved) {
+					Common::FrameCost::Add(Common::FrameCost::Counter::TableRebuildGeneration);
+				} else if (buffer_moved) {
+					Common::FrameCost::Add(Common::FrameCost::Counter::TableRebuildGenerationOwn);
+				}
 				Common::FrameCost::Add(Common::FrameCost::Counter::TableRebuilds);
 				Common::FrameCost::Add(Common::FrameCost::Counter::TableCandidates,
 				                       candidates.entries.size());
@@ -916,26 +931,34 @@ void RenderExecutor::FindBuffers(std::span<PreparedBindings* const> stages) {
 				const bool texel_sync =
 				    metadata.formatted || (metadata.read && Config::SyncRawImageBuffersEnabled());
 				bool aliased_counted = false;
-				for (size_t j = 0; j < sources.size(); ++j) {
-					const auto& source = sources[j];
-					if (source.address == 0 || source.size == 0) continue;
-					auto [buf, off] = cache.ObtainBuffer(source.address, source.size, false,
-					                                     texel_sync, source.id, false);
-					if (texel_sync && !aliased_counted &&
-					    m_context.GetTextureCache().FindImageFromRange(source.address, source.size)) {
-						aliased_counted = true;
-						Common::FrameCost::Add(Common::FrameCost::Counter::TableImageAliased);
+				// Obtaining a buffer can merge or retire others, which moves this table's own buffer
+				// generation after the build started. Repeat until a pass changes nothing, and record
+				// the generation that pass began with, so the table is not stale the moment it is built.
+				uint64_t build_buffer_generation = state->BufferGeneration();
+				for (int pass = 0; pass < 4; ++pass) {
+					build_buffer_generation = state->BufferGeneration();
+					for (size_t j = 0; j < sources.size(); ++j) {
+						const auto& source = sources[j];
+						if (source.address == 0 || source.size == 0) continue;
+						auto [buf, off] = cache.ObtainBuffer(source.address, source.size, false,
+						                                     texel_sync, source.id, false);
+						if (texel_sync && !aliased_counted &&
+						    m_context.GetTextureCache().FindImageFromRange(source.address, source.size)) {
+							aliased_counted = true;
+							Common::FrameCost::Add(Common::FrameCost::Counter::TableImageAliased);
+						}
+						const uint64_t host_bda = static_cast<uint64_t>(buf->BufferDeviceAddress()) + off;
+						const uint64_t aligned_bda = host_bda & ~uint64_t {3};
+						const uint32_t byte_offset = static_cast<uint32_t>(host_bda & 3u);
+						const uint32_t byte_size = static_cast<uint32_t>(
+						    std::min<uint64_t>(source.size + byte_offset, UINT32_MAX));
+						const uint32_t cls = candidates.class_index[j] & 0x00ffffffu;
+						table_words[j * 4u + 0u] = static_cast<uint32_t>(aligned_bda);
+						table_words[j * 4u + 1u] = static_cast<uint32_t>(aligned_bda >> 32u);
+						table_words[j * 4u + 2u] = byte_size;
+						table_words[j * 4u + 3u] = (byte_offset << 24u) | cls;
 					}
-					const uint64_t host_bda = static_cast<uint64_t>(buf->BufferDeviceAddress()) + off;
-					const uint64_t aligned_bda = host_bda & ~uint64_t {3};
-					const uint32_t byte_offset = static_cast<uint32_t>(host_bda & 3u);
-					const uint32_t byte_size = static_cast<uint32_t>(
-					    std::min<uint64_t>(source.size + byte_offset, UINT32_MAX));
-					const uint32_t cls = candidates.class_index[j] & 0x00ffffffu;
-					table_words[j * 4u + 0u] = static_cast<uint32_t>(aligned_bda);
-					table_words[j * 4u + 1u] = static_cast<uint32_t>(aligned_bda >> 32u);
-					table_words[j * 4u + 2u] = byte_size;
-					table_words[j * 4u + 3u] = (byte_offset << 24u) | cls;
+					if (state->BufferGeneration() == build_buffer_generation) break;
 				}
 				auto replacement = std::make_unique<Buffer>(
 				    m_context.GetGraphics(), m_context.GetCommandScheduler(), MemoryUsage::Upload, 0,
@@ -945,11 +968,13 @@ void RenderExecutor::FindBuffers(std::span<PreparedBindings* const> stages) {
 				std::memcpy(replacement->Mapped().data(), table_words.data(),
 				            table_words.size() * sizeof(uint32_t));
 				replacement->Flush(0, table_words.size() * sizeof(uint32_t));
+				m_context.GetBufferCache().AddTableWriteUnion(write_ranges);
 				state->SetWriteRanges(std::move(write_ranges));
 				auto retired = std::move(found->buffer);
 				found->buffer = std::move(replacement);
 				found->state  = std::move(state);
 				found->built_generation = build_generation;
+				found->built_buffer_generation = build_buffer_generation;
 				if (retired != nullptr && m_context.GetCommandScheduler().Active()) {
 					m_context.GetCommandScheduler().DeferOperation(
 					    [owner = std::move(retired)]() mutable { owner.reset(); });

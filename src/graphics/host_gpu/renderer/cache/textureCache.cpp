@@ -252,6 +252,8 @@ void TextureCache::RegisterImage(ImageId id) {
 	TouchResolutionGenerationLocked(data.address, data.size,
 	                                Common::FrameCost::Counter::CacheBumpRegister);
 	image.registered = true;
+	// A new image over a written table's range must be resolved by that table's next mark.
+	m_buffer_cache.NoteTableRangeChanged(data.address, data.size);
 	image.lru_id     = m_lru_cache.Insert(id, m_gc_tick);
 	m_resolve_cache.Invalidate();
 	m_total_used_memory += image.AccountedSize();
@@ -277,6 +279,7 @@ void TextureCache::UnregisterImage(ImageId id) {
 	TouchRegistrationsLocked(image.info.data.address, image.info.data.size);
 	TouchResolutionGenerationLocked(image.info.data.address, image.info.data.size,
 	                                Common::FrameCost::Counter::CacheBumpUnregister);
+	m_buffer_cache.NoteTableRangeChanged(image.info.data.address, image.info.data.size);
 	m_lru_cache.Free(image.lru_id);
 	m_total_used_memory -= image.AccountedSize();
 	image.registered = false;
@@ -705,6 +708,7 @@ void TextureCache::CopyImage(ImageId destination_id, ImageId source_id) {
 	}
 	if (source.IsGpuModified()) {
 		destination.MarkGpuModified();
+		m_buffer_cache.NoteTableRangeChanged(destination.info.data.address, destination.info.data.size);
 	}
 	destination.ClearBufferModified();
 }
@@ -724,6 +728,7 @@ void TextureCache::CopyImageMip(ImageId destination_id, ImageId source_id, uint3
 	destination.CopyMip(source, mip, layer);
 	if (source.IsGpuModified()) {
 		destination.MarkGpuModified();
+		m_buffer_cache.NoteTableRangeChanged(destination.info.data.address, destination.info.data.size);
 	}
 }
 
@@ -1763,6 +1768,7 @@ void TextureCache::CommitGpuWrite(Image& image) {
 	image.ClearBufferModified();
 	image.RefreshComplete();
 	image.MarkGpuModified();
+	m_buffer_cache.NoteTableRangeChanged(image.info.data.address, image.info.data.size);
 }
 
 bool TextureCache::ClearImageFromBuffer(CommandBuffer& command, uint64_t address, uint64_t size,

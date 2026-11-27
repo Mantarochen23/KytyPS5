@@ -269,7 +269,7 @@ void BufferCache::Register(BufferId id) {
 
 void BufferCache::Unregister(BufferId id) {
 	const auto& buffer = m_slot_buffers[id];
-	InvalidateRuntimeTables(buffer.CpuAddress(), buffer.Size());
+	InvalidateRuntimeTables(buffer.CpuAddress(), buffer.Size(), true);
 	ChangeRegister<false>(id);
 }
 
@@ -391,7 +391,7 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 			    total_size += Common::AlignUp(end - start, 64);
 		    });
 		    m_gpu_modified_ranges.Subtract(address, bytes);
-		    ++m_ownership_release_epoch;
+		    NoteTableRangeChanged(address, bytes);
 		    ForgetColorMetadataChecks(address, bytes);
 	    });
 	if (copies.empty()) {
@@ -512,6 +512,8 @@ void BufferCache::InvalidateMemory(uint64_t vaddr, uint64_t size) {
 	m_memory_tracker.InvalidateRegion(vaddr, size,
 	                                  [this, vaddr, size] { ReadMemory(vaddr, size, true); });
 	QueueBdaSync(vaddr, size);
+	// After the tracker holds the CPU write: a mark that sees the new epoch also sees the bytes.
+	NoteTableRangeChanged(vaddr, size);
 	FaultStats::g_counters.invalidate_ns.fetch_add(FaultStats::NowNs() - started,
 	                                               std::memory_order_relaxed);
 }
@@ -535,13 +537,14 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 			if (DownloadBufferMemory<false>(buffer, start, end - start)) {
 				WaitDiag::Global().NoteReadback(start, end - start, WaitDiag::NowMs());
 				m_memory_tracker.UnmarkRegionAsGpuModified(start, end - start);
-				++m_ownership_release_epoch;
+				NoteTableRangeChanged(start, end - start);
 			}
 		}
 		if (is_write) {
 			m_memory_tracker.MarkRegionAsCpuModified(vaddr, size);
 			QueueBdaSync(vaddr, size);
 		}
+		NoteTableRangeChanged(vaddr, size);
 	});
 }
 
@@ -873,6 +876,11 @@ void BufferCache::MarkColorMetadataChecked(uint64_t vaddr, uint64_t size, uint32
 }
 
 bool BufferCache::IsColorMetadataChecked(uint64_t vaddr, uint64_t size, uint32_t keys) const {
+	{
+		// A written table may have stored there since the check; it is re-run instead (conservative).
+		std::lock_guard lock(m_table_union_mutex);
+		if (!m_table_write_union.Empty() && m_table_write_union.Intersects(vaddr, size)) return false;
+	}
 	for (uint32_t slot = 0; slot < m_checked_color_metadata.size(); slot++) {
 		if ((keys & (1u << slot)) != 0 && !m_checked_color_metadata[slot].Contains(vaddr, size)) {
 			return false;
@@ -912,6 +920,13 @@ uint64_t BufferCache::WriteStamp(uint64_t vaddr, uint64_t size) const {
 			stamp = std::max(stamp, *entry);
 		}
 	}
+	// A written table marks its whole union with one clock value; a range inside it may have been
+	// written by any later dispatch of any table, so this is conservative (a false positive costs
+	// one re-read of an unchanged range, never a stale hit).
+	std::lock_guard lock(m_table_union_mutex);
+	if (m_table_write_stamp > stamp && m_table_write_union.Intersects(vaddr, size)) {
+		stamp = m_table_write_stamp;
+	}
 	return stamp;
 }
 
@@ -924,11 +939,11 @@ std::shared_ptr<BufferCache::RuntimeTableState> BufferCache::RegisterRuntimeTabl
 	return state;
 }
 
-void BufferCache::InvalidateRuntimeTables(uint64_t vaddr, uint64_t size) {
+void BufferCache::InvalidateRuntimeTables(uint64_t vaddr, uint64_t size, bool buffer_lifetime) {
 	std::lock_guard lock(m_runtime_tables_mutex);
 	for (auto it = m_runtime_tables.begin(); it != m_runtime_tables.end();) {
 		if (auto state = it->lock()) {
-			state->InvalidateBacking(vaddr, size);
+			state->InvalidateBacking(vaddr, size, buffer_lifetime);
 			++it;
 		} else {
 			it = m_runtime_tables.erase(it);
@@ -936,9 +951,34 @@ void BufferCache::InvalidateRuntimeTables(uint64_t vaddr, uint64_t size) {
 	}
 }
 
+void BufferCache::NoteTableRangeChanged(uint64_t vaddr, uint64_t size) noexcept {
+	std::lock_guard lock(m_table_union_mutex);
+	if (!m_table_write_union.Empty() && m_table_write_union.Intersects(vaddr, size)) {
+		m_table_epoch.fetch_add(1, std::memory_order_relaxed);
+	}
+}
+
+void BufferCache::AddTableWriteUnion(const RangeSet& ranges) {
+	std::lock_guard lock(m_table_union_mutex);
+	ranges.ForEach([&](uint64_t begin, uint64_t end) { m_table_write_union.Add(begin, end - begin); });
+}
+
 void BufferCache::MarkRuntimeTableWritten(const std::shared_ptr<RuntimeTableState>& state) {
-	if (state == nullptr || !state->BeginMark(m_scheduler.CurrentTick(), m_ownership_release_epoch)) return;
+	if (state == nullptr || state->WriteRanges().Empty()) return;
 	Common::FrameCost::Add(Common::FrameCost::Counter::TableMarks);
+	// The write itself is one clock tick for the whole union (see WriteStamp), so a repeated mark
+	// is still a visible GPU write to anything reading a stamp over a written candidate.
+	{
+		std::lock_guard lock(m_table_union_mutex);
+		m_table_write_stamp = ++m_write_clock;
+	}
+	const auto epoch = m_table_epoch.load(std::memory_order_relaxed);
+	if (!state->MarkNeedsWalk(epoch)) {
+		// The group still owns its ranges: nothing was released, written by the CPU or re-imaged
+		// since the last walk, so the walk would change nothing.
+		Common::FrameCost::Add(Common::FrameCost::Counter::TableMarksSkipped);
+		return;
+	}
 	uint64_t range_count = 0;
 	state->WriteRanges().ForEach([&](uint64_t begin, uint64_t end) {
 		++range_count;
@@ -948,13 +988,14 @@ void BufferCache::MarkRuntimeTableWritten(const std::shared_ptr<RuntimeTableStat
 		m_memory_tracker.ForEachUploadRange(
 		    begin, size, true, [](uint64_t, uint64_t) noexcept {}, []() noexcept {});
 		m_gpu_modified_ranges.Add(begin, size);
-		NoteWrite(begin, size);
 		ForgetColorMetadataChecks(begin, size);
 	});
 	// Resolve all real image overlaps under one cache lock and one generation bump. The exact
 	// candidate ranges, rather than their much wider backing buffers, keep unrelated descriptor
 	// tables and image-heap entries out of GPU ownership.
 	m_texture_cache.InvalidateMemoryFromGPU(state->WriteRanges());
+	// The epoch read before the walk: a change that landed during it makes the next mark walk again.
+	state->NoteWalked(epoch);
 	Common::FrameCost::Add(Common::FrameCost::Counter::TableMarkRanges, range_count);
 }
 
@@ -1002,6 +1043,7 @@ void BufferCache::RunGarbageCollector() {
 			dirty_buffers.push_back(id);
 		} else {
 			m_memory_tracker.MarkRegionAsCpuModified(buffer.CpuAddress(), buffer.Size());
+			NoteTableRangeChanged(buffer.CpuAddress(), buffer.Size());
 			DeleteBuffer(id);
 			Common::DebugCounters::Add(Common::DebugCounters::Counter::BufferEvictions);
 		}
@@ -1021,7 +1063,7 @@ void BufferCache::RunGarbageCollector() {
 	for (const auto id: dirty_buffers) {
 		auto& buffer = m_slot_buffers[id];
 		m_memory_tracker.UnmarkRegionAsGpuModified(buffer.CpuAddress(), buffer.Size());
-		++m_ownership_release_epoch;
+		NoteTableRangeChanged(buffer.CpuAddress(), buffer.Size());
 		m_memory_tracker.MarkRegionAsCpuModified(buffer.CpuAddress(), buffer.Size());
 		Unregister(id);
 		EraseBufferSlot(id);

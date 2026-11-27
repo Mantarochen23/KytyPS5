@@ -177,6 +177,13 @@ enum class Counter : uint8_t {
 	TableMarkRanges,
 	// Rebuilt tables of typed or image-synced buffers with a candidate range inside a registered image.
 	TableImageAliased,
+	// Why a table was rebuilt (one per rebuild) and how a mark was resolved.
+	TableRebuildKey,
+	TableRebuildGeneration,
+	TableRebuildGenerationOwn,
+	TableRebuildEvicted,
+	TableRebuildDisabled,
+	TableMarksSkipped,
 	Count
 };
 

@@ -76,6 +76,7 @@ struct RuntimeBufferTableCacheEntry {
 	std::unique_ptr<Buffer>                         buffer;
 	std::shared_ptr<BufferCache::RuntimeTableState> state;
 	uint64_t                                        built_generation = 0;
+	uint64_t                                        built_buffer_generation = 0;
 	uint64_t                                        last_use         = 0;
 };
 

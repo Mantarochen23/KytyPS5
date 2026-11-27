@@ -86,35 +86,46 @@ public:
 		explicit RuntimeTableState(RangeSet dependencies, RangeSet write_ranges = {})
 		    : m_dependencies(std::move(dependencies)), m_write_ranges(std::move(write_ranges)) {}
 
+		// Bumped by a map, unmap or invalidation from any thread.
 		[[nodiscard]] uint64_t BackingGeneration() const noexcept {
 			return m_backing_generation.load(std::memory_order_relaxed);
 		}
-		bool InvalidateBacking(uint64_t address, uint64_t size) noexcept {
+		// Bumped only when a cached buffer overlapping a candidate is retired (merged, deleted,
+		// evicted), which happens on the render thread, also while this table is being built.
+		[[nodiscard]] uint64_t BufferGeneration() const noexcept {
+			return m_buffer_generation.load(std::memory_order_relaxed);
+		}
+		bool InvalidateBacking(uint64_t address, uint64_t size, bool buffer_lifetime = false) noexcept {
 			if (!m_dependencies.Intersects(address, size)) return false;
-			m_backing_generation.fetch_add(1, std::memory_order_relaxed);
+			(buffer_lifetime ? m_buffer_generation : m_backing_generation)
+			    .fetch_add(1, std::memory_order_relaxed);
 			return true;
 		}
 		[[nodiscard]] const RangeSet& WriteRanges() const noexcept { return m_write_ranges; }
-		// One mark per command buffer, unless GPU ownership was released (a readback, even one
-		// queued in this same command buffer) since the last mark.
-		bool BeginMark(uint64_t command_tick, uint64_t release_epoch) noexcept {
-			if (m_write_ranges.Empty() ||
-			    (m_last_mark_tick == command_tick && m_last_mark_epoch == release_epoch)) {
-				return false;
-			}
-			m_last_mark_tick  = command_tick;
-			m_last_mark_epoch = release_epoch;
-			return true;
+		// The table's write set is one group: marking it is O(1) while the group still holds GPU
+		// ownership of its ranges. `epoch` is BufferCache's table epoch, which moves whenever
+		// ownership of a written range may have been lost or an image over it changed. Only then
+		// does a mark walk the ranges. Render thread only.
+		[[nodiscard]] bool MarkNeedsWalk(uint64_t epoch) const noexcept {
+			return !m_write_ranges.Empty() && (!m_marked || m_marked_epoch != epoch);
+		}
+		void NoteWalked(uint64_t epoch) noexcept {
+			m_marked       = true;
+			m_marked_epoch = epoch;
 		}
 		// Render thread only; set once the backing buffers are known, after registration.
-		void SetWriteRanges(RangeSet ranges) { m_write_ranges = std::move(ranges); }
+		void SetWriteRanges(RangeSet ranges) {
+			m_write_ranges = std::move(ranges);
+			m_marked       = false;
+		}
 
 	private:
-		RangeSet             m_dependencies;
-		RangeSet             m_write_ranges;
+		RangeSet              m_dependencies;
+		RangeSet              m_write_ranges;
 		std::atomic<uint64_t> m_backing_generation {1};
-		uint64_t              m_last_mark_tick = UINT64_MAX; // Render thread only.
-		uint64_t              m_last_mark_epoch = 0;
+		std::atomic<uint64_t> m_buffer_generation {1};
+		bool                  m_marked       = false; // Render thread only.
+		uint64_t              m_marked_epoch = 0;
 	};
 
 	class BdaTableValidator {
@@ -188,9 +199,14 @@ public:
 	[[nodiscard]] std::shared_ptr<RuntimeTableState> RegisterRuntimeTable(
 	    RangeSet dependencies, RangeSet write_ranges = {});
 	// Called only for backing-lifetime changes, not ordinary guest writes.
-	void InvalidateRuntimeTables(uint64_t vaddr, uint64_t size);
+	void InvalidateRuntimeTables(uint64_t vaddr, uint64_t size, bool buffer_lifetime = false);
 	// Marks the cached, mapped candidate-backing union once per dispatch, not once per candidate.
 	void MarkRuntimeTableWritten(const std::shared_ptr<RuntimeTableState>& state);
+	// Ownership of, or an image over, a range that written runtime tables cover may have changed:
+	// the next mark of every table whose group touches it walks its ranges again. Any thread.
+	void NoteTableRangeChanged(uint64_t vaddr, uint64_t size) noexcept;
+	// Adds a table's write ranges to the union stamped by marks. Render thread.
+	void AddTableWriteUnion(const RangeSet& ranges);
 	// Uploads the CPU-dirty bytes of the queued ranges `mapped` covers behind one barrier pair.
 	void SynchronizeBda(const RangeSet& mapped);
 	// Queue after the range's state change becomes visible, or a drain could consume it first.
@@ -263,15 +279,18 @@ private:
 	BufferMap                                         m_buffers;
 	PageTable                                         m_page_table;
 	RangeSet                                          m_gpu_modified_ranges;
-	// Bumped whenever GPU ownership of a range is given up (render thread / GPU thread, under the same
-	// serialization as m_gpu_modified_ranges).
-	uint64_t                                          m_ownership_release_epoch = 0;
 	std::vector<std::weak_ptr<RuntimeTableState>>     m_runtime_tables;
 	std::mutex                                        m_runtime_tables_mutex;
 	// Render-thread state; see WriteStamp.
 	MultiLevelPageTable<uint64_t, CACHING_PAGEBITS, 44, 20> m_write_stamps;
 	uint64_t                                          m_write_clock           = 1;
 	uint64_t                                          m_untracked_write_stamp = 1;
+	// Union of every written table's write ranges, the clock of the last mark (a write stamp for
+	// anything in the union) and the epoch that forces a group to walk its ranges again.
+	mutable std::mutex                                m_table_union_mutex;
+	RangeSet                                          m_table_write_union;
+	uint64_t                                          m_table_write_stamp = 0;
+	std::atomic<uint64_t>                             m_table_epoch {1};
 	// One per TileManager::ColorClearSlots key slot.
 	std::array<RangeSet, 8>                           m_checked_color_metadata;
 	MemoryTracker                                     m_memory_tracker;

@@ -319,7 +319,9 @@ ReportLines FormatWindow(const std::array<uint64_t, CounterCount>& delta, double
 	    "prefetch_scans={:.2f} prefetch_skipped={:.2f} pump={:.2f} pump_skipped={:.2f} "
 	    "table_candidates={:.2f} table_dispatches={:.2f} table_rebuilds={:.2f} "
 	    "table_enumerations={:.2f} table_marks={:.2f} table_mark_ranges={:.2f} "
-	    "timer_sample={} prefetch_backoff={} table_image_aliased={}\n",
+	    "timer_sample={} prefetch_backoff={} table_image_aliased={} "
+	    "table_rebuild(key={} generation={} own_generation={} evicted={} disabled={}) "
+	    "table_marks_skipped={:.2f}\n",
 	    Mean(delta, Counter::BreadcrumbOps, frames),
 	    Mean(delta, Counter::GpuInvalidateCalls, frames),
 	    Mean(delta, Counter::GpuInvalidateSkipped, frames),
@@ -333,7 +335,13 @@ ReportLines FormatWindow(const std::array<uint64_t, CounterCount>& delta, double
 	    Mean(delta, Counter::TableMarkRanges, frames),
 	    Config::FrameTimerSample(),
 	    Config::PrefetchBackoffExponent(),
-	    delta[static_cast<size_t>(Counter::TableImageAliased)]);
+	    delta[static_cast<size_t>(Counter::TableImageAliased)],
+	    delta[static_cast<size_t>(Counter::TableRebuildKey)],
+	    delta[static_cast<size_t>(Counter::TableRebuildGeneration)],
+	    delta[static_cast<size_t>(Counter::TableRebuildGenerationOwn)],
+	    delta[static_cast<size_t>(Counter::TableRebuildEvicted)],
+	    delta[static_cast<size_t>(Counter::TableRebuildDisabled)],
+	    Mean(delta, Counter::TableMarksSkipped, frames));
 	const auto total = [&](Counter counter) { return delta[static_cast<size_t>(counter)]; };
 	lines.heap = fmt::format(
 	    "[frame] heap rebinds={:.2f} fast={:.2f} miss_pending={} miss_descriptor_gen={} "

@@ -7921,16 +7921,29 @@ public:
                 cache.WriteStamp(base + 2 * page, page) > high_stamp,
             "a writable table did not preserve GPU ownership and write stamps for later reads");
 
+    // A repeated bind while the group still owns its ranges is O(1): it walks no range, but it
+    // is still a visible GPU write to a stamp reader.
+    const auto ranges_of = [] {
+      return Common::FrameCost::SnapshotCounters()[static_cast<size_t>(
+          Common::FrameCost::Counter::TableMarkRanges)];
+    };
     const auto marked_low_stamp = cache.WriteStamp(base, page);
-    const auto marked_high_stamp = cache.WriteStamp(base + 2 * page, page);
-    executor.RebindBuffers(bindings);
+    const auto ranges_before = ranges_of();
+    for (int bind = 0; bind < 3; ++bind) {
+      executor.RebindBuffers(bindings);
+    }
     Require(name, "marked once",
-            cache.WriteStamp(base, page) == marked_low_stamp &&
-                cache.WriteStamp(base + 2 * page, page) == marked_high_stamp,
-            "the same table was marked twice in one command buffer");
+            ranges_of() == ranges_before &&
+                cache.IsRegionGpuModified(base, page) &&
+                cache.WriteStamp(base, page) > marked_low_stamp,
+            "a repeated table bind walked its write ranges or hid its write from stamps");
     cache.ReadMemory(base, page);
     Require(name, "read later", !cache.IsRegionGpuModified(base, page),
             "a later CPU read did not consume the table's GPU-write ownership");
+    executor.RebindBuffers(bindings);
+    Require(name, "re-marked after release",
+            ranges_of() > ranges_before && cache.IsRegionGpuModified(base, page),
+            "a bind after an ownership release did not take ownership again");
 
     // A state registered before its buffers are resolved sees an invalidation that lands while
     // the build runs, and its write union is set afterwards.
