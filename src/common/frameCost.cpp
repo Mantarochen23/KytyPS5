@@ -1,5 +1,6 @@
 #include "common/frameCost.h"
 
+#include "common/emulatorConfig.h"
 #include "common/logging/log.h"
 
 #include <array>
@@ -71,8 +72,31 @@ void Add(Counter counter, uint64_t value) noexcept {
 	Local().values[static_cast<size_t>(counter)].fetch_add(value, std::memory_order_relaxed);
 }
 
+namespace {
+// Timers of waits are exact; the per-call timers are sampled.
+constexpr bool IsWait(Counter counter) {
+	return counter == Counter::GpuFenceWaitNs || counter == Counter::GuestMemoryWaitNs ||
+	       counter == Counter::IdleNs;
+}
+thread_local uint32_t g_timer_sequence = 0;
+} // namespace
+
 ScopedTimer::ScopedTimer(Counter duration) noexcept
-    : m_duration(duration), m_start(Clock::now()), m_parent(g_active_timer) {
+    : m_duration(duration), m_parent(g_active_timer) {
+	if (IsWait(duration)) {
+		m_measured = true;
+		m_weight   = 1;
+	} else if (m_parent != nullptr) {
+		m_measured = m_parent->m_measured;
+		m_weight   = m_parent->m_weight;
+	} else {
+		const auto sample = Config::FrameTimerSample();
+		m_measured        = sample <= 1u || (++g_timer_sequence % sample) == 0u;
+		m_weight          = sample;
+	}
+	if (m_measured) {
+		m_start = Clock::now();
+	}
 	g_active_timer = this;
 }
 
@@ -81,13 +105,14 @@ ScopedTimer::~ScopedTimer() {
 }
 
 void ScopedTimer::Stop() noexcept {
-	if (m_start == Clock::time_point {}) return;
-	const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - m_start);
-	m_start            = {};
-	const auto elapsed_ns = static_cast<uint64_t>(elapsed.count());
+	if (m_done) return;
+	m_done = true;
 	if (g_active_timer == this) g_active_timer = m_parent;
-	if (m_parent != nullptr) m_parent->m_child_ns += elapsed_ns;
-	Add(m_duration, elapsed_ns - std::min(elapsed_ns, m_child_ns));
+	if (!m_measured) return;
+	const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - m_start);
+	const auto elapsed_ns = static_cast<uint64_t>(elapsed.count());
+	if (m_parent != nullptr && m_parent->m_measured) m_parent->m_child_ns += elapsed_ns;
+	Add(m_duration, (elapsed_ns - std::min(elapsed_ns, m_child_ns)) * m_weight);
 }
 
 namespace {
@@ -193,7 +218,8 @@ void FramePresented() noexcept {
 		Log::WriteToConsoleAndLog(fmt::format(
 		    "[frame] cuts breadcrumb_ops={:.2f} gpu_invalidate={:.2f} gpu_invalidate_skipped={:.2f} "
 		    "gpu_invalidate_gen_bumps={:.2f} guard_gpu={:.2f} guard_cpu={:.2f} guard_skipped={:.2f} "
-		    "prefetch_scans={:.2f} prefetch_skipped={:.2f} pump={:.2f} pump_skipped={:.2f}\n",
+		    "prefetch_scans={:.2f} prefetch_skipped={:.2f} pump={:.2f} pump_skipped={:.2f} "
+		    "timer_sample={} prefetch_backoff={}\n",
 		    Mean(delta, Counter::BreadcrumbOps, frames),
 		    Mean(delta, Counter::GpuInvalidateCalls, frames),
 		    Mean(delta, Counter::GpuInvalidateSkipped, frames),
@@ -202,7 +228,8 @@ void FramePresented() noexcept {
 		    Mean(delta, Counter::GuardSkipped, frames), Mean(delta, Counter::PrefetchScans, frames),
 		    Mean(delta, Counter::PrefetchSkipped, frames),
 		    Mean(delta, Counter::PumpAsyncCalls, frames),
-		    Mean(delta, Counter::PumpAsyncSkipped, frames)));
+		    Mean(delta, Counter::PumpAsyncSkipped, frames), Config::FrameTimerSample(),
+		    Config::PrefetchBackoffExponent()));
 	}
 	if (g_store_loaded.load(std::memory_order_relaxed) && !g_bad_warned) {
 		const auto hits   = delta[static_cast<size_t>(Counter::FindModuleHits)];

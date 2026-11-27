@@ -6,6 +6,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <ctime>
 #include <cstdint>
 #include <mutex>
 #include <string>
@@ -20,7 +21,16 @@ namespace Libs::Graphics {
 // is fine for a diagnostic line. Phase and detail are string literals.
 namespace RenderActivity {
 
+// Milliseconds on the steady clock's epoch. Noted at every change of phase, which is thousands of
+// times a second: on Linux the coarse clock (a few ms resolution, no system call, a fraction of the
+// cost) is enough for a stall report that counts seconds.
 [[nodiscard]] inline uint64_t NowMs() noexcept {
+#if defined(__linux__) && defined(CLOCK_MONOTONIC_COARSE)
+	timespec now {};
+	if (::clock_gettime(CLOCK_MONOTONIC_COARSE, &now) == 0) {
+		return static_cast<uint64_t>(now.tv_sec) * 1000u + static_cast<uint64_t>(now.tv_nsec) / 1000000u;
+	}
+#endif
 	return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
 	                                 std::chrono::steady_clock::now().time_since_epoch())
 	                                 .count());

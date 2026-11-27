@@ -551,6 +551,11 @@ add_executable(dispatch_limits_tests EXCLUDE_FROM_ALL
 )
 target_include_directories(dispatch_limits_tests PRIVATE ${inc_headers})
 
+add_executable(prefetch_backoff_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/PrefetchBackoffTests.cpp"
+)
+target_include_directories(prefetch_backoff_tests PRIVATE ${inc_headers})
+
 add_executable(wait_diagnostics_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/WaitDiagnosticsTests.cpp"
 )

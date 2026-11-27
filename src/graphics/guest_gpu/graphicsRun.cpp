@@ -839,6 +839,19 @@ static ComputeShaderPrefetch MakePrefetch(const HW::CsStageRegisters& spec, bool
 }
 
 void CommandProcessor::PrefetchComputeShaders(std::span<const uint32_t> commands) {
+	const auto exponent = Config::PrefetchBackoffExponent();
+	if (!m_prefetch_backoff.ShouldScan(exponent)) {
+		Common::FrameCost::Add(Common::FrameCost::Counter::PrefetchSkipped);
+		return;
+	}
+	Common::FrameCost::Add(Common::FrameCost::Counter::PrefetchScans);
+	auto&      cache  = m_renderer.GetPipelineCache();
+	const auto before = cache.PrefetchNeedingWork();
+	ScanComputeShaders(commands);
+	m_prefetch_backoff.Scanned(cache.PrefetchNeedingWork() == before, exponent);
+}
+
+void CommandProcessor::ScanComputeShaders(std::span<const uint32_t> commands) {
 	if (!Config::AsyncShaderCompileEnabled() || commands.empty()) {
 		return;
 	}

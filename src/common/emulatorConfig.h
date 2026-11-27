@@ -216,6 +216,14 @@ struct ConfigOptions {
 	// for device-lost reports. Off = none are recorded, unless another diagnostic needs them
 	// (--gpu-fault-query, --graphics-debug-dump, --guest-fault-report-only, RADV_DEBUG with `hang`).
 	bool                     gpu_debug_enabled          = false;
+	// --prefetch-backoff <n>: after four scans of submitted commands that found every compute shader
+	// known already, scan only one submission in 2, 4, ... up to 2^n, until a scan finds news.
+	// 0 = scan every submission.
+	uint32_t                 prefetch_backoff           = 4;
+	// --frame-timer-sample <n>: the frame-cost timers of per-call work (lock wait, image lookup,
+	// materialization, module lookup) read the clock for one call in n and scale the result by n.
+	// 1 = every call.
+	uint32_t                 frame_timer_sample         = 16;
 };
 
 void Load(const ConfigOptions& cfg);
@@ -343,6 +351,8 @@ uint32_t FaultStormHold();
 uint32_t HeapTuneArenas();
 uint32_t DriverCacheCapMb();
 bool     GpuDebugEnabled();
+uint32_t PrefetchBackoffExponent();
+uint32_t FrameTimerSample();
 uint32_t MaxSpirvWords();
 uint32_t MaterializeMemoEntries();
 uint32_t MaterializeMemoStamps();

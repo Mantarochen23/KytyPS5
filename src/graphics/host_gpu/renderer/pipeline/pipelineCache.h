@@ -299,6 +299,10 @@ public:
 		uint64_t lookahead_hits          = 0;
 		uint64_t registration_deferred   = 0; // registrations kept without a translation
 	};
+	// Prefetch requests that were not already known: queued, unmapped, in flight or deferred.
+	[[nodiscard]] uint64_t PrefetchNeedingWork() const {
+		return m_prefetch.requested - m_prefetch.known;
+	}
 	// Registers a callback invoked on worker threads whenever an async shader/pipeline job
 	// finishes, so the guest command processor wakes without polling.
 	void SetAsyncFinishCallback(Common::UniqueFunction<void>&& callback);

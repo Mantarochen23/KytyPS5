@@ -92,6 +92,12 @@ private:
 	std::chrono::steady_clock::time_point m_start;
 	ScopedTimer*                          m_parent   = nullptr;
 	uint64_t                              m_child_ns = 0;
+	// Per-call timers read the clock for one call in --frame-timer-sample and count that call's
+	// time that many times over; a timer inside an unmeasured one is not measured either, one inside
+	// a measured one is, with the same weight. Waits are always measured, with weight 1.
+	uint32_t                              m_weight   = 1;
+	bool                                  m_measured = true;
+	bool                                  m_done     = false;
 };
 
 // Called when a store load that applied modules has finished: from then on, module lookups that
