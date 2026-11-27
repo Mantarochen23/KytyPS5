@@ -554,10 +554,18 @@ void Run() {
 			burst_items_before = items;
 		}
 		if (limit != 0) {
-			const auto sample    = TakeSample();
-			const auto process   = sample.process;
-			const auto footprint = Footprint(process, sample.zram);
-			switch (guard.Step(now_ms, footprint)) {
+			// Every second, so only the two cheap reads: a full sample walks every allocator arena
+			// under its lock (mallinfo2, malloc_info), which on a 10 GB heap takes a quarter of a
+			// second and stalls every allocating thread for that long.
+			const auto process   = ReadProcessMemory();
+			const auto footprint = Footprint(process, ReadZram());
+			const auto action    = guard.Step(now_ms, footprint);
+			if (action == LimitGuard::Action::None) {
+				lock.lock();
+				continue;
+			}
+			const auto sample = TakeSample();
+			switch (action) {
 				case LimitGuard::Action::None: break;
 				case LimitGuard::Action::DropCaches: {
 					const auto grew = FormatGrowth(previous_holders, Holders(sample));
