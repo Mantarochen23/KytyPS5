@@ -7,6 +7,7 @@
 #include "common/file.h"
 #include "common/frameCost.h"
 #include "common/logging/log.h"
+#include "common/ports.h"
 #include "common/profiler.h"
 #include "common/stringUtils.h"
 #include "common/threads.h"
@@ -835,10 +836,23 @@ void RenderExecutor::FindBuffers(std::span<PreparedBindings* const> stages) {
 		for (const auto& table: snapshot.indirect_buffer_tables) {
 			const auto& metadata = program.info.buffers[table.root_resource];
 			Common::FrameCost::Add(Common::FrameCost::Counter::TableDispatches);
+			// Written sentinel ranges end before the tables the bound stages captured, so the clamped
+			// sizes in the table depend on those reads too, which the candidate key does not cover.
+			uint64_t reads_key = 0;
+			if (metadata.written) {
+				reads_key = 14695981039346656037ull;
+				for (const auto* reader: stages) {
+					for (const auto [read_address, read_size]:
+					     reader->runtime->resources->specialization_reads) {
+						reads_key = (reads_key ^ read_address) * 1099511628211ull;
+						reads_key = (reads_key ^ read_size) * 1099511628211ull;
+					}
+				}
+			}
 			auto found = std::ranges::find_if(m_runtime_buffer_tables, [&](const auto& entry) {
 				return entry.module_id == prepared.runtime->module->id &&
 				       entry.root_resource == table.root_resource &&
-				       entry.candidate_key == table.candidate_key;
+				       entry.candidate_key == table.candidate_key && entry.reads_key == reads_key;
 			});
 			if (found == m_runtime_buffer_tables.end()) {
 				constexpr size_t MaxCachedRuntimeTables = 64;
@@ -857,10 +871,12 @@ void RenderExecutor::FindBuffers(std::span<PreparedBindings* const> stages) {
 				                                       .candidate_key = table.candidate_key,
 				                                       .module_id = prepared.runtime->module->id,
 				                                       .root_resource = table.root_resource,
+				                                       .reads_key = reads_key,
 				                                   });
 			}
 			found->last_use = ++m_runtime_buffer_table_tick;
-			const bool rebuild = found->buffer == nullptr || found->state == nullptr ||
+			const bool rebuild = !Config::PortEnabled(Config::Port::RuntimeTableCache) ||
+			                     found->buffer == nullptr || found->state == nullptr ||
 			                     found->built_generation != found->state->BackingGeneration();
 			if (rebuild) {
 				Common::FrameCost::Add(Common::FrameCost::Counter::TableRebuilds);
@@ -883,18 +899,30 @@ void RenderExecutor::FindBuffers(std::span<PreparedBindings* const> stages) {
 					    GuestRange {address, dependency_size}.Valid()) {
 						candidate_ranges.Add(address, dependency_size);
 					}
+				}
+				// Registered before anything is resolved, and the generation read here: a map, unmap
+				// or buffer replacement from now on, on any thread, leaves this build stale.
+				auto state = cache.RegisterRuntimeTable(std::move(candidate_ranges));
+				const auto build_generation = state->BackingGeneration();
+				for (const auto& value: table.entries) {
 					sources.push_back(resolve_source(metadata, value, true));
 				}
 				// Discovery can merge earlier buffer owners. Obtain only after the whole candidate set has
 				// been discovered so every stored BDA names a final backing buffer.
+				const bool texel_sync =
+				    metadata.formatted || (metadata.read && Config::SyncRawImageBuffersEnabled());
+				bool aliased_counted = false;
 				for (size_t j = 0; j < sources.size(); ++j) {
 					const auto& source = sources[j];
 					if (source.address == 0 || source.size == 0) continue;
-					auto [buf, off] = cache.ObtainBuffer(
-					    source.address, source.size, false,
-					    metadata.formatted || (metadata.read && Config::SyncRawImageBuffersEnabled()),
-					    source.id, false);
+					auto [buf, off] = cache.ObtainBuffer(source.address, source.size, false,
+					                                     texel_sync, source.id, false);
 					backing_ranges.Add(buf->CpuAddress(), buf->Size());
+					if (texel_sync && !aliased_counted &&
+					    m_context.GetTextureCache().FindImageFromRange(source.address, source.size)) {
+						aliased_counted = true;
+						Common::FrameCost::Add(Common::FrameCost::Counter::TableImageAliased);
+					}
 					const uint64_t host_bda = static_cast<uint64_t>(buf->BufferDeviceAddress()) + off;
 					const uint64_t aligned_bda = host_bda & ~uint64_t {3};
 					const uint32_t byte_offset = static_cast<uint32_t>(host_bda & 3u);
@@ -914,12 +942,11 @@ void RenderExecutor::FindBuffers(std::span<PreparedBindings* const> stages) {
 				std::memcpy(replacement->Mapped().data(), table_words.data(),
 				            table_words.size() * sizeof(uint32_t));
 				replacement->Flush(0, table_words.size() * sizeof(uint32_t));
-				auto write_ranges = m_context.IntersectMappedRanges(backing_ranges);
+				state->SetWriteRanges(m_context.IntersectMappedRanges(backing_ranges));
 				auto retired = std::move(found->buffer);
 				found->buffer = std::move(replacement);
-				found->state  = cache.RegisterRuntimeTable(std::move(candidate_ranges),
-				                                                 std::move(write_ranges));
-				found->built_generation = found->state->BackingGeneration();
+				found->state  = std::move(state);
+				found->built_generation = build_generation;
 				if (retired != nullptr && m_context.GetCommandScheduler().Active()) {
 					m_context.GetCommandScheduler().DeferOperation(
 					    [owner = std::move(retired)]() mutable { owner.reset(); });
