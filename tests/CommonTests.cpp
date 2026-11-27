@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <sys/wait.h>
 #include <unistd.h>
 #include <cstring>
 #include <filesystem>
@@ -115,8 +116,7 @@ TEST(HostException, GuestSignalWaitsUntilTheFaultHandlerReturns) {
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
 namespace {
-char   g_fault_text[1 << 16];
-size_t g_fault_length = 0;
+int g_fault_pipe = -1;
 
 size_t CountOf(const char* text, const char* needle) {
 	size_t count = 0;
@@ -126,36 +126,16 @@ size_t CountOf(const char* text, const char* needle) {
 	return count;
 }
 
-// Builds the host fault report into a static buffer, checks it and ends the process: 0 when it names
-// the thread, its tag, this module, the faulting function and at least three frames.
+// Writes the host fault report to the pipe the parent reads, then ends the child.
 bool ReportAndExit(const Common::HostException::ExceptionInfo& info) {
-	(void)!::write(2, "handler entered\n", 16);
 	Common::FaultReport::Registers regs {};
 	regs.pc  = info.exception_address;
 	regs.rsp = info.rsp;
 	regs.rbp = info.rbp;
 	Common::FaultReport::WriteHostContext(
-	    regs, {[](void*, const char* text) {
-		           const size_t n = std::strlen(text);
-		           if (g_fault_length + n < sizeof(g_fault_text)) {
-			           std::memcpy(g_fault_text + g_fault_length, text, n + 1);
-			           g_fault_length += n;
-		           }
-	           },
+	    regs, {[](void*, const char* text) { (void)!::write(g_fault_pipe, text, std::strlen(text)); },
 	           nullptr});
-	const size_t frames = CountOf(g_fault_text, " bt[") + CountOf(g_fault_text, " fp[");
-	const bool   ok     = std::strstr(g_fault_text, "fault-test-worker") != nullptr &&
-	                      std::strstr(g_fault_text, "doing: fault test tag") != nullptr &&
-	                      std::strstr(g_fault_text, "common_tests+0x") != nullptr &&
-	                      std::strstr(g_fault_text, "KytyFaultReportTestNullWrite") != nullptr &&
-	                      frames >= 3;
-	if (!ok) {
-		std::fprintf(stderr, "report length %zu frames %zu pc=%llx:\n", g_fault_length, frames,
-		             static_cast<unsigned long long>(info.exception_address));
-		std::fputs(g_fault_text, stderr);
-		std::fflush(stderr);
-	}
-	std::_Exit(ok ? 0 : 1);
+	std::_Exit(0);
 }
 } // namespace
 
@@ -164,23 +144,39 @@ extern "C" __attribute__((noinline, used)) void KytyFaultReportTestNullWrite(vol
 }
 
 TEST(FaultReport, WorkerThreadFaultNamesModuleFunctionAndFrames) {
-	EXPECT_EXIT(
-	    {
-		    (void)!::write(2, "child start\n", 12);
-		    Common::FaultReport::RefreshModules();
-		    (void)!::write(2, "refreshed\n", 10);
-		    const bool installed = Common::HostException::InstallHandler(ReportAndExit);
-		    (void)!::write(2, installed ? "installed\n" : "not installed\n", installed ? 10 : 14);
-		    std::thread worker([] {
-			    (void)!::write(2, "worker\n", 7);
-			    Common::FaultReport::SetThreadTag("fault test tag", "fault-test-worker");
-			    Common::FaultReport::RegisterThreadStack();
-			    KytyFaultReportTestNullWrite(nullptr);
-		    });
-		    worker.join();
-		    std::_Exit(2);
-	    },
-	    testing::ExitedWithCode(0), "");
+	int fds[2];
+	ASSERT_EQ(::pipe(fds), 0);
+	const pid_t child = ::fork();
+	ASSERT_GE(child, 0);
+	if (child == 0) {
+		::close(fds[0]);
+		g_fault_pipe = fds[1];
+		Common::FaultReport::RefreshModules();
+		Common::HostException::InstallHandler(ReportAndExit);
+		std::thread worker([] {
+			Common::FaultReport::SetThreadTag("fault test tag", "fault-test-worker");
+			Common::FaultReport::RegisterThreadStack();
+			KytyFaultReportTestNullWrite(nullptr);
+		});
+		worker.join();
+		std::_Exit(2);
+	}
+	::close(fds[1]);
+	std::string text;
+	char        buffer[4096];
+	for (ssize_t n; (n = ::read(fds[0], buffer, sizeof(buffer))) > 0;) {
+		text.append(buffer, static_cast<size_t>(n));
+	}
+	::close(fds[0]);
+	int status = 0;
+	::waitpid(child, &status, 0);
+	const size_t frames = CountOf(text.c_str(), " bt[") + CountOf(text.c_str(), " fp[");
+	EXPECT_TRUE(WIFEXITED(status) && WEXITSTATUS(status) == 0) << "status " << status;
+	EXPECT_NE(text.find("fault-test-worker"), std::string::npos) << text;
+	EXPECT_NE(text.find("doing: fault test tag"), std::string::npos) << text;
+	EXPECT_NE(text.find("common_tests+0x"), std::string::npos) << text;
+	EXPECT_NE(text.find("[KytyFaultReportTestNullWrite+0x"), std::string::npos) << text;
+	EXPECT_GE(frames, 3u) << text;
 }
 #endif
 
