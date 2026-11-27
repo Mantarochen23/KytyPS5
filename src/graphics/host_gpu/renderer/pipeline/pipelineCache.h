@@ -126,6 +126,11 @@ struct ShaderModule {
 	std::vector<RectListParameter>               rect_parameters;
 	// Indirect mesh draw: a task shader reads the records and launches the groups.
 	bool                                         mesh_task = false;
+	// Port canonical-resources: the hash of the specialization the old resource layout gave the
+	// inputs this module was built for (ResourceSnapshot::legacy_hash), 0 if unknown.
+	uint64_t                                     legacy_hash = 0;
+	// Runtime only: a lookup compared legacy_hash with its own inputs (or it was built this run).
+	bool                                         legacy_checked = true;
 };
 
 // A draw's depth target and its first color_count color targets.
@@ -292,6 +297,10 @@ private:
 		// Plans of the modules with calls, by CallCodeHash of their callee code (from the store or
 		// built this run); a program with calls loaded from the store has no call_source yet.
 		std::unordered_map<uint64_t, std::vector<uint8_t>> call_plans;
+		// Port canonical-resources diagnostics: old-layout hash by the hash of the specialization a
+		// missed lookup materialized, and the stored modules no lookup has compared yet.
+		std::unordered_map<uint64_t, uint64_t> legacy_of_specialization;
+		uint32_t                               legacy_unchecked = 0;
 
 		[[nodiscard]] std::span<const uint32_t> FunctionCode() const;
 		bool RefreshCallSource(const ShaderRecompiler::IR::SrtRuntime& runtime);

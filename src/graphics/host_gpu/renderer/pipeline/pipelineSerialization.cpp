@@ -37,8 +37,8 @@ enum class Record : uint8_t { Module, GraphicsPipeline, TessellationLayout, Fail
 // Explicit store format version. Bump manually only when recompiler output, SPIR-V profile, or
 // store record layout changes so rebuilds across branches keep reusing compatible warm stores.
 // 5: CompiledShaderInfo::subgroup_size, 6: KeyIndex, 7: compute keys hold lds_storage,
-// 8: modules with calls (their callee code)
-constexpr uint64_t kShaderStoreFormatVersion = 8;
+// 8: modules with calls (their callee code), 9: old-layout hash of a module's specialization
+constexpr uint64_t kShaderStoreFormatVersion = 9;
 
 // What every record depends on besides its own fields.
 std::vector<uint8_t> StoreHeader(const GraphicContext& graphics) {
@@ -57,8 +57,9 @@ template <class S, class Key> void IoKey(S& io, Key& key) {
 
 template <class S, class Module> void IoModule(S& io, Module& stage) {
 	// The handle comes from the SPIR-V. Function code: the callee code of a module with calls.
-	auto& [id, handle, info, specialization, function_code, rect_parameters, mesh_task] = stage;
-	IoAll(io, id, info, specialization, function_code, rect_parameters, mesh_task);
+	auto& [id, handle, info, specialization, function_code, rect_parameters, mesh_task,
+	       legacy_hash, legacy_checked] = stage;
+	IoAll(io, id, info, specialization, function_code, rect_parameters, mesh_task, legacy_hash);
 }
 
 } // namespace
@@ -341,6 +342,9 @@ PipelineCache::LoadRecordStatus PipelineCache::LoadRecord(std::span<const uint8_
 			} else {
 				module.module = CompileSPV(spirv, m_graphics.device);
 			}
+			// A module the old layout's key is known for waits for its first comparison.
+			module.legacy_checked = module.legacy_hash == 0;
+			program->second.legacy_unchecked += module.legacy_checked ? 0u : 1u;
 			program->second.modules.push_back(std::move(module));
 			break;
 		}

@@ -273,6 +273,13 @@ std::span<const uint32_t> PipelineCache::Program::FunctionCode() const {
 	    : std::span<const uint32_t>{};
 }
 
+static uint64_t SpecializationHash(const ShaderRecompiler::IR::ResourceSpecialization& specialization) {
+	ShaderRecompiler::IR::Writer writer;
+	auto                         copy = specialization;
+	ShaderRecompiler::IR::Io(writer, copy);
+	return XXH3_64bits(writer.bytes.data(), writer.bytes.size());
+}
+
 // Address-free: the callee code itself, wherever the guest placed it.
 static uint64_t CallCodeHash(std::span<const uint32_t> function_code) {
 	return XXH3_64bits(function_code.data(), function_code.size_bytes());
@@ -302,7 +309,11 @@ template <bool HasCalls>
 ShaderModule* PipelineCache::Program::FindModule(const ShaderRecompiler::IR::SrtRuntime& runtime,
                                                  ShaderRecompiler::IR::PushData::Window push_data,
                                                  bool* materialized) {
-	if (!ShaderRecompiler::IR::MaterializeResources(resource_plan, runtime, resources,
+	// The old layout's hash is needed while stored modules wait for their first comparison, and
+	// for the module a miss will build.
+	auto probe        = runtime;
+	probe.legacy_hash = legacy_unchecked != 0;
+	if (!ShaderRecompiler::IR::MaterializeResources(resource_plan, probe, resources,
 	                                                specialization)) {
 		if (materialized != nullptr) {
 			*materialized = false;
@@ -325,6 +336,20 @@ ShaderModule* PipelineCache::Program::FindModule(const ShaderRecompiler::IR::Srt
 			if (!candidate.function_code.empty()) continue;
 		}
 		return &candidate;
+	}
+	if (!probe.legacy_hash && Config::PortEnabled(Config::Port::CanonicalResources) &&
+	    std::ranges::any_of(resource_plan.descriptor_sources, [](const auto& source) {
+		    return source.indirect_descriptor.has_value();
+	    })) {
+		probe.legacy_hash = true;
+		if (!ShaderRecompiler::IR::MaterializeResources(resource_plan, probe, resources,
+		                                                specialization)) {
+			resources.legacy_hash = 0;
+		}
+	}
+	if (resources.legacy_hash != 0) {
+		legacy_of_specialization.insert_or_assign(SpecializationHash(specialization),
+		                                          resources.legacy_hash);
 	}
 	return nullptr;
 }
@@ -403,6 +428,10 @@ ShaderModule& PipelineCache::AddModule(Program& program, const ProgramKey& key,
                                        CompiledStage compiled) {
 	auto& module = program.modules.emplace_back(std::move(compiled.module));
 	m_compiled[static_cast<size_t>(key.stage)]++;
+	if (const auto legacy = program.legacy_of_specialization.find(SpecializationHash(module.specialization));
+	    legacy != program.legacy_of_specialization.end()) {
+		module.legacy_hash = legacy->second;
+	}
 	// Guest geometry shaders are compiled through the host mesh stage.
 	std::printf("Shaders: VS %u | PS %u | CS %u | GS %u | LS %u | HS %u | TES %u\n",
 	            m_compiled[static_cast<size_t>(ShaderType::Vertex)],
@@ -579,6 +608,9 @@ void PipelineCache::NoteLookupMiss(const ProgramKey& key, const Program* program
 
 void PipelineCache::ReportLookups() const {
 	std::printf("%s\n", m_lookup_stats.Line().c_str());
+	if (Config::PortEnabled(Config::Port::CanonicalResources)) {
+		std::printf("%s\n", m_lookup_stats.CanonicalLine().c_str());
+	}
 }
 
 template <typename InputInfo>
@@ -705,6 +737,15 @@ const ShaderModule* PipelineCache::GetProgramImpl(const ShaderParams& params, In
 		}
 		if (module != nullptr) {
 			m_lookup_stats.hit++;
+			if (!module->legacy_checked) {
+				// First hit of a stored module: would the old layout's key have found it?
+				module->legacy_checked = true;
+				cached.legacy_unchecked--;
+				if (cached.resources.legacy_hash != 0) {
+					m_lookup_stats.canonical_checked++;
+					m_lookup_stats.canonical_saved += module->legacy_hash != cached.resources.legacy_hash;
+				}
+			}
 			return bind(*module);
 		}
 		if (materialized && !source_changed) {
