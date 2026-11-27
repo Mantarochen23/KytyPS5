@@ -15,6 +15,8 @@
 #include <algorithm>
 #include <cstdint>
 #include <utility>
+#include <iterator>
+#include <map>
 #include <vector>
 
 namespace Libs::Graphics {
@@ -39,7 +41,10 @@ public:
 	void Taint(const std::vector<Use>& uses, uint64_t now_ms) {
 		for (const auto& use: uses) {
 			if (use.written && use.size != 0) {
-				m_ranges.push_back({use.address, use.address + use.size, now_ms});
+				// The set stays disjoint: a range skipped again replaces its older record instead of
+				// piling up beside it (a pile made every later Subtract copy and split all of it).
+				Subtract(use.address, use.address + use.size);
+				m_ranges[use.address] = Range {use.address + use.size, now_ms};
 			}
 		}
 	}
@@ -49,15 +54,14 @@ public:
 		Expire(now_ms);
 		for (const auto& use: uses) {
 			if (!use.read || use.size == 0) continue;
-			for (const auto& range: m_ranges) {
-				if (use.address < range.end && range.begin < use.address + use.size) return true;
-			}
+			if (FirstOverlap(use.address, use.address + use.size) != m_ranges.end()) return true;
 		}
 		return false;
 	}
 
 	// The dispatch ran: what it wrote is fresh.
 	void ClearWritten(const std::vector<Use>& uses) {
+		if (m_ranges.empty()) return;
 		for (const auto& use: uses) {
 			if (use.written && use.size != 0) Subtract(use.address, use.address + use.size);
 		}
@@ -65,33 +69,43 @@ public:
 
 private:
 	struct Range {
-		uint64_t begin = 0;
 		uint64_t end   = 0;
 		uint64_t at_ms = 0;
 	};
+	using Ranges = std::map<uint64_t, Range>; // begin -> end and time; disjoint
+
+	// The first stored range that overlaps [begin, end), or end().
+	[[nodiscard]] Ranges::iterator FirstOverlap(uint64_t begin, uint64_t end) {
+		auto it = m_ranges.upper_bound(begin);
+		if (it != m_ranges.begin()) {
+			auto prev = std::prev(it);
+			if (prev->second.end > begin) return prev;
+		}
+		return it != m_ranges.end() && it->first < end ? it : m_ranges.end();
+	}
 
 	void Expire(uint64_t now_ms) {
-		std::erase_if(m_ranges, [&](const Range& r) {
-			return now_ms >= r.at_ms && now_ms - r.at_ms > m_max_age_ms;
+		std::erase_if(m_ranges, [&](const auto& r) {
+			return now_ms >= r.second.at_ms && now_ms - r.second.at_ms > m_max_age_ms;
 		});
 	}
 
 	void Subtract(uint64_t begin, uint64_t end) {
-		std::vector<Range> kept;
-		kept.reserve(m_ranges.size() + 1);
-		for (const auto& r: m_ranges) {
-			if (end <= r.begin || r.end <= begin) {
-				kept.push_back(r);
-				continue;
+		auto it = FirstOverlap(begin, end);
+		while (it != m_ranges.end() && it->first < end) {
+			const auto r_begin = it->first;
+			const auto r       = it->second;
+			it                 = m_ranges.erase(it);
+			if (r_begin < begin) m_ranges[r_begin] = Range {begin, r.at_ms};
+			if (end < r.end) {
+				m_ranges[end] = Range {r.end, r.at_ms};
+				break;
 			}
-			if (r.begin < begin) kept.push_back({r.begin, begin, r.at_ms});
-			if (end < r.end) kept.push_back({end, r.end, r.at_ms});
 		}
-		m_ranges = std::move(kept);
 	}
 
-	uint64_t           m_max_age_ms;
-	std::vector<Range> m_ranges;
+	uint64_t m_max_age_ms;
+	Ranges   m_ranges;
 };
 
 } // namespace Libs::Graphics

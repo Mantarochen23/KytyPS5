@@ -57,6 +57,23 @@ void TestTransitiveAndExpiry() {
 	Check(taint.Empty(), "expired ranges are dropped");
 }
 
+void TestRepeatedSkipsStayBounded() {
+	SkipTaint taint;
+	// The same producers are skipped frame after frame: the set must not grow with the number of skips.
+	for (uint64_t frame = 0; frame < 10000; frame++) {
+		taint.Taint({{0x2000, 0x300, false, true}, {0x2100, 0x100, false, true}, {0x8000, 64, false, true}}, frame);
+	}
+	Check(taint.Size() <= 4, "repeated skips of the same ranges do not pile up");
+	Check(taint.ReadsTainted({{0x2000, 4, true, false}}, 10000), "still tainted");
+	taint.ClearWritten({{0x2000, 0x300, false, true}});
+	Check(taint.Size() == 1 && !taint.ReadsTainted({{0x2000, 0x300, true, false}}, 10000), "one write clears all of it");
+	// A newer skip refreshes the age of what it covers.
+	SkipTaint aging(1000);
+	aging.Taint({{0x1000, 64, false, true}}, 0);
+	aging.Taint({{0x1000, 64, false, true}}, 900);
+	Check(aging.ReadsTainted({{0x1000, 4, true, false}}, 1500), "the newer skip keeps the range tainted");
+}
+
 void TestCatchUpReplaysProducerBeforeConsumer() {
 	SkipTaint                     taint;
 	SkipCatchUp::Queue<uint32_t>  queue(5000);
@@ -138,6 +155,7 @@ void TestReadyEntryWaitsBehindPendingProducer() {
 } // namespace
 
 int main() {
+	TestRepeatedSkipsStayBounded();
 	TestReadyEntryWaitsBehindPendingProducer();
 	TestFollowsData();
 	TestClearAndSplit();
