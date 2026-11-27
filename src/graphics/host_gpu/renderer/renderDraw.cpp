@@ -1271,46 +1271,49 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 	buffer.BeginRendering(rendering);
 	vk_buffer.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline.pipeline);
 
-	OpBreadcrumb draw_op {};
-	if (mesh_task) {
-		draw_op.kind  = BreadcrumbOpKind::DrawMeshIndirect;
-		draw_op.dim_x = emit.indirect.count;
-		draw_op.dim_y = 1;
-		draw_op.dim_z = 1;
-	} else if (mesh_active) {
-		draw_op.kind  = BreadcrumbOpKind::DrawMesh;
-		draw_op.dim_x = mesh_groups;
-		draw_op.dim_y = draw.instance_count;
-		draw_op.dim_z = 1;
-	} else if (args_buffer.first == nullptr) {
-		draw_op.kind  = draw.indexed ? BreadcrumbOpKind::DrawIndexed : BreadcrumbOpKind::Draw;
-		draw_op.dim_x = draw.index_count;
-		draw_op.dim_y = draw.instance_count;
-		draw_op.dim_z = 1;
-	} else {
-		draw_op.kind = draw.indexed ? BreadcrumbOpKind::DrawIndexedIndirect
-		                            : BreadcrumbOpKind::DrawIndirect;
-		draw_op.dim_x = draw.index_count;
-		draw_op.dim_y = emit.indirect.count;
-		draw_op.dim_z = emit.indirect.stride;
-	}
-	for (const auto& stage: vertex_stages) {
-		if (stage.stage.module != nullptr && draw_op.stage_count < draw_op.stages.size()) {
-			draw_op.stages[draw_op.stage_count++] = {stage.stage.module->info.stage,
-			                                         stage.stage.module->info.shader_hash,
-			                                         stage.stage.module->id,
-			                                         stage.stage.module->info.info.uses_dma};
+	auto& graphics  = m_context.GetGraphics();
+	uint32_t marker_id = 0;
+	if (graphics.breadcrumbs.Active()) {
+		OpBreadcrumb draw_op {};
+		if (mesh_task) {
+			draw_op.kind  = BreadcrumbOpKind::DrawMeshIndirect;
+			draw_op.dim_x = emit.indirect.count;
+			draw_op.dim_y = 1;
+			draw_op.dim_z = 1;
+		} else if (mesh_active) {
+			draw_op.kind  = BreadcrumbOpKind::DrawMesh;
+			draw_op.dim_x = mesh_groups;
+			draw_op.dim_y = draw.instance_count;
+			draw_op.dim_z = 1;
+		} else if (args_buffer.first == nullptr) {
+			draw_op.kind  = draw.indexed ? BreadcrumbOpKind::DrawIndexed : BreadcrumbOpKind::Draw;
+			draw_op.dim_x = draw.index_count;
+			draw_op.dim_y = draw.instance_count;
+			draw_op.dim_z = 1;
+		} else {
+			draw_op.kind = draw.indexed ? BreadcrumbOpKind::DrawIndexedIndirect
+			                            : BreadcrumbOpKind::DrawIndirect;
+			draw_op.dim_x = draw.index_count;
+			draw_op.dim_y = emit.indirect.count;
+			draw_op.dim_z = emit.indirect.stride;
 		}
+		for (const auto& stage: vertex_stages) {
+			if (stage.stage.module != nullptr && draw_op.stage_count < draw_op.stages.size()) {
+				draw_op.stages[draw_op.stage_count++] = {stage.stage.module->info.stage,
+				                                         stage.stage.module->info.shader_hash,
+				                                         stage.stage.module->id,
+				                                         stage.stage.module->info.info.uses_dma};
+			}
+		}
+		if (state.ps_active && state.ps_input_info.stage.module != nullptr &&
+		    draw_op.stage_count < draw_op.stages.size()) {
+			draw_op.stages[draw_op.stage_count++] = {state.ps_input_info.stage.module->info.stage,
+			                                         state.ps_input_info.stage.module->info.shader_hash,
+			                                         state.ps_input_info.stage.module->id,
+			                                         state.ps_input_info.stage.module->info.info.uses_dma};
+		}
+		marker_id = graphics.breadcrumbs.BeginOp(graphics, vk_buffer, draw_op);
 	}
-	if (state.ps_active && state.ps_input_info.stage.module != nullptr &&
-	    draw_op.stage_count < draw_op.stages.size()) {
-		draw_op.stages[draw_op.stage_count++] = {state.ps_input_info.stage.module->info.stage,
-		                                         state.ps_input_info.stage.module->info.shader_hash,
-		                                         state.ps_input_info.stage.module->id,
-		                                         state.ps_input_info.stage.module->info.info.uses_dma};
-	}
-	auto&          graphics  = m_context.GetGraphics();
-	const uint32_t marker_id = graphics.breadcrumbs.BeginOp(graphics, vk_buffer, draw_op);
 
 	auto&         occlusion_queries = m_context.GetOcclusionQueries();
 	const int32_t occlusion_query   = occlusion_queries.Begin(vk_buffer);

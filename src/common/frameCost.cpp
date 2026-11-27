@@ -190,6 +190,19 @@ void FramePresented() noexcept {
 		    Mean(delta, Counter::MemoRangesTracked, frames),
 		    Mean(delta, Counter::MemoRangesUntracked, frames),
 		    Mean(delta, Counter::MemoWalkChanged, frames)));
+		Log::WriteToConsoleAndLog(fmt::format(
+		    "[frame] cuts breadcrumb_ops={:.2f} gpu_invalidate={:.2f} gpu_invalidate_skipped={:.2f} "
+		    "gpu_invalidate_gen_bumps={:.2f} guard_gpu={:.2f} guard_cpu={:.2f} guard_skipped={:.2f} "
+		    "prefetch_scans={:.2f} prefetch_skipped={:.2f} pump={:.2f} pump_skipped={:.2f}\n",
+		    Mean(delta, Counter::BreadcrumbOps, frames),
+		    Mean(delta, Counter::GpuInvalidateCalls, frames),
+		    Mean(delta, Counter::GpuInvalidateSkipped, frames),
+		    Mean(delta, Counter::GpuInvalidateGenBumps, frames),
+		    Mean(delta, Counter::GuardGpuRuns, frames), Mean(delta, Counter::GuardCpuChecks, frames),
+		    Mean(delta, Counter::GuardSkipped, frames), Mean(delta, Counter::PrefetchScans, frames),
+		    Mean(delta, Counter::PrefetchSkipped, frames),
+		    Mean(delta, Counter::PumpAsyncCalls, frames),
+		    Mean(delta, Counter::PumpAsyncSkipped, frames)));
 	}
 	if (g_store_loaded.load(std::memory_order_relaxed) && !g_bad_warned) {
 		const auto hits   = delta[static_cast<size_t>(Counter::FindModuleHits)];

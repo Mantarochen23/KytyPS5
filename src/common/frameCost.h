@@ -60,6 +60,19 @@ enum class Counter : uint8_t {
 	MemoRangesTracked,
 	MemoRangesUntracked,
 	MemoWalkChanged,
+	// Per-call cuts: debug breadcrumbs recorded, GPU-side texture invalidations, indirect dispatch
+	// argument guards, the shader prefetch scan and the asynchronous-work pump.
+	BreadcrumbOps,
+	GpuInvalidateCalls,
+	GpuInvalidateSkipped,
+	GpuInvalidateGenBumps,
+	GuardGpuRuns,
+	GuardCpuChecks,
+	GuardSkipped,
+	PrefetchScans,
+	PrefetchSkipped,
+	PumpAsyncCalls,
+	PumpAsyncSkipped,
 	Count
 };
 

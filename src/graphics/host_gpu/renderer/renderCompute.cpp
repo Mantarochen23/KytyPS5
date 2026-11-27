@@ -1019,17 +1019,20 @@ bool RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 	}
 
 	vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.pipeline);
-	OpBreadcrumb dispatch_op {};
-	dispatch_op.kind        = BreadcrumbOpKind::Dispatch;
-	dispatch_op.dim_x       = thread_group_x;
-	dispatch_op.dim_y       = thread_group_y;
-	dispatch_op.dim_z       = thread_group_z;
-	dispatch_op.stage_count = 1;
-	dispatch_op.stages[0]   = {program.stage, program.shader_hash, input_info.stage.module->id,
-	                           program.info.uses_dma};
-	CaptureComputeBufferBreadcrumbs(m_context, cs_regs, bindings, dispatch_op);
-	auto&          graphics  = m_context.GetGraphics();
-	const uint32_t marker_id = graphics.breadcrumbs.BeginOp(graphics, vk_buffer, dispatch_op);
+	auto&    graphics  = m_context.GetGraphics();
+	uint32_t marker_id = 0;
+	if (graphics.breadcrumbs.Active()) {
+		OpBreadcrumb dispatch_op {};
+		dispatch_op.kind        = BreadcrumbOpKind::Dispatch;
+		dispatch_op.dim_x       = thread_group_x;
+		dispatch_op.dim_y       = thread_group_y;
+		dispatch_op.dim_z       = thread_group_z;
+		dispatch_op.stage_count = 1;
+		dispatch_op.stages[0]   = {program.stage, program.shader_hash, input_info.stage.module->id,
+		                           program.info.uses_dma};
+		CaptureComputeBufferBreadcrumbs(m_context, cs_regs, bindings, dispatch_op);
+		marker_id = graphics.breadcrumbs.BeginOp(graphics, vk_buffer, dispatch_op);
+	}
 	constexpr uint32_t DISPATCH_INITIATOR_ORDERED_APPEND_ENABLE = 1u << 3u;
 	const uint64_t     group_threads = uint64_t {std::max(input_info.threads_num[0], 1u)} *
 	                                   std::max(input_info.threads_num[1], 1u) *
@@ -1160,14 +1163,17 @@ bool RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 		ShaderWriteHazardBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
 	}
 	vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.pipeline);
-	OpBreadcrumb dispatch_op {};
-	dispatch_op.kind        = BreadcrumbOpKind::DispatchIndirect;
-	dispatch_op.stage_count = 1;
-	dispatch_op.stages[0]   = {program.stage, program.shader_hash, input_info.stage.module->id,
-	                           program.info.uses_dma};
-	CaptureComputeBufferBreadcrumbs(m_context, cs_regs, bindings, dispatch_op);
-	auto&          graphics  = m_context.GetGraphics();
-	const uint32_t marker_id = graphics.breadcrumbs.BeginOp(graphics, vk_buffer, dispatch_op);
+	auto&    graphics  = m_context.GetGraphics();
+	uint32_t marker_id = 0;
+	if (graphics.breadcrumbs.Active()) {
+		OpBreadcrumb dispatch_op {};
+		dispatch_op.kind        = BreadcrumbOpKind::DispatchIndirect;
+		dispatch_op.stage_count = 1;
+		dispatch_op.stages[0]   = {program.stage, program.shader_hash, input_info.stage.module->id,
+		                           program.info.uses_dma};
+		CaptureComputeBufferBreadcrumbs(m_context, cs_regs, bindings, dispatch_op);
+		marker_id = graphics.breadcrumbs.BeginOp(graphics, vk_buffer, dispatch_op);
+	}
 	vk_buffer.dispatchIndirect(indirect_buffer, indirect_offset);
 	graphics.breadcrumbs.EndOp(graphics, vk_buffer, marker_id);
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::Dispatches);

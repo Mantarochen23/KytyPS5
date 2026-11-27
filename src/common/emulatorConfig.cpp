@@ -597,4 +597,8 @@ uint32_t DriverCacheCapMb() {
 	return g_config != nullptr ? g_config->driver_cache_cap_mb : 0u;
 }
 
+bool GpuDebugEnabled() {
+	return g_config != nullptr && g_config->gpu_debug_enabled;
+}
+
 } // namespace Config

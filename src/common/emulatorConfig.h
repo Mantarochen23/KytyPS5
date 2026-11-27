@@ -212,6 +212,10 @@ struct ConfigOptions {
 	// hit reads none of them; a page written more than this many times is compared by its bytes.
 	// 0 = off (every range is read and hashed on every lookup).
 	uint32_t                 materialize_memo_stamps    = 0;
+	// --gpu-debug: record a breadcrumb (and write driver buffer markers) for every draw and dispatch,
+	// for device-lost reports. Off = none are recorded, unless another diagnostic needs them
+	// (--gpu-fault-query, --graphics-debug-dump, --guest-fault-report-only, RADV_DEBUG with `hang`).
+	bool                     gpu_debug_enabled          = false;
 };
 
 void Load(const ConfigOptions& cfg);
@@ -338,6 +342,7 @@ uint32_t FaultStormFrames();
 uint32_t FaultStormHold();
 uint32_t HeapTuneArenas();
 uint32_t DriverCacheCapMb();
+bool     GpuDebugEnabled();
 uint32_t MaxSpirvWords();
 uint32_t MaterializeMemoEntries();
 uint32_t MaterializeMemoStamps();

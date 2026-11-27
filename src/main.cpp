@@ -86,6 +86,10 @@ static void PrintUsage() {
 	         "                                       reads KYTY_SKIP_SHADERS.\n");
 	::printf("  --gpu-fault-query                    Debug: query VK_EXT_device_fault after flushing\n"
 	         "                                       device-lost breadcrumbs (also KYTY_GPU_FAULT_QUERY=1).\n");
+	::printf("  --gpu-debug                          Debug: record a breadcrumb and a driver marker for every draw\n"
+	         "                                       and dispatch (device-lost reports name the operation).\n"
+	         "                                       Also on with --gpu-fault-query, --graphics-debug-dump,\n"
+	         "                                       --guest-fault-report-only or RADV_DEBUG containing hang.\n");
 	::printf("  --bda-table-validate                 Debug: validate every BDA page-table write and clear\n"
 	         "                                       against live buffers (also KYTY_BDA_TABLE_VALIDATE=1).\n");
 	::printf("  --shader-cache                       Keep compiled shaders and pipelines between boots.\n");
@@ -345,6 +349,7 @@ static constexpr Flag FLAGS[] = {
     {"--guest-fault-park", &ConfigOptions::guest_fault_park},
     {"--guest-fault-report-only", &ConfigOptions::guest_fault_report_only},
     {"--spirv-compact", &ConfigOptions::spirv_compact_enabled},
+    {"--gpu-debug", &ConfigOptions::gpu_debug_enabled},
 };
 
 static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_help) {
