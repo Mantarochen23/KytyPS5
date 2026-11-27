@@ -182,6 +182,12 @@ struct ConfigOptions {
 	// --mem-limit-gb: when the process's RSS + swap passes this, caches are dropped and the memory
 	// table printed; still over 10 s later, the run stops with a message. 0 = off.
 	uint32_t                 mem_limit_gb               = 0;
+	// --fault-storm-faults / --fault-storm-frames / --fault-storm-hold: a guest page whose write
+	// watch is re-armed and faults again `faults` times within `frames` frames stays unwatched (and
+	// is uploaded as modified on every pass) for `hold` frames, then is re-armed. faults 0 = off.
+	uint32_t                 fault_storm_faults         = 0;
+	uint32_t                 fault_storm_frames         = 8;
+	uint32_t                 fault_storm_hold           = 60;
 };
 
 void Load(const ConfigOptions& cfg);
@@ -299,6 +305,9 @@ uint32_t AsyncSpeculativeModulesMode();
 uint32_t WarmUpBudgetSeconds();
 bool SpirvCompactEnabled();
 uint32_t MemLimitGb();
+uint32_t FaultStormFaults();
+uint32_t FaultStormFrames();
+uint32_t FaultStormHold();
 
 } // namespace Config
 

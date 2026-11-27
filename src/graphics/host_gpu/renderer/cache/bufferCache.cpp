@@ -8,6 +8,7 @@
 #include "common/profiler.h"
 #include "graphics/guest_gpu/command_processor/waitDiagnostics.h"
 #include "graphics/guest_gpu/graphicsRun.h"
+#include "graphics/host_gpu/faultStats.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/cache/textureCache.h"
 #include "graphics/host_gpu/renderer/commandScheduler.h"
@@ -502,9 +503,12 @@ BufferCache::~BufferCache() {
 }
 
 void BufferCache::InvalidateMemory(uint64_t vaddr, uint64_t size) {
+	const auto started = FaultStats::NowNs();
 	m_memory_tracker.InvalidateRegion(vaddr, size,
 	                                  [this, vaddr, size] { ReadMemory(vaddr, size, true); });
 	QueueBdaSync(vaddr, size);
+	FaultStats::g_counters.invalidate_ns.fetch_add(FaultStats::NowNs() - started,
+	                                               std::memory_order_relaxed);
 }
 
 void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
@@ -641,6 +645,7 @@ bool BufferCache::SynchronizeBuffer(Buffer& buffer, uint64_t vaddr, uint64_t siz
                                     bool is_texel_buffer) {
 	std::vector<vk::BufferCopy> copies;
 	uint64_t                    total_size = 0;
+	FaultStats::SetFrame(static_cast<uint32_t>(m_scheduler.Context().CurrentFrameNum()));
 	m_memory_tracker.ForEachUploadRange(
 	    vaddr, size, is_written,
 	    [&](uint64_t address, uint64_t bytes) noexcept {

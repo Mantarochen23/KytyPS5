@@ -518,6 +518,18 @@ uint32_t MemLimitGb() {
 	return g_config != nullptr ? g_config->mem_limit_gb : 0u;
 }
 
+uint32_t FaultStormFaults() {
+	return g_config != nullptr ? g_config->fault_storm_faults : 0u;
+}
+
+uint32_t FaultStormFrames() {
+	return g_config != nullptr ? g_config->fault_storm_frames : 8u;
+}
+
+uint32_t FaultStormHold() {
+	return g_config != nullptr ? g_config->fault_storm_hold : 60u;
+}
+
 bool AsyncLookaheadEnabled() {
 	return g_config == nullptr || g_config->async_lookahead != 0u;
 }

@@ -2,11 +2,14 @@
 #define EMULATOR_SRC_GRAPHICS_HOST_GPU_REGIONMANAGER_H_
 
 #include "common/assert.h"
+#include "graphics/host_gpu/faultStats.h"
 #include "graphics/host_gpu/pageManager.h"
 #include "graphics/host_gpu/regionDefinitions.h"
 
 #include <atomic>
+#include <memory>
 #include <mutex>
+#include <thread>
 #include <utility>
 
 #if defined(_MSC_VER)
@@ -31,10 +34,21 @@ class TrackingSpinLock final {
 public:
 	void lock() noexcept {
 		const auto thread = CurrentThread();
+		uint64_t   wait_start = 0;
+		uint32_t   spins      = 0;
 		while (m_lock.test_and_set(std::memory_order_acquire)) {
 			EXIT_NOT_IMPLEMENTED(m_owner.load(std::memory_order_relaxed) == thread);
+			if (wait_start == 0) {
+				wait_start = FaultStats::NowNs();
+			}
 			// Wait on reads, so the holder's cache line is not written until the lock is free.
+			// The holder may be inside a protection syscall or an upload: after a short spin, give
+			// its CPU back instead of burning ours.
 			while (m_lock.test(std::memory_order_relaxed)) {
+				if (++spins > 256) {
+					std::this_thread::yield();
+					continue;
+				}
 #if defined(__x86_64__) || defined(_M_X64)
 				_mm_pause();
 #elif defined(_M_ARM64)
@@ -45,6 +59,9 @@ public:
 			}
 		}
 		m_owner.store(thread, std::memory_order_relaxed);
+		if (wait_start != 0) {
+			FaultStats::NoteLockWait(FaultStats::NowNs() - wait_start);
+		}
 	}
 	void unlock() noexcept {
 		EXIT_NOT_IMPLEMENTED(m_owner.load(std::memory_order_relaxed) != CurrentThread());
@@ -90,6 +107,13 @@ public:
 		return GetBits<source>().Any(start, end);
 	}
 
+	// Whether every page of the range is already in the state. Reads the bits without the lock.
+	template <DirtySource source>
+	[[nodiscard]] bool IsAllModified(uint64_t offset, uint64_t size) const {
+		const auto [start, end] = GetPageRange(offset, size);
+		return GetBits<source>().All(start, end);
+	}
+
 	template <DirtySource source, bool enable>
 	void ChangeState(uint64_t offset, uint64_t size) {
 		const auto [start, end] = GetPageRange(offset, size);
@@ -100,6 +124,11 @@ public:
 		}
 		auto&      bits = GetBits<source>();
 		RegionBits changed = enable ? RegionBits(~bits, start, end) : RegionBits(bits, start, end);
+		if constexpr (source == DirtySource::Cpu && enable) {
+			if (FaultStats::g_storm.faults.load(std::memory_order_relaxed) != 0) {
+				NoteWriteFaults(changed);
+			}
+		}
 		if constexpr (enable) {
 			bits.SetRange(start, end);
 		} else {
@@ -112,8 +141,11 @@ public:
 		}
 	}
 
+	// With hold_hot, pages the fault-storm rule marked are reported but keep their dirty bit and
+	// stay unwatched, so the guest writes them without faulting; the caller uploads them again on
+	// every pass. Only for CPU-dirty bits, and never for a range the GPU is about to write.
 	template <DirtySource source, bool clear, typename Func>
-	void ForEachModifiedRange(uint64_t offset, uint64_t size, Func&& func) {
+	void ForEachModifiedRange(uint64_t offset, uint64_t size, Func&& func, bool hold_hot = false) {
 		const auto [start, end] = GetPageRange(offset, size);
 		auto&      bits         = GetBits<source>();
 		if (!bits.Any(start, end)) {
@@ -121,11 +153,20 @@ public:
 		}
 		RegionBits mask(bits, start, end);
 		if constexpr (clear) {
-			bits.UnsetRange(start, end);
-			if constexpr (source == DirtySource::Cpu) {
-				UpdateProtection<true, false>(mask);
+			if (source == DirtySource::Cpu && hold_hot && m_storm != nullptr) {
+				RegionBits release(mask);
+				HoldHotPages(mask, release);
+				for (const auto [first, last]: release) {
+					bits.UnsetRange(first, last);
+				}
+				UpdateProtection<true, false>(release);
 			} else {
-				UpdateProtection<false, true>(mask);
+				bits.UnsetRange(start, end);
+				if constexpr (source == DirtySource::Cpu) {
+					UpdateProtection<true, false>(mask);
+				} else {
+					UpdateProtection<false, true>(mask);
+				}
 			}
 		}
 		for (const auto [first, last]: mask) {
@@ -136,6 +177,80 @@ public:
 	TrackingSpinLock lock;
 
 private:
+	// Per page: faults counted in the current window, and the hold of a marked page. Frames are
+	// kept modulo 2^16; the window and the hold are at most 30000 frames.
+	struct PageStorm {
+		uint16_t start  = 0;
+		uint16_t until  = 0;
+		uint8_t  count  = 0;
+		uint8_t  active = 0;
+	};
+
+	static uint16_t StormFrame() {
+		return static_cast<uint16_t>(FaultStats::g_storm.frame.load(std::memory_order_relaxed));
+	}
+
+	// Called under the lock for pages that fault right after being re-armed.
+	void NoteWriteFaults(const RegionBits& changed) {
+		const auto faults = FaultStats::g_storm.faults.load(std::memory_order_relaxed);
+		const auto window = FaultStats::g_storm.frames.load(std::memory_order_relaxed);
+		const auto hold   = FaultStats::g_storm.hold.load(std::memory_order_relaxed);
+		if (hold == 0) {
+			return;
+		}
+		if (m_storm == nullptr) {
+			m_storm = std::make_unique<PageStorm[]>(TRACKER_REGION_PAGES);
+		}
+		const auto frame = StormFrame();
+		for (const auto [first, last]: changed) {
+			for (auto page = first; page < last; page++) {
+				auto& state = m_storm[page];
+				if (state.active != 0) {
+					continue;
+				}
+				if (state.count == 0 || static_cast<uint16_t>(frame - state.start) >= window) {
+					state.start = frame;
+					state.count = 0;
+				}
+				if (++state.count >= faults) {
+					state.active = 1;
+					state.until  = static_cast<uint16_t>(frame + hold);
+					state.count  = 0;
+					FaultStats::g_counters.storm_marked.fetch_add(1, std::memory_order_relaxed);
+				}
+			}
+		}
+	}
+
+	// `release` starts as `mask`; the hot pages it holds are removed from it. Expired ones are
+	// re-armed (stay in `release`).
+	void HoldHotPages(const RegionBits& mask, RegionBits& release) {
+		const auto frame = StormFrame();
+		uint64_t   kept = 0, expired = 0;
+		for (const auto [first, last]: mask) {
+			for (auto page = first; page < last; page++) {
+				auto& state = m_storm[page];
+				if (state.active == 0) {
+					continue;
+				}
+				if (static_cast<uint16_t>(frame - state.until) < 0x8000u) {
+					state.active = 0;
+					state.count  = 0;
+					expired++;
+					continue;
+				}
+				release.Unset(page);
+				kept++;
+			}
+		}
+		if (kept != 0) {
+			FaultStats::g_counters.storm_kept.fetch_add(kept, std::memory_order_relaxed);
+		}
+		if (expired != 0) {
+			FaultStats::g_counters.storm_expired.fetch_add(expired, std::memory_order_relaxed);
+		}
+	}
+
 	// CPU-dirty pages are not write-watched; GPU-dirty pages are read-watched.
 	template <bool track, bool is_read>
 	void UpdateProtection(RegionBits& changed) {
@@ -171,6 +286,7 @@ private:
 	uint64_t     m_cpu_addr = 0;
 	RegionBits   m_cpu_dirty;
 	RegionBits   m_gpu_dirty;
+	std::unique_ptr<PageStorm[]> m_storm;
 };
 
 } // namespace Libs::Graphics

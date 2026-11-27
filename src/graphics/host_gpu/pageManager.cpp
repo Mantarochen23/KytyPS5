@@ -2,6 +2,7 @@
 
 #include "common/alignment.h"
 #include "common/virtualMemory.h"
+#include "graphics/host_gpu/faultStats.h"
 #include "graphics/host_gpu/regionDefinitions.h"
 #include "kernel/memory.h"
 
@@ -186,7 +187,15 @@ struct PageManager::Impl {
 	}
 
 	void Protect(uint64_t vaddr, uint64_t size, Common::VirtualMemory::Mode mode) noexcept {
-		if (!Libs::LibKernel::Memory::ProtectGuestHostMemory(vaddr, size, mode)) {
+		const auto started = FaultStats::NowNs();
+		const bool ok      = Libs::LibKernel::Memory::ProtectGuestHostMemory(vaddr, size, mode);
+		auto&      counters = FaultStats::g_counters;
+		counters.protect_ns.fetch_add(FaultStats::NowNs() - started, std::memory_order_relaxed);
+		counters.protect_calls.fetch_add(1, std::memory_order_relaxed);
+		(mode == Common::VirtualMemory::Mode::ReadWrite ? counters.unprotect_pages
+		                                                : counters.protect_pages)
+		    .fetch_add(size / PAGE_SIZE, std::memory_order_relaxed);
+		if (!ok) {
 			Fatal("address-space protection failed at 0x%016" PRIx64 ", mode=0x%08" PRIx32, vaddr,
 			      static_cast<uint32_t>(mode));
 		}
