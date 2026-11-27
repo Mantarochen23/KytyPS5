@@ -8,6 +8,7 @@
 #include "common/profiler.h"
 #include "graphics/guest_gpu/gpu_format.h"
 #include "graphics/guest_gpu/tile.h"
+#include "graphics/host_gpu/faultStats.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/cache/bufferCache.h"
 #include "graphics/host_gpu/renderer/commandScheduler.h"
@@ -223,6 +224,7 @@ void TextureCache::RegisterImage(ImageId id) {
 	    .address = data.address, .size = static_cast<uint32_t>(data.size), .id = id};
 	ForEachPage(data.address, data.size, [this, &entry](uint64_t page) {
 		m_image_page_table[page].entries.push_back(entry);
+		m_registered_pages.Add(page, 1);
 	});
 	image.registered = true;
 	image.lru_id     = m_lru_cache.Insert(id, m_gc_tick);
@@ -245,6 +247,7 @@ void TextureCache::UnregisterImage(ImageId id) {
 			EXIT("TextureCache: image missing from page owner index\n");
 		}
 		entries.erase(entry);
+		m_registered_pages.Add(page, -1);
 	});
 	m_lru_cache.Free(image.lru_id);
 	m_total_used_memory -= image.AccountedSize();
@@ -2038,6 +2041,14 @@ bool TextureCache::CopyToImage(uint64_t address, uint64_t source, uint64_t size)
 }
 
 void TextureCache::InvalidateMemory(uint64_t address, uint64_t size) {
+	// Images register their pages before they are tracked, so a CPU write to pages without one has
+	// nothing to invalidate (upstream PR 1284).
+	ImagePageTable::PageRange pages {};
+	if (ImagePageTable::TryGetPageRange(address, size, pages) &&
+	    !m_registered_pages.Any(pages.first, pages.last_exclusive)) {
+		return;
+	}
+	const FaultStats::SiteScope site(FaultStats::LockSite::Texture);
 	std::scoped_lock lock {m_lock};
 	const auto       page_begin = Common::AlignDown(address, TRACKER_PAGE_SIZE);
 	const auto       page_end   = Common::AlignUp(address + size, TRACKER_PAGE_SIZE);

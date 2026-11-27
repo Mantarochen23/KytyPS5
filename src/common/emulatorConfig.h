@@ -185,6 +185,12 @@ struct ConfigOptions {
 	// Set when --loop-guard (or KYTY_LOOP_GUARD) was given, so that an explicit 0 turns off the
 	// default compute-shader loop guard.
 	bool                     loop_guard_explicit        = false;
+	// --fault-storm-faults / --fault-storm-frames / --fault-storm-hold: a guest page whose write
+	// watch is re-armed and faults again `faults` times within `frames` frames stays unwatched (and
+	// is uploaded as modified on every pass) for `hold` frames, then is re-armed. faults 0 = off.
+	uint32_t                 fault_storm_faults         = 0;
+	uint32_t                 fault_storm_frames         = 8;
+	uint32_t                 fault_storm_hold           = 60;
 };
 
 void Load(const ConfigOptions& cfg);
@@ -306,6 +312,9 @@ uint32_t AsyncSpeculativeModulesMode();
 uint32_t WarmUpBudgetSeconds();
 bool SpirvCompactEnabled();
 uint32_t MemLimitGb();
+uint32_t FaultStormFaults();
+uint32_t FaultStormFrames();
+uint32_t FaultStormHold();
 
 } // namespace Config
 

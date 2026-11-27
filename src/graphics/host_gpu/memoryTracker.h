@@ -2,6 +2,7 @@
 #define EMULATOR_SRC_GRAPHICS_HOST_GPU_MEMORYTRACKER_H_
 
 #include "common/assert.h"
+#include "graphics/host_gpu/faultStats.h"
 #include "graphics/host_gpu/pageManager.h"
 #include "graphics/host_gpu/rangeSet.h"
 #include "graphics/host_gpu/regionManager.h"
@@ -30,7 +31,14 @@ public:
 	template <typename Flush>
 	void InvalidateRegion(uint64_t vaddr, uint64_t size, Flush&& on_flush) noexcept {
 		static_assert(std::is_invocable_v<Flush&>);
+		const FaultStats::SiteScope site(FaultStats::LockSite::Fault);
 		Iterate<false>(vaddr, size, [&](RegionManager* manager, uint64_t offset, uint64_t bytes) {
+			// Pages another thread already released (or the storm rule holds open) need no lock:
+			// CPU-dirty and GPU-dirty never overlap, so there is nothing to flush or change.
+			if (manager->IsAllModified<DirtySource::Cpu>(offset, bytes)) {
+				FaultStats::g_counters.fast_skips.fetch_add(1, std::memory_order_relaxed);
+				return;
+			}
 			const bool should_flush = [&] {
 				// Perform both the GPU modification check and CPU state change with the lock in
 				// case the GPU thread is racing to mark the page modified. If a flush is needed,
@@ -60,6 +68,7 @@ public:
 	template <bool clear, typename Func>
 	void ForEachDownloadRange(uint64_t vaddr, uint64_t size, Func&& func) {
 		static_assert(std::is_nothrow_invocable_v<Func&, uint64_t, uint64_t>);
+		const FaultStats::SiteScope site(FaultStats::LockSite::Download);
 		Iterate<false>(vaddr, size, [&](RegionManager* manager, uint64_t offset, uint64_t bytes) {
 			std::scoped_lock lock(manager->lock);
 			manager->ForEachModifiedRange<DirtySource::Gpu, false>(offset, bytes, func);
@@ -74,12 +83,14 @@ public:
 	                        UploadFunc&& upload_func) {
 		static_assert(std::is_nothrow_invocable_v<RangeFunc&, uint64_t, uint64_t>);
 		static_assert(std::is_nothrow_invocable_v<UploadFunc&>);
+		const FaultStats::SiteScope site(FaultStats::LockSite::Upload);
 		Iterate<true>(vaddr, size, [&](RegionManager* manager, uint64_t offset, uint64_t bytes) {
 			if (!is_written && !manager->IsModified<DirtySource::Cpu>(offset, bytes)) {
 				return;
 			}
 			manager->lock.lock();
-			manager->ForEachModifiedRange<DirtySource::Cpu, true>(offset, bytes, range_func);
+			manager->ForEachModifiedRange<DirtySource::Cpu, true>(offset, bytes, range_func,
+			                                                      !is_written);
 			if (!is_written) {
 				manager->lock.unlock();
 			}

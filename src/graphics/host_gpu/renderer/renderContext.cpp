@@ -5,6 +5,7 @@
 #include "common/logging/log.h"
 #include "common/ports.h"
 #include "graphics/guest_gpu/graphicsRun.h"
+#include "graphics/host_gpu/faultStats.h"
 #include "graphics/presentation/videoOut.h"
 #include "libs/errno.h"
 
@@ -27,6 +28,9 @@ RenderContext::RenderContext(GraphicContext& graphics, const std::filesystem::pa
       m_occlusion_queries(graphics, m_command_scheduler) {
 	EXIT_NOT_IMPLEMENTED(!Common::Thread::IsMainThread());
 	Log::WriteToConsoleAndLog(Config::PortsSummary() + "\n");
+	FaultStats::ConfigureStorm(Config::FaultStormFaults(), Config::FaultStormFrames(),
+	                           Config::FaultStormHold());
+	FaultStats::StartReporter();
 	// One unconditional line per debug option, so a log without findings still shows the option
 	// was active (a hang can end the process before any other line is written).
 	if (Config::BufferProbeEnabled()) {
@@ -95,8 +99,19 @@ bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr) no
 	if (!IsMapped(fault_vaddr, fault_size)) {
 		return false;
 	}
+	const auto started = FaultStats::NowNs();
+	FaultStats::SetFrame(static_cast<uint32_t>(CurrentFrameNum()));
+	FaultStats::g_hot_blocks.Note(fault_vaddr);
+	(access == PageFaultAccess::Write ? FaultStats::g_counters.write_faults
+	                                  : FaultStats::g_counters.read_faults)
+	    .fetch_add(1, std::memory_order_relaxed);
+	const auto finish = [started] {
+		FaultStats::g_counters.handler_ns.fetch_add(FaultStats::NowNs() - started,
+		                                            std::memory_order_relaxed);
+	};
 	// The access retries once the image write-backs over its page land.
 	if (WaitWriteBacks(fault_vaddr, fault_size)) {
+		finish();
 		return true;
 	}
 	if (access == PageFaultAccess::Write) {
@@ -106,6 +121,7 @@ bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr) no
 	} else {
 		m_buffer_cache.ReadMemory(fault_vaddr, fault_size);
 	}
+	finish();
 	return true;
 }
 

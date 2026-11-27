@@ -81,6 +81,7 @@ bool MemoryTracker::IsRegionGpuModified(uint64_t vaddr, uint64_t size) {
 }
 
 void MemoryTracker::MarkRegionAsCpuModified(uint64_t vaddr, uint64_t size) {
+	const FaultStats::SiteScope site(FaultStats::LockSite::Mark);
 	Iterate<false>(vaddr, size, [](RegionManager* manager, uint64_t offset, uint64_t bytes) {
 		std::scoped_lock lock(manager->lock);
 		manager->ChangeState<DirtySource::Cpu, true>(offset, bytes);
@@ -88,6 +89,7 @@ void MemoryTracker::MarkRegionAsCpuModified(uint64_t vaddr, uint64_t size) {
 }
 
 void MemoryTracker::UnmarkRegionAsGpuModified(uint64_t vaddr, uint64_t size) {
+	const FaultStats::SiteScope site(FaultStats::LockSite::Unmark);
 	Iterate<false>(vaddr, size, [](RegionManager* manager, uint64_t offset, uint64_t bytes) {
 		std::scoped_lock lock(manager->lock);
 		manager->ChangeState<DirtySource::Gpu, false>(offset, bytes);

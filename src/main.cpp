@@ -185,7 +185,13 @@ static void PrintUsage() {
 	         "                                       Default: off.\n"
 	         "  --mem-limit-gb <n>                   When the process's RSS + swap passes n GB, print the\n"
 	         "                                       [mem] table and drop caches; if still over 10 s later\n"
-	         "                                       stop the run with a message. 0 = off. Default: 0.\n");
+	         "                                       stop the run with a message. 0 = off. Default: 0.\n"
+	         "  --fault-storm-faults <n>             A guest page whose write watch faults n times within\n"
+	         "                                       --fault-storm-frames frames stays unwatched (and is\n"
+	         "                                       uploaded on every pass) for --fault-storm-hold frames.\n"
+	         "                                       0 = off. Default: 0.\n"
+	         "  --fault-storm-frames <n>             Window of the rule above. Default: 8.\n"
+	         "  --fault-storm-hold <n>               Frames a marked page stays unwatched. Default: 60.\n");
 }
 
 static bool NextArg(int argc, char* argv[], int& index, std::string& out) {
@@ -652,6 +658,21 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 		} else if (arg == "--mem-limit-gb") {
 			if (!ParseUint32(value, options.config.mem_limit_gb)) {
 				::printf("invalid memory limit value: %s\n", value.c_str());
+				return false;
+			}
+		} else if (arg == "--fault-storm-faults") {
+			if (!ParseUint32(value, options.config.fault_storm_faults)) {
+				::printf("invalid fault storm faults value: %s\n", value.c_str());
+				return false;
+			}
+		} else if (arg == "--fault-storm-frames") {
+			if (!ParseUint32(value, options.config.fault_storm_frames)) {
+				::printf("invalid fault storm frames value: %s\n", value.c_str());
+				return false;
+			}
+		} else if (arg == "--fault-storm-hold") {
+			if (!ParseUint32(value, options.config.fault_storm_hold)) {
+				::printf("invalid fault storm hold value: %s\n", value.c_str());
 				return false;
 			}
 		} else {

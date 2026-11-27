@@ -1,5 +1,6 @@
 #include "common/hostException.h"
 #include "common/virtualMemory.h"
+#include "graphics/host_gpu/faultStats.h"
 #include "graphics/host_gpu/memoryTracker.h"
 #include "graphics/host_gpu/rangeSet.h"
 
@@ -497,6 +498,126 @@ void BenchmarkCleanUploads() {
                 static_cast<double>(elapsed.count()) / completions);
   }
   tracker.MarkRegionAsCpuModified(address, size);
+  Release(memory);
+}
+
+// A fault on pages that are already CPU dirty (another thread released them first) is answered
+// without taking the region lock and without touching protection.
+void TestInvalidationOfDirtyPagesIsLockFree() {
+  TrackerHarness harness;
+  auto &tracker = harness.tracker;
+  constexpr auto page_size = Libs::Graphics::TRACKER_PAGE_SIZE;
+  auto *memory = Allocate(4);
+  const auto address = reinterpret_cast<uint64_t>(memory);
+
+  tracker.ForEachUploadRange(address, page_size * 4, false,
+                             [](uint64_t, uint64_t) noexcept {},
+                             []() noexcept {});
+  Check(!IsWritable(memory), "setup did not arm the pages");
+  tracker.InvalidateRegion(address + 5, 1, [] { Check(false, "unexpected flush"); });
+  Check(IsWritable(memory) && !IsWritable(memory + page_size),
+        "invalidation released more than its page");
+
+  const auto before_skips = Libs::Graphics::FaultStats::g_counters.fast_skips.load();
+  ResetProtectionLog();
+  tracker.InvalidateRegion(address + 9, 1, [] { Check(false, "unexpected flush"); });
+  Check(Libs::Graphics::FaultStats::g_counters.fast_skips.load() == before_skips + 1,
+        "invalidation of a dirty page did not take the lock-free path");
+  Check(g_protection_calls == 0, "invalidation of a dirty page changed protection");
+  // Pages not yet released still take the normal path.
+  tracker.InvalidateRegion(address + page_size, 1, [] { Check(false, "unexpected flush"); });
+  Check(IsWritable(memory + page_size), "invalidation of a clean page was skipped");
+  tracker.MarkRegionAsCpuModified(address, page_size * 4);
+  Release(memory);
+}
+
+// The fault-storm rule: a page that faults again right after being re-armed `faults` times within
+// `frames` frames stays unwatched, and is reported modified on every upload, until `hold` frames
+// have passed; then it is re-armed.
+void TestFaultStormHoldsHotPagesOpen() {
+  namespace FS = Libs::Graphics::FaultStats;
+  TrackerHarness harness;
+  auto &tracker = harness.tracker;
+  constexpr auto page_size = Libs::Graphics::TRACKER_PAGE_SIZE;
+  auto *memory = Allocate(2);
+  const auto address = reinterpret_cast<uint64_t>(memory);
+  const auto upload = [&](uint64_t offset) {
+    uint32_t ranges = 0;
+    tracker.ForEachUploadRange(
+        address + offset, page_size, false,
+        [&](uint64_t, uint64_t) noexcept { ranges++; }, []() noexcept {});
+    return ranges;
+  };
+
+  FS::ConfigureStorm(3, 8, 10);
+  FS::SetFrame(100);
+  Check(upload(0) == 1 && !IsWritable(memory), "setup upload did not arm the page");
+  for (uint32_t fault = 1; fault <= 3; fault++) {
+    FS::SetFrame(100 + fault);
+    tracker.MarkRegionAsCpuModified(address, 1);
+    Check(IsWritable(memory), "write fault did not release the page");
+    if (fault < 3) {
+      Check(upload(0) == 1 && !IsWritable(memory),
+            "page was held open before the storm threshold");
+    }
+  }
+  // The third fault marked the page: uploads report it but leave it unwatched and dirty.
+  const auto kept_before = FS::g_counters.storm_kept.load();
+  FS::SetFrame(104);
+  Check(upload(0) == 1, "hot page was not uploaded");
+  Check(IsWritable(memory) && tracker.IsRegionCpuModified(address, page_size),
+        "hot page was re-armed");
+  Check(upload(0) == 1 && IsWritable(memory), "hot page was not uploaded again");
+  Check(FS::g_counters.storm_kept.load() == kept_before + 2, "kept counter did not count");
+  // The neighbour page is unaffected.
+  Check(upload(page_size) == 1 && !IsWritable(memory + page_size),
+        "neighbour page of a hot page was held open");
+  // A range the GPU is about to write is not held: normal ownership transfer.
+  // After the hold, the page is re-armed.
+  FS::SetFrame(103 + 11);
+  Check(upload(0) == 1 && !IsWritable(memory) &&
+            !tracker.IsRegionCpuModified(address, page_size),
+        "hot page was not re-armed after the hold");
+  Check(FS::g_counters.storm_expired.load() >= 1, "expired counter did not count");
+
+  // Faults spread over more than the window never mark a page.
+  FS::SetFrame(1000);
+  for (uint32_t fault = 0; fault < 6; fault++) {
+    FS::SetFrame(1000 + fault * 20);
+    tracker.MarkRegionAsCpuModified(address + page_size, 1);
+    Check(upload(page_size) == 1 && !IsWritable(memory + page_size),
+          "slow faults marked a page as hot");
+  }
+  // Off: nothing is held, whatever the history.
+  FS::ConfigureStorm(0, 8, 10);
+  for (uint32_t fault = 0; fault < 6; fault++) {
+    tracker.MarkRegionAsCpuModified(address, 1);
+    Check(upload(0) == 1 && !IsWritable(memory), "page held open with the rule off");
+  }
+  tracker.MarkRegionAsCpuModified(address, page_size * 2);
+  Release(memory);
+}
+
+// A hot page inside a range the GPU writes follows the normal ownership rules.
+void TestFaultStormDoesNotHoldGpuWrittenRanges() {
+  namespace FS = Libs::Graphics::FaultStats;
+  TrackerHarness harness;
+  auto &tracker = harness.tracker;
+  constexpr auto page_size = Libs::Graphics::TRACKER_PAGE_SIZE;
+  auto *memory = Allocate(1);
+  const auto address = reinterpret_cast<uint64_t>(memory);
+  FS::ConfigureStorm(1, 8, 100);
+  FS::SetFrame(5000);
+  tracker.ForEachUploadRange(address, page_size, false, [](uint64_t, uint64_t) noexcept {},
+                             []() noexcept {});
+  tracker.MarkRegionAsCpuModified(address, 1); // marks the page at once (faults == 1)
+  MarkGpuModified(tracker, address, page_size);
+  Check(tracker.IsRegionGpuModified(address, page_size) &&
+            !tracker.IsRegionCpuModified(address, page_size),
+        "GPU-written range kept CPU-dirty state");
+  tracker.ForEachDownloadRange<true>(address, page_size, [](uint64_t, uint64_t) noexcept {});
+  FS::ConfigureStorm(0, 8, 10);
+  tracker.MarkRegionAsCpuModified(address, page_size);
   Release(memory);
 }
 
@@ -1235,6 +1356,9 @@ int main(int argc, char **argv) {
   TestCpuDirtyUpload();
   TestCleanUploadPreservesOwnership();
   TestRangeInvalidation();
+  TestInvalidationOfDirtyPagesIsLockFree();
+  TestFaultStormHoldsHotPagesOpen();
+  TestFaultStormDoesNotHoldGpuWrittenRanges();
   TestGpuReacquisitionAfterInvalidation();
   TestGpuDirtyBits();
   TestExactDirtyIntervalsSharingTrackerPage();
