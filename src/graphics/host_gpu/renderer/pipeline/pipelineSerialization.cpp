@@ -544,8 +544,10 @@ void PipelineCache::WarmUp(const std::filesystem::path& path) {
 	const bool header_matches =
 	    records.size() >= header.size() && std::ranges::equal(records.first(header.size()), header);
 	const bool load_store     = header_matches || (keep && records.size() >= header.size());
-	const auto budget_ms      = uint64_t {Config::WarmUpBudgetSeconds()} * 1000u;
-	const bool budget         = budget_ms != 0;
+	const auto budget_ms      = s_warmup_budget_ms_for_tests >= 0
+	                                ? static_cast<uint64_t>(s_warmup_budget_ms_for_tests)
+	                                : uint64_t {Config::WarmUpBudgetSeconds()} * 1000u;
+	const bool budget         = budget_ms != 0 || s_warmup_budget_ms_for_tests == 0;
 	size_t     loaded_records = 0;
 	size_t     dropped_records = 0;
 	WarmUpTimes times;

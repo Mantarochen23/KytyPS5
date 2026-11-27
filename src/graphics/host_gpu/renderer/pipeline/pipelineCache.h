@@ -465,6 +465,9 @@ private:
 		void operator()(WarmUpLoader* loader) const; // Where the type is complete.
 	};
 	std::unique_ptr<WarmUpLoader, WarmUpLoaderDelete> m_warmup;
+	// Tests: a warm-up budget in milliseconds instead of --warmup-budget-s; 0 starts everything in
+	// the background. Negative = the option.
+	static inline int64_t s_warmup_budget_ms_for_tests = -1;
 	std::atomic_bool                       m_warmup_ready {false};
 	std::unordered_map<uint64_t, uint32_t> m_use_rank; // Module id -> first-use rank.
 	uint32_t                               m_next_use_rank = 0;

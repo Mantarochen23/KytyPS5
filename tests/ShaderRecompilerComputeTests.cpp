@@ -750,6 +750,17 @@ struct PipelineCacheTestAccess {
   }
 
   static auto Compiled(const PipelineCache &cache) { return cache.m_compiled; }
+  // 0: the next store load leaves everything to its background loader; -1: the option.
+  static void SetWarmUpBudgetMs(int64_t ms) { PipelineCache::s_warmup_budget_ms_for_tests = ms; }
+  // Applies what the background load finished until it is done (at most 10 s).
+  static bool FinishWarmUp(PipelineCache &cache) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (cache.m_warmup != nullptr && std::chrono::steady_clock::now() < deadline) {
+      cache.DrainWarmUp();
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return cache.m_warmup == nullptr;
+  }
 
   template <typename InputInfo>
   static const ShaderModule *GetProgram(PipelineCache &cache, const ShaderParams &params,
@@ -51943,11 +51954,18 @@ void CheckShaderStore(VulkanHarness &vulkan) {
     u32 output = 0;
     bool operator==(const Session &) const = default;
   };
-  // Dispatches the compute program and creates the graphics pipeline.
-  const auto run = [&] {
+  // Dispatches the compute program and creates the graphics pipeline. With background the
+  // store loads on the background loader (a warm-up budget that ran out at once) and the
+  // session counts what it had made when it finished.
+  const auto run = [&](bool background = false) {
     std::memset(mapped, 0, allocation_size);
+    if (background) PipelineCacheTestAccess::SetWarmUpBudgetMs(0);
     RenderContext context(vulkan.RuntimeContext(), store);
+    PipelineCacheTestAccess::SetWarmUpBudgetMs(-1);
     auto &pipelines = context.GetPipelineCache();
+    if (background)
+      Require(name, "background load", PipelineCacheTestAccess::FinishWarmUp(pipelines),
+              "the background store load did not finish");
     Session session{.prewarmed = PipelineCacheTestAccess::Pipelines(pipelines)};
     context.InitializeGpu(nullptr);
     LibKernel::Memory::InstallGpuResources(&context);
@@ -52008,6 +52026,9 @@ void CheckShaderStore(VulkanHarness &vulkan) {
   warm.compiled = {};
   Require(name, "warm restart", run() == warm && std::filesystem::file_size(store) == size,
           "a restart compiled a module, created a pipeline late or rewrote the store");
+  Require(name, "background warm restart",
+          run(true) == warm && std::filesystem::file_size(store) == size,
+          "the background store load lost a module or a pipeline, or rewrote the store");
   std::filesystem::resize_file(store, size + 3);
   Require(name, "torn tail", run() == warm && std::filesystem::file_size(store) == size,
           "a torn last record was kept");
