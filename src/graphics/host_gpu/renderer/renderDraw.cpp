@@ -7,6 +7,7 @@
 #include "common/emulatorConfig.h"
 #include "common/file.h"
 #include "common/logging/log.h"
+#include "common/ports.h"
 #include "common/profiler.h"
 #include "common/stringUtils.h"
 #include "common/threads.h"
@@ -1436,7 +1437,11 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 	}
 	occlusion_queries.End(vk_buffer, occlusion_query);
 	graphics.breadcrumbs.EndOp(graphics, vk_buffer, marker_id);
+	const bool track_address_writes =
+	    Config::PortEnabled(Config::Port::InPlaceReadback) ||
+	    Config::PortEnabled(Config::Port::DetachedReadback);
 	m_context.GetBufferCache().RecordPendingWrites(
+	    track_address_writes &&
 	    std::any_of(stages.begin(), stages.end(), [](const PreparedBindings* stage) {
 		    const auto& program = stage->runtime->module->info;
 		    return program.has_address_writes || program.info.uses_dma;

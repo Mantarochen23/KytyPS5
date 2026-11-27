@@ -7894,9 +7894,10 @@ public:
 
     // Replacing either candidate's backing invalidates the cached BDA table once; the next bind
     // rebuilds it against the merged owner and then becomes stable again.
+    const auto first_buffer_generation = first_state->BufferGeneration();
     (void)cache.FindBuffer(base, 3 * page);
     Require(name, "backing invalidation",
-            first_state->BackingGeneration() > first_generation,
+            first_state->BufferGeneration() > first_buffer_generation,
             "candidate backing replacement did not invalidate the table");
     executor.FindBuffers(stages);
     const auto rebuilt_bda = bindings.indirect_tables[0].table_bda;
@@ -7921,16 +7922,53 @@ public:
                 cache.WriteStamp(base + 2 * page, page) > high_stamp,
             "a writable table did not preserve GPU ownership and write stamps for later reads");
 
+    // A repeated bind while the group still owns its ranges is O(1): it walks no range, but it
+    // is still a visible GPU write to a stamp reader.
+    const auto ranges_of = [] {
+      return Common::FrameCost::SnapshotCounters()[static_cast<size_t>(
+          Common::FrameCost::Counter::TableMarkRanges)];
+    };
     const auto marked_low_stamp = cache.WriteStamp(base, page);
-    const auto marked_high_stamp = cache.WriteStamp(base + 2 * page, page);
-    executor.RebindBuffers(bindings);
+    const auto ranges_before = ranges_of();
+    for (int bind = 0; bind < 3; ++bind) {
+      executor.RebindBuffers(bindings);
+    }
     Require(name, "marked once",
-            cache.WriteStamp(base, page) == marked_low_stamp &&
-                cache.WriteStamp(base + 2 * page, page) == marked_high_stamp,
-            "the same table was marked twice in one command buffer");
+            ranges_of() == ranges_before &&
+                cache.IsRegionGpuModified(base, page) &&
+                cache.WriteStamp(base, page) > marked_low_stamp,
+            "a repeated table bind walked its write ranges or hid its write from stamps");
     cache.ReadMemory(base, page);
     Require(name, "read later", !cache.IsRegionGpuModified(base, page),
             "a later CPU read did not consume the table's GPU-write ownership");
+    executor.RebindBuffers(bindings);
+    Require(name, "re-marked after release",
+            ranges_of() > ranges_before && cache.IsRegionGpuModified(base, page),
+            "a bind after an ownership release did not take ownership again");
+
+    // An image over a written candidate is flagged as stale by the group's walk. Once the image has
+    // consumed the buffer (a refresh from it), the next write of the group must flag it again even
+    // though no ownership was released, so consuming the buffer moves the group's epoch.
+    {
+      auto &textures = context.GetTextureCache();
+      const auto desc = MakeLinearDesc(base, page, vk::Format::eR8G8B8A8Unorm,
+                                       Prospero::BufferFormat::k8_8_8_8UNorm,
+                                       Prospero::ImageType::kColor2D, {64, 64, 1}, 1, 4, 1);
+      const auto image = TextureCacheTestAccess::InsertImage(textures, desc.info);
+      executor.RebindBuffers(bindings);
+      Require(name, "image flagged",
+              textures.GetImage(image).IsBufferModified(),
+              "a table write over a registered image did not flag the image");
+      textures.UpdateImage(image);
+      Require(name, "image refreshed",
+              !textures.GetImage(image).IsBufferModified(),
+              "the image kept its buffer-modified flag after a refresh");
+      executor.RebindBuffers(bindings);
+      Require(name, "image flagged again",
+              textures.GetImage(image).IsBufferModified(),
+              "a table write after an image consumed the buffer left the image stale");
+      TextureCacheTestAccess::DeleteImage(textures, image);
+    }
 
     // A state registered before its buffers are resolved sees an invalidation that lands while
     // the build runs, and its write union is set afterwards.

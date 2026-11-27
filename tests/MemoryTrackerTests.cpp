@@ -328,6 +328,18 @@ void TestRuntimeTableBackingGenerations() {
   state.WriteRanges().ForEach([&](uint64_t, uint64_t) { ++write_range_count; });
   Check(write_range_count == 1 && state.BackingGeneration() == 2,
         "setting the write union after registration changed the generation");
+
+  // Buffer retirement is a separate generation, so a build can tell its own merges from a map.
+  Check(state.InvalidateBacking(0x10000, 0x10, true) && state.BackingGeneration() == 2 &&
+            state.BufferGeneration() == 2,
+        "buffer retirement moved the backing generation");
+  // The write group walks its ranges once per epoch, not once per mark.
+  Check(state.MarkNeedsWalk(7), "a fresh write group did not ask for a walk");
+  state.NoteWalked(7);
+  Check(!state.MarkNeedsWalk(7) && state.MarkNeedsWalk(8),
+        "a walked group repeated its walk, or ignored an epoch change");
+  state.SetWriteRanges(RangeSet {});
+  Check(!state.MarkNeedsWalk(9), "an empty write set asked for a walk");
 }
 
 void TestGuestRange() {
