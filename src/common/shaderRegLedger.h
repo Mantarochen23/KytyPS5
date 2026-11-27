@@ -80,6 +80,9 @@ struct UseRecord {
 	std::vector<UseRange> ranges;
 	std::vector<uint8_t>  memory; // The bytes of `ranges`, back to back.
 };
+// The use.jsonl line and the blob file bytes of a record (the writer thread uses the same code).
+void SerializeUseRecord(const UseRecord& record, uint64_t order, std::string& line,
+                        std::vector<uint8_t>& blob);
 [[nodiscard]] bool UseDumpEnabled();
 // True once per (stage, hash) while the use dump is enabled; the caller then builds the record.
 [[nodiscard]] bool WantUse(uint64_t hash, std::string_view stage);

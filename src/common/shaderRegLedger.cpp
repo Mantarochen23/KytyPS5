@@ -183,37 +183,26 @@ void WriteDumpEntry(const DumpEntry& entry, std::ofstream& index) {
 	else g_dump_dropped.fetch_add(1, std::memory_order_relaxed);
 }
 
-void WriteUseRecord(const UseRecord& record, uint64_t order, std::ofstream& index) {
-	const auto name = fmt::format("use_{}_{:016x}.bin", record.stage, record.hash);
-	std::ofstream blob(g_dump_dir / name, std::ios::binary | std::ios::trunc);
-	if (!blob) {
-		g_use_dropped.fetch_add(1, std::memory_order_relaxed);
-		return;
-	}
-	uint64_t offset = 0;
+void SerializeUse(const UseRecord& record, uint64_t order, std::string& line,
+                  std::vector<uint8_t>& blob) {
+	blob.clear();
 	const auto put = [&](const void* data, uint64_t bytes) {
-		const auto begin = offset;
-		if (bytes != 0) blob.write(static_cast<const char*>(data), static_cast<std::streamsize>(bytes));
-		offset += bytes;
+		const auto begin = static_cast<uint64_t>(blob.size());
+		const auto* first = static_cast<const uint8_t*>(data);
+		if (bytes != 0) blob.insert(blob.end(), first, first + bytes);
 		return nlohmann::ordered_json {{"offset", begin}, {"bytes", bytes}};
 	};
 	auto input  = put(record.input_info.data(), record.input_info.size());
 	auto memory = put(record.memory.data(), record.memory.size());
 	auto back   = put(record.back_code.data(), record.back_code.size() * sizeof(uint32_t));
-	blob.flush();
-	if (!blob) {
-		g_use_dropped.fetch_add(1, std::memory_order_relaxed);
-		return;
-	}
-	blob.close();
 	nlohmann::ordered_json ranges = nlohmann::ordered_json::array();
 	for (const auto& range: record.ranges) ranges.push_back({range.address, range.bytes});
-	nlohmann::ordered_json line {
+	nlohmann::ordered_json json {
 	    {"kind", "use"},
 	    {"order", order},
 	    {"hash", fmt::format("0x{:016x}", record.hash)},
 	    {"stage", record.stage},
-	    {"file", name},
+	    {"file", fmt::format("use_{}_{:016x}.bin", record.stage, record.hash)},
 	    {"options_wave_size", record.options_wave_size},
 	    {"user_data_base", record.user_data_base},
 	    {"user_data", record.user_data},
@@ -228,7 +217,26 @@ void WriteUseRecord(const UseRecord& record, uint64_t order, std::ofstream& inde
 	    {"memory", memory},
 	    {"back_code", back},
 	    {"ranges", ranges}};
-	index << line.dump() << '\n';
+	line = json.dump();
+}
+
+void WriteUseRecord(const UseRecord& record, uint64_t order, std::ofstream& index) {
+	std::string          line;
+	std::vector<uint8_t> blob;
+	SerializeUse(record, order, line, blob);
+	const auto name = fmt::format("use_{}_{:016x}.bin", record.stage, record.hash);
+	std::ofstream file(g_dump_dir / name, std::ios::binary | std::ios::trunc);
+	if (file) {
+		file.write(reinterpret_cast<const char*>(blob.data()),
+		           static_cast<std::streamsize>(blob.size()));
+		file.flush();
+	}
+	if (!file) {
+		g_use_dropped.fetch_add(1, std::memory_order_relaxed);
+		return;
+	}
+	file.close();
+	index << line << '\n';
 	index.flush();
 	if (index) g_use_written.fetch_add(1, std::memory_order_relaxed);
 	else g_use_dropped.fetch_add(1, std::memory_order_relaxed);
@@ -332,6 +340,11 @@ void DumpRegistration(uint64_t hash, const DumpRegistrationInfo& info,
 	                          high, size, std::memory_order_relaxed)) {}
 	lock.unlock();
 	g_dump_ready.notify_one();
+}
+
+void SerializeUseRecord(const UseRecord& record, uint64_t order, std::string& line,
+                        std::vector<uint8_t>& blob) {
+	SerializeUse(record, order, line, blob);
 }
 
 bool UseDumpEnabled() {
