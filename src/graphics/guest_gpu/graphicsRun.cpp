@@ -232,6 +232,7 @@ void CommandProcessor::Reset() {
 	m_index_base_addr                  = 0;
 	m_num_instances                    = 1;
 	m_num_instances_addr               = 0;
+	m_num_instances_count_addr         = 0;
 	m_predicate_skip                   = false;
 	m_draw_indirect_args_base_addr     = 0;
 	m_dispatch_indirect_args_base_addr = 0;
@@ -1150,11 +1151,22 @@ void CommandProcessor::SetNumInstances(uint32_t num_instances) {
 		num_instances = 1;
 	}
 
-	m_num_instances      = num_instances;
-	m_num_instances_addr = 0;
+	m_num_instances            = num_instances;
+	m_num_instances_addr       = 0;
+	m_num_instances_count_addr = 0;
 }
 
 uint32_t CommandProcessor::NumInstances() {
+	if (m_num_instances_count_addr != 0) {
+		const uint32_t raw_count = *reinterpret_cast<const uint32_t*>(m_num_instances_count_addr);
+		const uint32_t draw_count = std::min(raw_count, m_num_instances_max_count);
+		m_num_instances_count_addr = 0;
+		if (draw_count != 0) {
+			m_num_instances_addr = m_num_instances_args_addr +
+			                       static_cast<uint64_t>(draw_count - 1) * m_num_instances_stride +
+			                       offsetof(vk::DrawIndirectCommand, instanceCount);
+		}
+	}
 	if (m_num_instances_addr != 0) {
 		m_num_instances      = *reinterpret_cast<const uint32_t*>(m_num_instances_addr);
 		m_num_instances_addr = 0;
@@ -1293,6 +1305,51 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 	                     stride_in_bytes < (indexed ? sizeof(vk::DrawIndexedIndirectCommand)
 	                                                : sizeof(vk::DrawIndirectCommand)));
 
+	auto&      executor  = m_renderer.GetRenderExecutor();
+	const auto args_addr = m_draw_indirect_args_base_addr + data_offset;
+	const auto record_size =
+	    indexed ? sizeof(vk::DrawIndexedIndirectCommand) : sizeof(vk::DrawIndirectCommand);
+	if (count_addr != nullptr && Config::PortEnabled(Config::Port::GpuDrawIndirectCount) &&
+	    m_renderer.GetGraphics().draw_indirect_count_enabled) {
+		if (max_count_or_count == 0) {
+			Common::FrameCost::Add(Common::FrameCost::Counter::DrawsIndirectZero);
+			return;
+		}
+		const auto count_vaddr = reinterpret_cast<uint64_t>(count_addr);
+		const auto& limits     = m_renderer.GetGraphics().GetPhysicalDeviceProperties().limits;
+		const auto args_size =
+		    static_cast<uint64_t>(max_count_or_count - 1) * stride_in_bytes + record_size;
+		DrawIndirectArgs records {args_addr, count_vaddr, max_count_or_count, stride_in_bytes};
+		if ((count_vaddr & 3u) == 0 && max_count_or_count <= limits.maxDrawIndirectCount &&
+		    IndirectDrawOffsets(registers, records.offsets) &&
+		    m_renderer.IsMapped(args_addr, args_size) &&
+		    m_renderer.IsMapped(count_vaddr, sizeof(uint32_t))) {
+			const bool issued =
+			    !indexed
+			        ? executor.DrawAuto(CurrentBuffer(), {.indirect = records})
+			        : (m_index_buffer_size != 0 &&
+			           executor.DrawIndex(CurrentBuffer(),
+			                              {.index_count         = m_index_buffer_size,
+			                               .index_addr          = IndexAddress(0),
+			                               .index_type_and_size = m_index_type_and_size,
+			                               .indirect            = records}));
+			if (issued) {
+				m_num_instances_addr       = 0;
+				m_num_instances_count_addr = count_vaddr;
+				m_num_instances_args_addr  = args_addr;
+				m_num_instances_max_count  = max_count_or_count;
+				m_num_instances_stride     = stride_in_bytes;
+				Common::DebugCounters::Add(Common::DebugCounters::Counter::IndirectDraws,
+				                           max_count_or_count);
+				Common::FrameCost::Add(Common::FrameCost::Counter::DrawsIndirectGpuPackets);
+				Common::FrameCost::Add(Common::FrameCost::Counter::DrawsIndirectGpuSubdraws,
+				                       max_count_or_count);
+				Common::FrameCost::Add(Common::FrameCost::Counter::DrawIndirectCountGpu);
+				return;
+			}
+		}
+	}
+
 	const auto draw_count = count_addr == nullptr
 	                            ? max_count_or_count
 	                            : std::min(uint32_t {*count_addr}, max_count_or_count);
@@ -1302,14 +1359,13 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 	}
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::IndirectDraws, draw_count);
 
-	auto&      executor  = m_renderer.GetRenderExecutor();
-	const auto args_addr = m_draw_indirect_args_base_addr + data_offset;
 	// NUM_INSTANCES keeps the last draw's instance count.
+	m_num_instances_count_addr = 0;
 	m_num_instances_addr = args_addr + static_cast<uint64_t>(draw_count - 1) * stride_in_bytes +
 	                       offsetof(vk::DrawIndirectCommand, instanceCount);
 	// The GPU reads the records if the shaders allow; the VS prolog removes Vulkan's bases
 	// from the index VGPRs and copies them only to the user SGPRs the packet patches.
-	DrawIndirectArgs records {args_addr, draw_count, stride_in_bytes};
+	DrawIndirectArgs records {args_addr, 0, draw_count, stride_in_bytes};
 	if (IndirectDrawOffsets(registers, records.offsets)) {
 		if (!indexed && executor.DrawAuto(CurrentBuffer(), {.indirect = records})) {
 			Common::FrameCost::Add(Common::FrameCost::Counter::DrawsIndirectGpuPackets);

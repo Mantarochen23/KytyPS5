@@ -27,6 +27,7 @@ enum class Port : uint32_t {
 	ImageHeapIncremental, // rediscover resident images only after relevant cache changes
 	RuntimeTableCache, // reuse runtime-indexed buffer tables while their candidate backing is unchanged
 	GpuIndirectThreadDim, // compute thread-dimension indirect dispatch counts and LDS bounds on the GPU
+	GpuDrawIndirectCount, // keep multi-draw indirect counts on the GPU via vkCmdDraw[Indexed]IndirectCount
 	Count
 };
 
@@ -57,6 +58,7 @@ inline constexpr PortInfo PORTS[] = {
     {Port::ImageHeapIncremental, "image-heap-incremental", "upstream PR 1289 (NeySlim)", false, false},
     {Port::RuntimeTableCache, "runtime-table-cache", "this tree (table1)", false, false},
     {Port::GpuIndirectThreadDim, "gpu-indirect-thread-dim", "this tree (readback1)", false, false},
+    {Port::GpuDrawIndirectCount, "gpu-draw-indirect-count", "this tree (readback1)", false, false},
 };
 static_assert(std::size(PORTS) == static_cast<size_t>(Port::Count));
 
