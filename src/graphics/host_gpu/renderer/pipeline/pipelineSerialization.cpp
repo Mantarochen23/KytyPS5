@@ -19,6 +19,9 @@
 #include <cstring>
 #include <fmt/format.h>
 #include <ranges>
+#include <thread>
+#include <unordered_set>
+#include <numeric>
 #include <xxhash.h>
 #include <zstd.h>
 
@@ -32,13 +35,21 @@ using ShaderRecompiler::IR::IoAll;
 using ShaderRecompiler::IR::Reader;
 using ShaderRecompiler::IR::Writer;
 
-enum class Record : uint8_t { Module, GraphicsPipeline, TessellationLayout, FailedProgram, KeyIndex };
+enum class Record : uint8_t {
+	Module,
+	GraphicsPipeline,
+	TessellationLayout,
+	FailedProgram,
+	KeyIndex,
+	UseOrder, // A module's first-use rank in the run that stored it, for the next load order.
+};
 
 // Explicit store format version. Bump manually only when recompiler output, SPIR-V profile, or
 // store record layout changes so rebuilds across branches keep reusing compatible warm stores.
 // 5: CompiledShaderInfo::subgroup_size, 6: KeyIndex, 7: compute keys hold lds_storage,
-// 8: modules with calls (their callee code), 9: old-layout hash of a module's specialization
-constexpr uint64_t kShaderStoreFormatVersion = 9;
+// 8: modules with calls (their callee code), 9: old-layout hash of a module's specialization,
+// 10: UseOrder
+constexpr uint64_t kShaderStoreFormatVersion = 10;
 
 // What every record depends on besides its own fields.
 std::vector<uint8_t> StoreHeader(const GraphicContext& graphics) {
@@ -129,6 +140,379 @@ void ShaderStoreWriter::Post(Common::UniqueFunction<void>&& job) {
 	m_ready.notify_one();
 }
 
+// One record of the store on its way into the cache: parsed and prepared on any thread, applied
+// on the thread that owns the cache.
+struct PipelineCache::StoreItem {
+	size_t   offset      = 0; // Of its frame, from the first record.
+	size_t   frame_bytes = 0;
+	uint8_t  type        = 0; // Record.
+	bool     failed      = false;
+	uint32_t rank        = UINT32_MAX; // Modules: first-use rank of an earlier run.
+	ProgramKey                                          key;
+	std::vector<uint8_t>                                plan_bytes;
+	std::unique_ptr<ShaderRecompiler::IR::ResourcePlan> plan; // Modules without calls.
+	ShaderModule                                        module;
+	std::vector<uint32_t>                               spirv;
+	GraphicsPipelineKey                                 pipeline_key {};
+	uint64_t                                            layout_key = 0;
+	ShaderTessellationInputInfo                         layout;
+	uint64_t                                            capability_version = 0;
+	std::string                                         reason;
+	uint64_t                                            module_id = 0; // UseOrder.
+};
+
+namespace {
+
+using Clock = std::chrono::steady_clock;
+
+uint64_t Nanoseconds(Clock::time_point since) {
+	return static_cast<uint64_t>(
+	    std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - since).count());
+}
+
+} // namespace
+
+// Summed over the threads that did the work, so the parts compare whatever ran in parallel.
+struct PipelineCache::WarmUpTimes {
+	std::atomic<uint64_t> decode {0};
+	std::atomic<uint64_t> plans {0};
+	std::atomic<uint64_t> modules {0};
+	std::atomic<uint64_t> pipelines {0};
+};
+
+// Decompresses and reads one frame; no cache state, no Vulkan.
+void PipelineCache::ParseStoreItem(std::span<const uint8_t> frame, StoreItem& item) {
+	std::vector<uint8_t> raw;
+	size_t               frame_bytes = 0;
+	auto                 bytes       = frame;
+	if (ShaderStoreFile::Decode(bytes, true, raw, frame_bytes) != ShaderStoreFile::Status::Loaded) {
+		item.failed = true;
+		return;
+	}
+	Reader     reader {raw};
+	auto       type     = Record::Module;
+	const auto complete = [&] { return reader.ok && reader.bytes.empty(); };
+	IoAll(reader, type);
+	item.type = static_cast<uint8_t>(type);
+	switch (type) {
+		case Record::Module:
+			IoKey(reader, item.key);
+			IoAll(reader, item.plan_bytes);
+			IoModule(reader, item.module);
+			IoAll(reader, item.spirv);
+			break;
+		case Record::GraphicsPipeline: reader.Raw(&item.pipeline_key, sizeof(item.pipeline_key)); break;
+		case Record::TessellationLayout: IoAll(reader, item.layout_key, item.layout); break;
+		case Record::FailedProgram:
+			IoKey(reader, item.key);
+			IoAll(reader, item.capability_version, item.reason);
+			break;
+		case Record::KeyIndex:
+			IoKey(reader, item.key);
+			reader.ok = reader.ok && item.key.stage != ShaderType::Unknown &&
+			            static_cast<uint32_t>(item.key.stage) <=
+			                static_cast<uint32_t>(ShaderType::TessellationEvaluation);
+			break;
+		case Record::UseOrder: IoAll(reader, item.module_id, item.rank); break;
+		default: reader.ok = false; break;
+	}
+	item.failed = !complete();
+}
+
+// The plan and the shader module of a module record; any thread.
+void PipelineCache::PrepareStoreModule(StoreItem& item, bool keep, WarmUpTimes& times) const {
+	if (item.failed || item.type != static_cast<uint8_t>(Record::Module)) return;
+	// A module with calls keeps the plan of its callee code; it loads at the first use that
+	// links the same code.
+	if (item.module.function_code.empty()) {
+		const auto begin = Clock::now();
+		item.plan        = std::make_unique<ShaderRecompiler::IR::ResourcePlan>();
+		if (!ShaderRecompiler::IR::LoadResourcePlan(item.plan_bytes, *item.plan)) {
+			item.failed = true;
+		}
+		times.plans += Nanoseconds(begin);
+		if (item.failed) return;
+	}
+	const auto begin = Clock::now();
+	if (keep) {
+		Common::RecoverableScope scope;
+		try {
+			item.module.module = CompileSPV(item.spirv, m_graphics.device);
+		} catch (const Common::RecoverableFailure&) {
+			item.failed = true;
+		} catch (const std::exception&) {
+			item.failed = true;
+		}
+	} else {
+		item.module.module = CompileSPV(item.spirv, m_graphics.device);
+	}
+	times.modules += Nanoseconds(begin);
+	item.spirv = {};
+}
+
+// Puts a parsed (and for modules prepared) record into the cache; owner thread only. False if
+// the record cannot be used.
+bool PipelineCache::ApplyStoreItem(StoreItem& item, std::vector<vk::ShaderModule>* orphans) {
+	if (item.failed) return false;
+	switch (static_cast<Record>(item.type)) {
+		case Record::Module: {
+			auto& module = item.module;
+			const auto [program, inserted] = m_program_cache.try_emplace(item.key);
+			const bool calls = !module.function_code.empty();
+			if (inserted && !calls) {
+				program->second.resource_plan = std::move(*item.plan);
+			}
+			if (std::ranges::any_of(program->second.modules,
+			                        [&](const ShaderModule& other) { return other.id == module.id; })) {
+				// This run already built it (a background load came late); the loader may still make
+				// pipelines from the handle, so it goes with the loader.
+				if (orphans != nullptr) {
+					orphans->push_back(module.module);
+				} else {
+					m_graphics.device.destroyShaderModule(module.module, nullptr);
+				}
+				return true;
+			}
+			if (calls) {
+				program->second.call_plans.insert_or_assign(
+				    XXH3_64bits(module.function_code.data(),
+				                module.function_code.size() * sizeof(uint32_t)),
+				    std::move(item.plan_bytes));
+			}
+			// A module the old layout's key is known for waits for its first comparison.
+			module.legacy_checked = module.legacy_hash == 0;
+			program->second.legacy_unchecked += module.legacy_checked ? 0u : 1u;
+			program->second.modules.push_back(std::move(module));
+			return true;
+		}
+		case Record::GraphicsPipeline:
+			// WarmUp creates the pipeline once every module is loaded.
+			m_graphics_pipelines.try_emplace(item.pipeline_key);
+			return true;
+		case Record::TessellationLayout: m_tess_layouts.try_emplace(item.layout_key, item.layout); return true;
+		case Record::FailedProgram:
+			// A translator fix starts a new capability generation: a failure recorded by an
+			// older translator is not evidence this one cannot translate the program.
+			if (FailureCacheApplies(item.capability_version) && !Config::ShaderCacheRetryFailed()) {
+				auto& program          = m_program_cache.try_emplace(item.key).first->second;
+				program.skip_dispatch  = true;
+				program.failure_reason = std::move(item.reason);
+			}
+			return true;
+		case Record::KeyIndex:
+			if (Config::ShaderKeyIndexEnabled()) {
+				RecordIndexedKey(item.key, /*persist=*/false);
+			}
+			return true;
+		case Record::UseOrder: {
+			auto [rank, inserted] = m_use_rank.try_emplace(item.module_id, item.rank);
+			if (!inserted) rank->second = std::min(rank->second, item.rank);
+			m_next_use_rank = std::max(m_next_use_rank, item.rank + 1u);
+			return true;
+		}
+		default: return false;
+	}
+}
+
+void PipelineCache::DestroyPipeline(const Pipeline& pipeline) const {
+	m_graphics.device.destroyPipeline(pipeline.pipeline, nullptr);
+	m_graphics.device.destroyPipelineLayout(pipeline.pipeline_layout, nullptr);
+	m_graphics.device.destroyDescriptorSetLayout(pipeline.descriptor_set_layout, nullptr);
+}
+
+// The part of the store left when --warmup-budget-s ran out, loaded on a thread of its own while
+// the title runs; what it finishes is applied by DrainWarmUp on the render thread.
+struct PipelineCache::WarmUpLoader {
+	struct ReadyPipeline {
+		bool                graphics = false;
+		GraphicsPipelineKey key {};
+		uint64_t            module_id = 0;
+		Pipeline            pipeline;
+	};
+	struct Ready {
+		std::vector<std::unique_ptr<StoreItem>> items;
+		std::vector<ReadyPipeline>              pipelines;
+		bool                                    done = false;
+	};
+
+	std::mutex                                                 mutex;
+	Ready                                                      ready;
+	// Module records not yet applied or failed, per program.
+	std::unordered_map<ProgramKey, uint32_t, ProgramKeyHash>   pending_keys;
+	std::vector<ProgramKey>                                    urgent;
+	// Render thread only: handles of modules the cache had already, destroyed when it ends.
+	std::vector<vk::ShaderModule>                              orphans;
+	// Compute modules loaded before the budget ran out whose pipelines it left.
+	std::vector<uint64_t>                                      compute;
+	// Modules in rank order; a module stays here (its copy goes to the cache) until the loader
+	// ends, so the pipelines it makes can read it.
+	std::vector<std::unique_ptr<StoreItem>>                    modules;
+	std::vector<GraphicsPipelineKey>                           graphics;
+	ModuleMap                                                  applied; // Modules loaded before.
+	size_t                                                     total_modules     = 0;
+	size_t                                                     total_pipelines   = 0;
+	size_t                                                     drained_pipelines = 0;
+	WarmUpTimes                                                times;
+	Clock::time_point                                          start;
+	std::jthread                                               thread;
+};
+
+void PipelineCache::RunWarmUpLoader(std::stop_token stop) {
+	auto&             loader  = *m_warmup;
+	const auto        threads = Common::ParallelThreads();
+	std::vector<bool> taken(loader.modules.size());
+	size_t            next    = 0;
+	ModuleMap         modules = loader.applied;
+	std::vector<uint64_t> compute = loader.compute;
+	const auto settle = [&](const ProgramKey& key) {
+		if (const auto found = loader.pending_keys.find(key);
+		    found != loader.pending_keys.end() && --found->second == 0) {
+			loader.pending_keys.erase(found);
+		}
+	};
+	while (!stop.stop_requested()) {
+		// Programs a draw waits for first, then the rank order.
+		std::vector<size_t> batch;
+		{
+			std::scoped_lock lock(loader.mutex);
+			for (const auto& key: loader.urgent) {
+				for (size_t i = 0; i < loader.modules.size(); ++i) {
+					if (!taken[i] && loader.modules[i]->key == key) {
+						batch.push_back(i);
+						taken[i] = true;
+					}
+				}
+			}
+			loader.urgent.clear();
+		}
+		for (; batch.size() < threads * 2u && next < loader.modules.size(); ++next) {
+			if (!taken[next]) {
+				batch.push_back(next);
+				taken[next] = true;
+			}
+		}
+		if (batch.empty()) break;
+		Common::ParallelFor(batch.size(), [&](size_t i) {
+			PrepareStoreModule(*loader.modules[batch[i]], /*keep=*/true, loader.times);
+		}, threads);
+		std::scoped_lock lock(loader.mutex);
+		for (const auto i: batch) {
+			auto& item = *loader.modules[i];
+			if (item.failed) {
+				settle(item.key);
+				continue;
+			}
+			// The cache takes a copy; the original stays for the pipelines made below.
+			auto copy        = std::make_unique<StoreItem>();
+			copy->type       = item.type;
+			copy->key        = item.key;
+			copy->module     = item.module;
+			copy->plan       = std::move(item.plan);
+			copy->plan_bytes = item.plan_bytes;
+			modules.emplace(item.module.id, &item.module);
+			if (item.module.info.stage == ShaderType::Compute) compute.push_back(item.module.id);
+			loader.ready.items.push_back(std::move(copy));
+		}
+		m_warmup_ready.store(true, std::memory_order_release);
+	}
+	// Compute pipelines first: a dispatch waits for its pipeline.
+	std::vector<WarmUpLoader::ReadyPipeline> made;
+	for (const auto id: compute) made.push_back({.graphics = false, .module_id = id});
+	for (const auto& key: loader.graphics) made.push_back({.graphics = true, .key = key});
+	Common::ParallelFor(made.size(), [&](size_t i) {
+		if (stop.stop_requested()) return;
+		auto&      entry = made[i];
+		const auto begin = Clock::now();
+		Common::RecoverableScope scope;
+		try {
+			if (entry.graphics) {
+				std::array<const ShaderModule*, 4> stages {};
+				for (size_t s = 0; s < stages.size(); s++) {
+					const auto found = modules.find(entry.key.stage_ids[s]);
+					if (found == modules.end()) return;
+					stages[s] = found->second;
+				}
+				if (stages[0] == nullptr) return;
+				CreatePipelineInternal(m_graphics, entry.pipeline, entry.key, stages, m_driver_cache);
+			} else if (const auto found = modules.find(entry.module_id);
+			           found != modules.end() && found->second != nullptr) {
+				CreatePipelineInternal(m_graphics, entry.pipeline, *found->second, m_driver_cache);
+			}
+		} catch (const std::exception&) {
+			entry.pipeline = {};
+		}
+		loader.times.pipelines += Nanoseconds(begin);
+	}, threads);
+	std::scoped_lock lock(loader.mutex);
+	for (auto& entry: made) {
+		if (entry.pipeline.pipeline) loader.ready.pipelines.push_back(std::move(entry));
+	}
+	loader.ready.done = true;
+	m_warmup_ready.store(true, std::memory_order_release);
+}
+
+bool PipelineCache::WarmUpPending(const ProgramKey& key) {
+	if (m_warmup == nullptr) return false;
+	std::scoped_lock lock(m_warmup->mutex);
+	if (!m_warmup->pending_keys.contains(key)) return false;
+	m_warmup->urgent.push_back(key);
+	return true;
+}
+
+void PipelineCache::DrainWarmUp() {
+	if (m_warmup == nullptr || !m_warmup_ready.exchange(false, std::memory_order_acquire)) return;
+	auto&               loader = *m_warmup;
+	WarmUpLoader::Ready ready;
+	{
+		std::scoped_lock lock(loader.mutex);
+		std::swap(ready, loader.ready);
+		for (const auto& item: ready.items) {
+			if (const auto found = loader.pending_keys.find(item->key);
+			    found != loader.pending_keys.end() && --found->second == 0) {
+				loader.pending_keys.erase(found);
+			}
+		}
+	}
+	for (auto& item: ready.items) ApplyStoreItem(*item, &loader.orphans);
+	loader.drained_pipelines += ready.pipelines.size();
+	for (auto& entry: ready.pipelines) {
+		auto& existing = entry.graphics ? m_graphics_pipelines.try_emplace(entry.key).first->second
+		                                : m_compute_pipelines.try_emplace(entry.module_id).first->second;
+		if (existing.pipeline || existing.pending) {
+			DestroyPipeline(entry.pipeline); // This run made it meanwhile.
+		} else {
+			existing = entry.pipeline;
+		}
+	}
+	if (ready.done) {
+		loader.thread.join();
+		Log::WriteToConsoleAndLog(fmt::format(
+		    "[warmup] background load done after {} ms: modules={} pipelines={} plans={}ms "
+		    "modules={}ms pipelines={}ms\n",
+		    Nanoseconds(loader.start) / 1'000'000u, loader.total_modules, loader.drained_pipelines,
+		    loader.times.plans.load() / 1'000'000u, loader.times.modules.load() / 1'000'000u,
+		    loader.times.pipelines.load() / 1'000'000u));
+		for (const auto handle: loader.orphans) m_graphics.device.destroyShaderModule(handle, nullptr);
+		// The cache holds copies of the loaded modules and owns their handles.
+		m_warmup.reset();
+		CheckpointDriverCache();
+	}
+}
+
+void PipelineCache::StopWarmUp() {
+	if (m_warmup == nullptr) return;
+	auto& loader = *m_warmup;
+	loader.thread.request_stop();
+	if (loader.thread.joinable()) loader.thread.join();
+	// What the cache did not take yet is destroyed here.
+	for (const auto& item: loader.ready.items) {
+		m_graphics.device.destroyShaderModule(item->module.module, nullptr);
+	}
+	for (const auto& entry: loader.ready.pipelines) DestroyPipeline(entry.pipeline);
+	for (const auto handle: loader.orphans) m_graphics.device.destroyShaderModule(handle, nullptr);
+	m_warmup.reset();
+}
+
 void PipelineCache::WarmUp(const std::filesystem::path& path) {
 	if (path.empty()) {
 		return;
@@ -137,7 +521,7 @@ void PipelineCache::WarmUp(const std::filesystem::path& path) {
 	if (header.empty()) {
 		return;
 	}
-	const auto           start = std::chrono::steady_clock::now();
+	const auto           start = Clock::now();
 	std::vector<uint8_t> bytes;
 	if (Common::File file;
 	    Common::File::IsFileExisting(path) && file.Open(path, Common::File::Mode::Read)) {
@@ -146,88 +530,201 @@ void PipelineCache::WarmUp(const std::filesystem::path& path) {
 		file.Read(bytes.data(), static_cast<uint32_t>(bytes.size()), &read);
 		bytes.resize(read);
 	}
+	// Before the title starts nothing else runs: every core loads.
+	const auto threads = std::max<size_t>(1u, std::thread::hardware_concurrency());
 	Log::WriteToConsoleAndLog(fmt::format(
 	    "Shader cache: compiling shaders and pipelines from {} ({:.1f} MB) with {} threads\n",
-	    Common::PathToString(path), static_cast<double>(bytes.size()) / 1'000'000.0,
-	    Common::ParallelThreads()));
+	    Common::PathToString(path), static_cast<double>(bytes.size()) / 1'000'000.0, threads));
 	auto       records        = std::span<const uint8_t>(bytes);
 	const bool keep           = Config::ShaderCacheKeepEnabled();
 	const bool header_matches =
 	    records.size() >= header.size() && std::ranges::equal(records.first(header.size()), header);
 	const bool load_store     = header_matches || (keep && records.size() >= header.size());
+	const auto budget_ms      = uint64_t {Config::WarmUpBudgetSeconds()} * 1000u;
+	const bool budget         = budget_ms != 0;
 	size_t     loaded_records = 0;
 	size_t     dropped_records = 0;
+	WarmUpTimes times;
+
+	// Frames: the framing and the checksums, in file order. Without keep a damaged frame ends the
+	// store; with it the frame is skipped.
+	std::vector<std::unique_ptr<StoreItem>> items;
+	size_t                                  kept_bytes = 0; // Records that stay, from the first.
 	if (load_store) {
 		records = records.subspan(header.size());
+		size_t offset = 0;
 		for (;;) {
-			const auto status = LoadRecord(records, keep);
-			if (status == LoadRecordStatus::Loaded) {
-				loaded_records++;
-			} else if (status == LoadRecordStatus::Failed && keep) {
+			auto                 rest = records.subspan(offset);
+			size_t               frame_bytes = 0;
+			ShaderStoreFile::Frame frame;
+			if (rest.size() < sizeof(frame)) break;
+			std::memcpy(&frame, rest.data(), sizeof(frame));
+			if (rest.size() - sizeof(frame) < frame.compressed_size) break;
+			frame_bytes = sizeof(frame) + frame.compressed_size;
+			const auto compressed = rest.subspan(sizeof(frame), frame.compressed_size);
+			const bool valid = XXH3_64bits(compressed.data(), compressed.size()) == frame.checksum;
+			if (!valid) {
+				if (!keep) break;
 				dropped_records++;
-			} else {
+				offset += frame_bytes;
+				continue;
+			}
+			auto item         = std::make_unique<StoreItem>();
+			item->offset      = offset;
+			item->frame_bytes = frame_bytes;
+			items.push_back(std::move(item));
+			offset += frame_bytes;
+		}
+		kept_bytes = offset;
+	}
+	const auto frames_ns = Nanoseconds(start);
+
+	// Decode: decompress and read every frame in parallel.
+	Common::ParallelFor(items.size(), [&](size_t i) {
+		const auto begin = Clock::now();
+		ParseStoreItem(records.subspan(items[i]->offset, items[i]->frame_bytes), *items[i]);
+		times.decode += Nanoseconds(begin);
+	}, threads);
+	// Without keep (and without a budget, which skips instead) the first unreadable record ends
+	// the store like a damaged frame.
+	if (!keep && !budget) {
+		for (size_t i = 0; i < items.size(); ++i) {
+			if (items[i]->failed) {
+				kept_bytes = items[i]->offset;
+				items.resize(i);
 				break;
 			}
 		}
 	}
 
-	const auto modules = MapModules();
-	std::vector<Common::UniqueFunction<void>> jobs;
-	jobs.reserve(m_graphics_pipelines.size() + modules.size());
-	std::atomic<size_t> dropped_pipelines = 0;
-	for (auto& node: m_graphics_pipelines) {
-		jobs.emplace_back([this, &modules, &node, keep, &dropped_pipelines] {
-			if (!keep) {
-				CreateGraphicsPipeline(node.second, node.first, modules);
-				return;
-			}
-			Common::RecoverableScope scope;
-			try {
-				CreateGraphicsPipeline(node.second, node.first, modules);
-			} catch (const Common::RecoverableFailure&) {
-				node.second.pipeline = nullptr;
-				dropped_pipelines.fetch_add(1, std::memory_order_relaxed);
-			} catch (const std::exception&) {
-				node.second.pipeline = nullptr;
-				dropped_pipelines.fetch_add(1, std::memory_order_relaxed);
-			}
-		});
-	}
-	// A compute pipeline depends only on its module.
-	for (const auto* module: modules | std::views::values) {
-		if (module != nullptr && module->info.stage == ShaderType::Compute) {
-			jobs.emplace_back([this, module, &pipeline = m_compute_pipelines[module->id], keep,
-			                   &dropped_pipelines] {
-				if (!keep) {
-					CreatePipelineInternal(m_graphics, pipeline, *module, m_driver_cache);
-					return;
-				}
-				Common::RecoverableScope scope;
-				try {
-					CreatePipelineInternal(m_graphics, pipeline, *module, m_driver_cache);
-				} catch (const Common::RecoverableFailure&) {
-					pipeline.pipeline = nullptr;
-					dropped_pipelines.fetch_add(1, std::memory_order_relaxed);
-				} catch (const std::exception&) {
-					pipeline.pipeline = nullptr;
-					dropped_pipelines.fetch_add(1, std::memory_order_relaxed);
-				}
-			});
+	// Everything but the modules is small and applied in file order; the use order ranks the
+	// modules, the earliest first, then the unranked in file order.
+	std::vector<std::unique_ptr<StoreItem>> modules;
+	for (auto& item: items) {
+		if (!item->failed && item->type == static_cast<uint8_t>(Record::Module)) {
+			modules.push_back(std::move(item));
+		} else if (ApplyStoreItem(*item)) {
+			loaded_records++;
+		} else {
+			dropped_records++;
 		}
 	}
-	Common::ParallelFor(jobs.size(), [&](size_t i) { jobs[i](); });
-	// A key with a stage missing from the store keeps no pipeline.
+	items.clear();
+	for (auto& item: modules) {
+		const auto found = m_use_rank.find(item->module.id);
+		item->rank       = found != m_use_rank.end() ? found->second : UINT32_MAX;
+	}
+	std::ranges::stable_sort(modules, {}, &StoreItem::rank);
+
+	// Modules: plan and shader module per record on every core, in rank order, in chunks so a
+	// budget can stop between them.
+	const auto over_budget = [&] { return budget && Nanoseconds(start) / 1'000'000u >= budget_ms; };
+	size_t     prepared    = 0;
+	const auto chunk       = std::max<size_t>(threads * 4u, 64u);
+	while (prepared < modules.size() && !over_budget()) {
+		const auto count = std::min(chunk, modules.size() - prepared);
+		Common::ParallelFor(count, [&](size_t i) {
+			PrepareStoreModule(*modules[prepared + i], keep || budget, times);
+		}, threads);
+		for (size_t i = 0; i < count; ++i) {
+			auto& item = *modules[prepared + i];
+			if (ApplyStoreItem(item)) {
+				loaded_records++;
+			} else {
+				dropped_records++;
+			}
+		}
+		prepared += count;
+	}
+	const auto modules_left = modules.size() - prepared;
+
+	// Pipelines of the loaded modules, in rank order of their modules.
+	const auto module_map = MapModules();
+	const auto rank_of    = [&](uint64_t id) {
+		const auto found = m_use_rank.find(id);
+		return found != m_use_rank.end() ? found->second : UINT32_MAX;
+	};
+	struct PipelineJob {
+		uint32_t                     rank = UINT32_MAX;
+		const GraphicsPipelineKey*   graphics = nullptr;
+		Pipeline*                    pipeline = nullptr;
+		const ShaderModule*          module   = nullptr;
+	};
+	std::vector<PipelineJob> pipeline_jobs;
+	std::vector<GraphicsPipelineKey> deferred_graphics;
+	for (auto& [key, pipeline]: m_graphics_pipelines) {
+		bool ready = true;
+		uint32_t rank = UINT32_MAX;
+		for (const auto id: key.stage_ids) {
+			if (id == 0) continue;
+			ready = ready && module_map.contains(id);
+			rank  = std::min(rank, rank_of(id));
+		}
+		if (ready) {
+			pipeline_jobs.push_back({.rank = rank, .graphics = &key, .pipeline = &pipeline});
+		} else if (budget && modules_left != 0) {
+			deferred_graphics.push_back(key);
+		}
+	}
+	for (const auto* module: module_map | std::views::values) {
+		if (module != nullptr && module->info.stage == ShaderType::Compute) {
+			pipeline_jobs.push_back({.rank = rank_of(module->id),
+			                         .pipeline = &m_compute_pipelines[module->id],
+			                         .module = module});
+		}
+	}
+	std::ranges::stable_sort(pipeline_jobs, {}, &PipelineJob::rank);
+	std::atomic<size_t> dropped_pipelines = 0;
+	size_t              created = 0;
+	while (created < pipeline_jobs.size() && !over_budget()) {
+		const auto count = std::min(chunk, pipeline_jobs.size() - created);
+		Common::ParallelFor(count, [&](size_t i) {
+			auto&      job   = pipeline_jobs[created + i];
+			const auto begin = Clock::now();
+			const auto make  = [&] {
+				if (job.graphics != nullptr) {
+					CreateGraphicsPipeline(*job.pipeline, *job.graphics, module_map);
+				} else {
+					CreatePipelineInternal(m_graphics, *job.pipeline, *job.module, m_driver_cache);
+				}
+			};
+			if (!keep && !budget) {
+				make();
+			} else {
+				Common::RecoverableScope scope;
+				try {
+					make();
+				} catch (const Common::RecoverableFailure&) {
+					*job.pipeline = {};
+					dropped_pipelines.fetch_add(1, std::memory_order_relaxed);
+				} catch (const std::exception&) {
+					*job.pipeline = {};
+					dropped_pipelines.fetch_add(1, std::memory_order_relaxed);
+				}
+			}
+			times.pipelines += Nanoseconds(begin);
+		}, threads);
+		created += count;
+	}
+	// Pipelines left by the budget go to the background loader with the modules.
+	for (size_t i = created; i < pipeline_jobs.size(); ++i) {
+		if (pipeline_jobs[i].graphics != nullptr) deferred_graphics.push_back(*pipeline_jobs[i].graphics);
+	}
+	// A key with a stage missing from the store keeps no pipeline; one left for the loader is
+	// entered when it is made.
 	std::erase_if(m_graphics_pipelines,
 	              [](const auto& entry) { return entry.second.pipeline == nullptr; });
 	std::erase_if(m_compute_pipelines,
 	              [](const auto& entry) { return entry.second.pipeline == nullptr; });
+	const auto pipelines_left = pipeline_jobs.size() - created;
 
 	const auto dropped_pipeline_count = dropped_pipelines.load();
+	// With a budget a record that cannot be read is skipped, so the store keeps every frame.
 	if (bytes.empty() || !keep) {
 		// A damaged record ends the store; the records before it stay.
-		m_store.Open(path, header, header_matches ? bytes.size() - records.size() : 0);
+		m_store.Open(path, header, header_matches ? header.size() + kept_bytes : 0);
 	} else if (header_matches && dropped_records == 0 && dropped_pipeline_count == 0) {
-		m_store.Open(path, header, bytes.size() - records.size());
+		m_store.Open(path, header, header.size() + kept_bytes);
 	}
 
 	if (!m_graphics_pipelines.empty() || !m_compute_pipelines.empty()) {
@@ -276,135 +773,38 @@ void PipelineCache::WarmUp(const std::filesystem::path& path) {
 	}
 	Log::WriteToConsoleAndLog(fmt::format(
 	    "Shader cache: loaded {} programs, {} modules, {} pipelines in {} ms\n",
-	    m_program_cache.size(), modules.size() - 1,
-	    m_graphics_pipelines.size() + m_compute_pipelines.size(),
-	    std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() -
-	                                                          start)
-	        .count()));
-}
+	    m_program_cache.size(), module_map.size() - 1,
+	    m_graphics_pipelines.size() + m_compute_pipelines.size(), Nanoseconds(start) / 1'000'000u));
+	// The parts summed over the threads that ran them; wall is the time before the title starts.
+	Log::WriteToConsoleAndLog(fmt::format(
+	    "[warmup] frames={}ms decode={}ms plans={}ms modules={}ms pipelines={}ms threads={} "
+	    "wall={}ms ranked={}\n",
+	    frames_ns / 1'000'000u, times.decode.load() / 1'000'000u, times.plans.load() / 1'000'000u,
+	    times.modules.load() / 1'000'000u, times.pipelines.load() / 1'000'000u, threads,
+	    Nanoseconds(start) / 1'000'000u, m_use_rank.size()));
 
-PipelineCache::LoadRecordStatus PipelineCache::LoadRecord(std::span<const uint8_t>& records,
-                                                          bool keep_on_error) {
-	std::vector<uint8_t> raw;
-	size_t               frame_bytes = 0;
-	switch (ShaderStoreFile::Decode(records, keep_on_error, raw, frame_bytes)) {
-		case ShaderStoreFile::Status::EndOfStream: return LoadRecordStatus::EndOfStream;
-		case ShaderStoreFile::Status::Failed: return LoadRecordStatus::Failed;
-		case ShaderStoreFile::Status::Loaded: break;
+	if (modules_left != 0 || pipelines_left != 0) {
+		Log::WriteToConsoleAndLog(fmt::format(
+		    "[warmup] budget {} s: the title starts after {} of {} modules and {} of {} pipelines; "
+		    "the rest loads in the background\n",
+		    budget_ms / 1000u, prepared, modules.size(), created, pipeline_jobs.size()));
+		m_warmup                = std::make_unique<WarmUpLoader>();
+		auto& loader            = *m_warmup;
+		loader.start            = Clock::now();
+		loader.applied          = module_map;
+		loader.graphics         = std::move(deferred_graphics);
+		loader.total_modules    = modules_left;
+		loader.total_pipelines  = pipelines_left;
+		for (size_t i = prepared; i < modules.size(); ++i) {
+			loader.pending_keys[modules[i]->key]++;
+			loader.modules.push_back(std::move(modules[i]));
+		}
+		// Compute pipelines of modules loaded before the budget ran out that it left.
+		for (size_t i = created; i < pipeline_jobs.size(); ++i) {
+			if (pipeline_jobs[i].module != nullptr) loader.compute.push_back(pipeline_jobs[i].module->id);
+		}
+		loader.thread = std::jthread([this](std::stop_token stop) { RunWarmUpLoader(stop); });
 	}
-	Reader     reader {raw};
-	auto       type     = Record::Module;
-	const auto complete = [&] { return reader.ok && reader.bytes.empty(); };
-	IoAll(reader, type);
-	switch (type) {
-		case Record::Module: {
-			ProgramKey            key;
-			std::vector<uint8_t>  plan;
-			ShaderModule          module;
-			std::vector<uint32_t> spirv;
-			IoKey(reader, key);
-			IoAll(reader, plan);
-			IoModule(reader, module);
-			IoAll(reader, spirv);
-			if (!complete()) {
-				return LoadRecordStatus::Failed;
-			}
-			const auto [program, inserted] = m_program_cache.try_emplace(std::move(key));
-			// A module with calls keeps the plan of its callee code; it loads at the first use
-			// that links the same code.
-			const bool calls = !module.function_code.empty();
-			if (inserted && !calls &&
-			    !ShaderRecompiler::IR::LoadResourcePlan(plan, program->second.resource_plan)) {
-				m_program_cache.erase(program);
-				return LoadRecordStatus::Failed;
-			}
-			if (calls) {
-				program->second.call_plans.insert_or_assign(
-				    XXH3_64bits(module.function_code.data(),
-				                module.function_code.size() * sizeof(uint32_t)),
-				    std::move(plan));
-			}
-			if (keep_on_error) {
-				Common::RecoverableScope scope;
-				try {
-					module.module = CompileSPV(spirv, m_graphics.device);
-				} catch (const Common::RecoverableFailure&) {
-					if (inserted) {
-						m_program_cache.erase(program);
-					}
-					return LoadRecordStatus::Failed;
-				} catch (const std::exception&) {
-					if (inserted) {
-						m_program_cache.erase(program);
-					}
-					return LoadRecordStatus::Failed;
-				}
-			} else {
-				module.module = CompileSPV(spirv, m_graphics.device);
-			}
-			// A module the old layout's key is known for waits for its first comparison.
-			module.legacy_checked = module.legacy_hash == 0;
-			program->second.legacy_unchecked += module.legacy_checked ? 0u : 1u;
-			program->second.modules.push_back(std::move(module));
-			break;
-		}
-		case Record::GraphicsPipeline: {
-			GraphicsPipelineKey key;
-			reader.Raw(&key, sizeof(key));
-			if (!complete()) {
-				return LoadRecordStatus::Failed;
-			}
-			// WarmUp creates the pipeline once every record is loaded.
-			m_graphics_pipelines.try_emplace(key);
-			break;
-		}
-		case Record::TessellationLayout: {
-			uint64_t                    key = 0;
-			ShaderTessellationInputInfo layout;
-			IoAll(reader, key, layout);
-			if (!complete()) {
-				return LoadRecordStatus::Failed;
-			}
-			m_tess_layouts.try_emplace(key, layout);
-			break;
-		}
-		case Record::FailedProgram: {
-			ProgramKey  key;
-			uint64_t    capability_version = 0;
-			std::string reason;
-			IoKey(reader, key);
-			IoAll(reader, capability_version, reason);
-			if (!complete()) {
-				return LoadRecordStatus::Failed;
-			}
-			// A translator fix starts a new capability generation: a failure recorded by an
-			// older translator is not evidence this one cannot translate the program.
-			if (FailureCacheApplies(capability_version) && !Config::ShaderCacheRetryFailed()) {
-				auto& program          = m_program_cache.try_emplace(std::move(key)).first->second;
-				program.skip_dispatch  = true;
-				program.failure_reason = std::move(reason);
-			}
-			break;
-		}
-		case Record::KeyIndex: {
-			ProgramKey key;
-			IoKey(reader, key);
-			if (!complete() || key.stage == ShaderType::Unknown ||
-			    static_cast<uint32_t>(key.stage) >
-			        static_cast<uint32_t>(ShaderType::TessellationEvaluation)) {
-				return LoadRecordStatus::Failed;
-			}
-			if (Config::ShaderKeyIndexEnabled()) {
-				RecordIndexedKey(key, /*persist=*/false);
-			}
-			break;
-		}
-		default: return LoadRecordStatus::Failed;
-	}
-	if (!keep_on_error) {
-		records = records.subspan(frame_bytes);
-	}
-	return LoadRecordStatus::Loaded;
 }
 
 // Records are encoded here, since programs and modules change later.
@@ -420,6 +820,18 @@ void PipelineCache::StoreModule(const ProgramKey& key, const std::vector<uint8_t
 	IoAll(record, plan_bytes);
 	IoModule(record, module);
 	IoAll(record, spirv);
+	m_store.Append(std::move(record.bytes));
+}
+
+void PipelineCache::NoteModuleUse(const ShaderModule& module) {
+	if (!m_store || module.id == 0) return;
+	const auto [rank, inserted] = m_use_rank.try_emplace(module.id, m_next_use_rank);
+	if (!inserted) return;
+	m_next_use_rank++;
+	Writer record;
+	auto   id    = module.id;
+	auto   value = rank->second;
+	IoAll(record, Record::UseOrder, id, value);
 	m_store.Append(std::move(record.bytes));
 }
 

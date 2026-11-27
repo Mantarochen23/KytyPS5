@@ -168,6 +168,9 @@ struct ConfigOptions {
 	// --dump-registered-shaders: copy each distinct registered shader and an index record here.
 	// Empty = off.
 	std::filesystem::path    dump_registered_shaders_folder;
+	// --warmup-budget-s: the title starts after this many seconds of loading the shader store; the
+	// rest loads in the background. 0 = load everything first.
+	uint32_t                 warmup_budget_s            = 0;
 };
 
 void Load(const ConfigOptions& cfg);
@@ -279,6 +282,7 @@ bool     GuestFaultParkEnabled();
 bool     GuestFaultReportOnlyEnabled();
 uint32_t GuestClockHoldMs();
 const std::filesystem::path& GetRegisteredShaderDumpFolder();
+uint32_t WarmUpBudgetSeconds();
 
 } // namespace Config
 

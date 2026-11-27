@@ -15,6 +15,7 @@
 #include "graphics/shader/rectListShader.h"
 #include "graphics/shader/shader.h"
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
@@ -442,9 +443,28 @@ private:
 	void WriteDriverCache() const;
 
 	// pipelineSerialization.cpp
-	enum class LoadRecordStatus : uint8_t { Loaded, EndOfStream, Failed };
-	void             WarmUp(const std::filesystem::path& path);
-	LoadRecordStatus LoadRecord(std::span<const uint8_t>& records, bool keep_on_error);
+	// Loading the store: records are parsed and prepared on every core, in the first-use order of
+	// the runs that stored them; with --warmup-budget-s the rest loads in the background.
+	struct StoreItem;
+	struct WarmUpTimes;
+	struct WarmUpLoader;
+	void        WarmUp(const std::filesystem::path& path);
+	static void ParseStoreItem(std::span<const uint8_t> frame, StoreItem& item);
+	void        PrepareStoreModule(StoreItem& item, bool keep, WarmUpTimes& times) const;
+	bool        ApplyStoreItem(StoreItem& item, std::vector<vk::ShaderModule>* orphans = nullptr);
+	void        RunWarmUpLoader(std::stop_token stop);
+	// Applies what the background load finished; render thread.
+	void        DrainWarmUp();
+	// True if a stored module of `key` is still loading (and asks for it first).
+	bool        WarmUpPending(const ProgramKey& key);
+	void        StopWarmUp();
+	void        DestroyPipeline(const Pipeline& pipeline) const;
+	// Records the first use of a module in this run once per module the store has no rank for.
+	void        NoteModuleUse(const ShaderModule& module);
+	std::unique_ptr<WarmUpLoader>          m_warmup;
+	std::atomic_bool                       m_warmup_ready {false};
+	std::unordered_map<uint64_t, uint32_t> m_use_rank; // Module id -> first-use rank.
+	uint32_t                               m_next_use_rank = 0;
 	void StoreModule(const ProgramKey& key, const std::vector<uint8_t>& plan,
 	                 const ShaderModule& module, const std::vector<uint32_t>& spirv);
 	void StoreFailedProgram(const ProgramKey& key, std::string_view reason);

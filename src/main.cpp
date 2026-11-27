@@ -167,7 +167,10 @@ static void PrintUsage() {
 	         "                                       was recorded for more than <ms> and the render side is\n"
 	         "                                       busy with shaders. 0 = off. Default: 0.\n"
 	         "  --dump-registered-shaders <dir>      Write each distinct registered shader and index.jsonl\n"
-	         "                                       through a bounded background queue. Default: off.\n");
+	         "                                       through a bounded background queue. Default: off.\n"
+	         "  --warmup-budget-s <n>                Start the title after n seconds of loading the shader\n"
+	         "                                       store (first-used first); the rest loads in the\n"
+	         "                                       background. 0 = load all first. Default: 0.\n");
 }
 
 static bool NextArg(int argc, char* argv[], int& index, std::string& out) {
@@ -614,6 +617,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				return false;
 			}
 			options.config.dump_registered_shaders_folder = Common::PathFromUtf8(value);
+		} else if (arg == "--warmup-budget-s") {
+			if (!ParseUint32(value, options.config.warmup_budget_s)) {
+				::printf("invalid warmup budget value: %s\n", value.c_str());
+				return false;
+			}
 		} else {
 			::printf("unknown option: %s\n", arg.c_str());
 			return false;

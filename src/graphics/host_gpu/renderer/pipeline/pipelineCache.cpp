@@ -428,6 +428,7 @@ ShaderModule& PipelineCache::AddModule(Program& program, const ProgramKey& key,
                                        CompiledStage compiled) {
 	auto& module = program.modules.emplace_back(std::move(compiled.module));
 	m_compiled[static_cast<size_t>(key.stage)]++;
+	NoteModuleUse(module);
 	if (const auto legacy = program.legacy_of_specialization.find(SpecializationHash(module.specialization));
 	    legacy != program.legacy_of_specialization.end()) {
 		module.legacy_hash = legacy->second;
@@ -618,6 +619,7 @@ const ShaderModule* PipelineCache::GetProgramImpl(const ShaderParams& params, In
                                                   ShaderRecompiler::IR::PushData::Window& push_data,
                                                   AsyncMode                               mode) {
 	m_last_deferred = false;
+	DrainWarmUp();
 	const auto user_data = std::span(params.user_data).first(params.user_data_count);
 	ShaderRecompiler::IR::SrtRuntime runtime {
 	    .user_data                  = user_data,
@@ -746,6 +748,7 @@ const ShaderModule* PipelineCache::GetProgramImpl(const ShaderParams& params, In
 					m_lookup_stats.canonical_saved += module->legacy_hash != cached.resources.legacy_hash;
 				}
 			}
+			NoteModuleUse(*module);
 			return bind(*module);
 		}
 		if (materialized && !source_changed) {
@@ -768,6 +771,12 @@ const ShaderModule* PipelineCache::GetProgramImpl(const ShaderParams& params, In
 	if (entry == m_program_cache.end()) {
 		m_lookup_stats.lookups++;
 		NoteLookupMiss(m_lookup_key, nullptr, push_data);
+	}
+	// A stored module of this program is still loading in the background: it comes first there.
+	if (mode == AsyncMode::On && WarmUpPending(m_lookup_key)) {
+		m_last_deferred = true;
+		RenderActivity::NoteDetail("stored module loading");
+		return nullptr;
 	}
 	finish_options();
 	// Compute programs with GPU-selected calls are linked on the render thread; their module is
@@ -961,6 +970,7 @@ PipelineCache::PipelineCache(GraphicContext&                         graphics,
 
 PipelineCache::~PipelineCache() {
 	// Nothing may still be making modules or pipelines while they are destroyed.
+	StopWarmUp();
 	if (m_async != nullptr) {
 		m_async->workers.Stop();
 		m_async.reset();
@@ -1714,6 +1724,7 @@ PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(const CommandBuffer&
 	const auto& vs_input_info = vertex_info.front();
 	const bool  ps_active     = state.ps_active;
 
+	DrainWarmUp();
 	std::array<const ShaderModule*, 4> stages {};
 	const auto key        = MakeGraphicsPipelineKey(command, state, targets, stages);
 	auto [iter, inserted] = m_graphics_pipelines.try_emplace(key);
@@ -1756,6 +1767,7 @@ PipelineCache::Pipeline& PipelineCache::GetComputePipeline(const ShaderComputeIn
 	KYTY_PROFILER_BLOCK("PipelineCache::CreatePipeline(Compute)", profiler::colors::RedA100);
 
 	const auto& module = *input_info.stage.module;
+	DrainWarmUp();
 
 	auto [iter, inserted] = m_compute_pipelines.try_emplace(module.id);
 	auto& pipeline        = iter->second;
