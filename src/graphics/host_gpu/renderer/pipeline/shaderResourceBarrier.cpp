@@ -1,6 +1,7 @@
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
 
 #include "common/assert.h"
+#include "common/frameCost.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/shader/shader.h"
 #include "graphics/shader/shaderBindings.h"
@@ -94,6 +95,7 @@ bool HasShaderBufferWrites(const ShaderStageRuntime& runtime) {
 
 void ShaderAccessBarrier(vk::CommandBuffer vk_buffer, vk::PipelineStageFlags source_stages,
 	                     bool writes_memory) {
+	Common::FrameCost::Add(Common::FrameCost::Counter::BarriersAllCommands);
 	if (!writes_memory) {
 		vk_buffer.pipelineBarrier(source_stages, vk::PipelineStageFlagBits::eAllCommands,
 		                          vk::DependencyFlags {}, 0, nullptr, 0, nullptr, 0, nullptr);
@@ -108,6 +110,7 @@ void ShaderAccessBarrier(vk::CommandBuffer vk_buffer, vk::PipelineStageFlags sou
 
 void ShaderWriteHazardBarrier(vk::CommandBuffer      vk_buffer,
                               vk::PipelineStageFlags destination_stages) {
+	Common::FrameCost::Add(Common::FrameCost::Counter::BarriersAllCommands);
 	const vk::MemoryBarrier barrier {
 	    .srcAccessMask = vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite,
 	    .dstAccessMask = vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite};

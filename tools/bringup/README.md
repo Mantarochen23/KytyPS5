@@ -1,7 +1,7 @@
 # bringup branch: working notes
 
 Fork of KytyPS5 for bring-up work on Linux with AMD RDNA4 / RADV.
-Everything here is local; nothing is published.
+This file describes the run and triage tools and how the branch is organised.
 
 ## Branches
 

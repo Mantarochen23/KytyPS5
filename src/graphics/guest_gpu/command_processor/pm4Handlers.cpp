@@ -1,4 +1,5 @@
 #include "common/assert.h"
+#include "common/frameCost.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
 #include "graphics/guest_gpu/command_processor/commandProcessor.h"
@@ -767,6 +768,9 @@ KYTY_CP_OP_PARSER(CpOpDrawIndirect) {
 		    next[2] != buffer[1] || next[3] != buffer[2] || next[4] != buffer[3]) {
 			break;
 		}
+	}
+	if (count > 1) {
+		Common::FrameCost::Add(Common::FrameCost::Counter::DrawsCoalesced, count - 1);
 	}
 	cp.DrawIndirectMulti(data_offset, count, nullptr, record_size, registers, draw_initiator,
 	                     indexed);

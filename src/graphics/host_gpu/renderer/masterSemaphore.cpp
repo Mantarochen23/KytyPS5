@@ -56,8 +56,15 @@ void MasterSemaphore::Wait(uint64_t tick) {
 
 	Common::DebugCounters::ScopedTimer timer(Common::DebugCounters::Counter::GpuWaits,
 	                                         Common::DebugCounters::Counter::GpuWaitNs);
-	Common::FrameCost::ScopedTimer frame_timer(Common::FrameCost::Counter::GpuFenceWaitNs);
+	const bool on_render = Common::FrameCost::IsRenderThread();
+	Common::FrameCost::ScopedTimer frame_timer(
+	    on_render ? Common::FrameCost::Counter::GpuFenceWaitNs
+	              : Common::FrameCost::Counter::GpuFenceWaitBgNs);
 	const auto result = m_graphics.device.waitSemaphores(&wait_info, UINT64_MAX);
+	const auto wait_ns = frame_timer.Stop();
+	if (on_render) {
+		Common::FrameCost::RecordRenderWaitReason(wait_ns);
+	}
 	if (result == vk::Result::eErrorDeviceLost) {
 		ReportDeviceLost(m_graphics, "vkWaitSemaphores", result, tick, KnownGpuTick());
 		EXIT("vkWaitSemaphores failed: %s, tick=%" PRIu64 "\n", vk::to_string(result).c_str(),

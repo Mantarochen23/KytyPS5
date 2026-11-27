@@ -4,6 +4,7 @@
 #include "common/assert.h"
 #include "common/debugCounters.h"
 #include "common/emulatorConfig.h"
+#include "common/frameCost.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
 #include "graphics/guest_gpu/command_processor/waitDiagnostics.h"
@@ -439,7 +440,8 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 	if constexpr (async) {
 		m_scheduler.DeferPriorityOperation(std::move(publish));
 	} else {
-		const auto tick = m_scheduler.CurrentTick();
+		Common::FrameCost::ScopedWaitReason wait_reason(Common::FrameCost::WaitReason::Readback);
+		const auto                          tick = m_scheduler.CurrentTick();
 		m_scheduler.Wait(tick);
 		m_scheduler.WaitPriorityOperations(tick);
 		publish();
@@ -933,9 +935,12 @@ void BufferCache::RunGarbageCollector() {
 	}
 
 	// Publish all queued downloads before releasing their tracked pages and owners.
-	const auto completion_tick = m_scheduler.CurrentTick();
-	m_scheduler.Wait(completion_tick);
-	m_scheduler.WaitPriorityOperations(completion_tick);
+	{
+		Common::FrameCost::ScopedWaitReason wait_reason(Common::FrameCost::WaitReason::Gc);
+		const auto                          completion_tick = m_scheduler.CurrentTick();
+		m_scheduler.Wait(completion_tick);
+		m_scheduler.WaitPriorityOperations(completion_tick);
+	}
 	for (const auto id: dirty_buffers) {
 		auto& buffer = m_slot_buffers[id];
 		m_memory_tracker.UnmarkRegionAsGpuModified(buffer.CpuAddress(), buffer.Size());

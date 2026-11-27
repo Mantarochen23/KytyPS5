@@ -1,6 +1,7 @@
 #include "graphics/host_gpu/renderer/rayTracing.h"
 
 #include "common/alignment.h"
+#include "common/frameCost.h"
 #include "gpu_blit_shaders/gpu_bvh_mirror_spv.h"
 #include "gpu_blit_shaders/gpu_bvh_walk_spv.h"
 #include "graphics/host_gpu/graphicContext.h"
@@ -397,6 +398,7 @@ vk::DeviceAddress RayTracing::Prepare(uint64_t tlas) {
 	// every area from it.
 	const auto busy = [&](const Area& area) { return area.tick != 0 && area.tlas == tlas; };
 	if (m_areas[m_next_area].tick != 0 && std::ranges::none_of(m_areas, busy)) {
+		Common::FrameCost::ScopedWaitReason wait_reason(Common::FrameCost::WaitReason::Rt);
 		m_scheduler.Wait(m_areas[m_next_area].tick);
 		Collect();
 	}

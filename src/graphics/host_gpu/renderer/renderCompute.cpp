@@ -795,6 +795,36 @@ static bool JudgeLargeDispatch(SkipTaint& taint, const ShaderStageRuntime& stage
 	return verdict == DispatchVerdict::Skip;
 }
 
+namespace {
+thread_local uint32_t g_dispatch_sample_countdown = Common::FrameCost::StepClock::InitialDelay;
+
+struct DispatchStepSample {
+	Common::FrameCost::StepClock clock;
+	uint64_t                     program_ns  = 0;
+	uint64_t                     pipeline_ns = 0;
+	uint64_t                     bind_ns     = 0;
+	uint64_t                     guard_ns    = 0;
+	uint64_t                     commit_ns   = 0;
+	uint64_t                     record_ns   = 0;
+
+	DispatchStepSample() noexcept: clock(g_dispatch_sample_countdown) {}
+
+	void Commit() noexcept {
+		if (!clock.Active()) return;
+		clock.AddTo(record_ns);
+		using Common::FrameCost::Counter;
+		Common::FrameCost::Add(Counter::DispatchStepSamples);
+		Common::FrameCost::Add(Counter::DispatchStepProgramNs, program_ns);
+		Common::FrameCost::Add(Counter::DispatchStepPipelineNs, pipeline_ns);
+		Common::FrameCost::Add(Counter::DispatchStepBindNs, bind_ns);
+		Common::FrameCost::Add(Counter::DispatchStepGuardNs, guard_ns);
+		Common::FrameCost::Add(Counter::DispatchStepCommitNs, commit_ns);
+		Common::FrameCost::Add(Counter::DispatchStepRecordNs, record_ns);
+		clock.Complete();
+	}
+};
+} // namespace
+
 bool RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group_x,
                                     uint32_t thread_group_y, uint32_t thread_group_z, uint32_t mode,
                                     bool async_compute, bool allow_async, uint64_t indirect_args) {
@@ -809,6 +839,7 @@ bool RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 			     thread_group_x, thread_group_y, thread_group_z, mode,
 			     sh_ctx.GetCs().cs_regs.data_addr);
 		}
+		Common::FrameCost::Add(Common::FrameCost::Counter::DispatchesSkipped);
 		return true;
 	}
 
@@ -820,6 +851,7 @@ bool RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 		LOGF("GraphicsRenderDispatchDirect: temporary: ignoring dispatch with null CS shader, "
 		     "groups=%ux%ux%u mode=%u\n",
 		     thread_group_x, thread_group_y, thread_group_z, mode);
+		Common::FrameCost::Add(Common::FrameCost::Counter::DispatchesSkipped);
 		return true;
 	}
 
@@ -859,10 +891,12 @@ bool RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 			input_info.workgroup_counts[axis] = threads / size + (threads % size != 0u);
 		}
 	}
+	DispatchStepSample sample;
 	m_context.GetImageHeap().BeginDraw();
 	bool pending = false;
 	if (!m_context.GetPipelineCache().GetComputeProgram(cs_regs, input_info,
 	                                                    allow_async ? &pending : nullptr)) {
+		if (!pending) Common::FrameCost::Add(Common::FrameCost::Counter::DispatchesSkipped);
 		return !pending;
 	}
 	if (use_thread_dimensions) {
@@ -884,6 +918,7 @@ bool RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 		                       indirect_args != 0 ? "indirect-threads" : "direct")) {
 			m_pending_uses = ComputeBufferUses(input_info.stage);
 			TaintSkippedDispatch();
+			Common::FrameCost::Add(Common::FrameCost::Counter::DispatchesSkipped);
 			return true;
 		}
 	}
@@ -892,12 +927,15 @@ bool RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 	     TryConsumeComputeFill(input_info, buffer, thread_group_x, thread_group_y,
 	                           thread_group_z, mode))) {
 		ResetBindings();
+		Common::FrameCost::Add(Common::FrameCost::Counter::DispatchesSkipped);
 		return true;
 	}
+	sample.clock.AddTo(sample.program_ns);
 	if (allow_async && !m_context.GetPipelineCache().EnsureComputePipeline(input_info, pending)) {
 		if (pending && Config::AsyncComputeWaitMs() != 0) {
 			m_pending_uses = ComputeBufferUses(input_info.stage);
 		}
+		if (!pending) Common::FrameCost::Add(Common::FrameCost::Counter::DispatchesSkipped);
 		return !pending;
 	}
 	// The thread counts of an indirect thread-dimension dispatch are an input too (read by the
@@ -909,6 +947,7 @@ bool RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 	                                                           sizeof(vk::DispatchIndirectCommand),
 	                                                           true, false}}
 	                           : std::vector<SkipTaint::Use> {})) {
+		Common::FrameCost::Add(Common::FrameCost::Counter::DispatchesSkipped);
 		return true;
 	}
 
@@ -920,6 +959,7 @@ bool RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 
 	buffer.EndRendering();
 	auto& pipeline = m_context.GetPipelineCache().GetComputePipeline(input_info);
+	sample.clock.AddTo(sample.pipeline_ns);
 	auto& bindings = m_compute_bindings;
 	PrepareBindings(input_info.stage, bindings);
 	if (program.bindings.dispatch_thread_dword != ShaderRecompiler::IR::PushData::NoStart) {
@@ -945,6 +985,7 @@ bool RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 	if (buffer_probe) {
 		GetBufferProbe().Record(m_context, buffer, program.shader_hash, bindings, probe_states);
 	}
+	sample.clock.AddTo(sample.bind_ns);
 
 	const auto vk_buffer = buffer.Handle();
 	CommitBindings(buffer, vk::PipelineBindPoint::eCompute, pipeline,
@@ -956,6 +997,7 @@ bool RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 		// while allowing the queue to execute asynchronously.
 		ShaderWriteHazardBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
 	}
+	sample.clock.AddTo(sample.commit_ns);
 	if (Config::GraphicsDebugDumpEnabled()) {
 		const auto sampled_images = std::count_if(
 		    program.info.images.begin(), program.info.images.end(), [](const auto& image) {
@@ -1036,6 +1078,12 @@ bool RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 	                                   std::max(input_info.threads_num[2], 1u);
 	if ((mode & DISPATCH_INITIATOR_ORDERED_APPEND_ENABLE) != 0 && program.info.uses_gds &&
 	    group_threads <= input_info.wave_size && !input_info.lds_storage) {
+		const uint64_t total_groups =
+		    uint64_t {thread_group_x} * uint64_t {thread_group_y} * uint64_t {thread_group_z};
+		if (total_groups > 1u) {
+			Common::FrameCost::Add(Common::FrameCost::Counter::DispatchesOrderedAppendExtra,
+			                       total_groups - 1u);
+		}
 		// A single guest wave per group can run in launch order without a device-wide
 		// spinlock. Keep the guest workgroup IDs when splitting the dispatch.
 		for (uint32_t z = 0; z < thread_group_z; ++z) {
@@ -1054,10 +1102,14 @@ bool RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 	graphics.breadcrumbs.EndOp(graphics, vk_buffer, marker_id);
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::Dispatches);
 	Common::FrameCost::Add(Common::FrameCost::Counter::Dispatches);
+	if (program.info.bvh) {
+		Common::FrameCost::Add(Common::FrameCost::Counter::BvhDispatches);
+	}
 
 	// The removed host fence also ordered read-only dispatches before later writers.
 	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader, writes_memory);
 	ResetBindings();
+	sample.Commit();
 	return true;
 }
 
@@ -1076,31 +1128,38 @@ bool RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 	const bool args_on_host = !m_context.GetBufferCache().HasGpuDirtyBytes(args_addr, sizeof(args)) &&
 	                          LibKernel::Memory::TryReadBacking(args_addr, &args, sizeof(args));
 	if (args_on_host && (args.x == 0 || args.y == 0 || args.z == 0)) {
+		Common::FrameCost::Add(Common::FrameCost::Counter::DispatchesSkipped);
 		return true;
 	}
 	const auto& cs_regs = buffer.GetShaders().GetCs();
 	if (cs_regs.cs_regs.data_addr == 0) {
+		Common::FrameCost::Add(Common::FrameCost::Counter::DispatchesSkipped);
 		return true;
 	}
 	ShaderComputeInputInfo input_info {};
 	input_info.async_compute = async_compute;
 	input_info.indirect_args_address = args_addr;
+	DispatchStepSample sample;
 	m_context.GetImageHeap().BeginDraw();
 	bool pending = false;
 	if (!m_context.GetPipelineCache().GetComputeProgram(cs_regs, input_info,
 	                                                    allow_async ? &pending : nullptr)) {
+		if (!pending) Common::FrameCost::Add(Common::FrameCost::Counter::DispatchesSkipped);
 		return !pending;
 	}
+	sample.clock.AddTo(sample.program_ns);
 	if (allow_async && !m_context.GetPipelineCache().EnsureComputePipeline(input_info, pending)) {
 		if (pending && Config::AsyncComputeWaitMs() != 0) {
 			m_pending_uses = ComputeBufferUses(input_info.stage);
 		}
+		if (!pending) Common::FrameCost::Add(Common::FrameCost::Counter::DispatchesSkipped);
 		return !pending;
 	}
 	// The argument buffer is an input of the dispatch: a skipped producer's counts are stale.
 	if (allow_async &&
 	    SkipOnTaintedInput(m_skip_taint, input_info.stage,
 	                       {{args_addr, sizeof(vk::DispatchIndirectCommand), true, false}})) {
+		Common::FrameCost::Add(Common::FrameCost::Counter::DispatchesSkipped);
 		return true;
 	}
 	if (args_on_host) {
@@ -1109,11 +1168,13 @@ bool RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 		                       final_groups, mode, args_addr, "indirect")) {
 			m_pending_uses = ComputeBufferUses(input_info.stage);
 			TaintSkippedDispatch();
+			Common::FrameCost::Add(Common::FrameCost::Counter::DispatchesSkipped);
 			return true;
 		}
 	}
 	buffer.EndRendering();
 	auto& pipeline = m_context.GetPipelineCache().GetComputePipeline(input_info);
+	sample.clock.AddTo(sample.pipeline_ns);
 	auto& bindings = m_compute_bindings;
 	PrepareBindings(input_info.stage, bindings);
 	PreparedBindings* descriptor_stage = &bindings;
@@ -1136,6 +1197,7 @@ bool RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 	const auto [args_buffer, args_offset] = m_context.GetBufferCache().ObtainBuffer(
 	    args_addr, sizeof(vk::DispatchIndirectCommand), false);
 	EXIT_IF((args_offset & 3u) != 0);
+	sample.clock.AddTo(sample.bind_ns);
 	// Temporary workaround: counts the GPU wrote are checked on the GPU (dispatchGuard.h).
 	vk::Buffer indirect_buffer = args_buffer->Handle();
 	uint64_t   indirect_offset = args_offset;
@@ -1146,11 +1208,14 @@ bool RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 		}
 		std::tie(indirect_buffer, indirect_offset) =
 		    m_dispatch_guard->Record(buffer, *args_buffer, args_offset, args_addr);
+		Common::FrameCost::Add(Common::FrameCost::Counter::DispatchesGuard);
 	}
+	sample.clock.AddTo(sample.guard_ns);
 	RebindBuffers(bindings);
 	if (buffer_probe) {
 		GetBufferProbe().Record(m_context, buffer, program.shader_hash, bindings, probe_states);
 	}
+	sample.clock.AddTo(sample.bind_ns);
 	CommitBindings(buffer, vk::PipelineBindPoint::eCompute, pipeline,
 	               std::span {&descriptor_stage, 1u});
 	const auto vk_buffer = buffer.Handle();
@@ -1159,6 +1224,7 @@ bool RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 	if (writes_memory) {
 		ShaderWriteHazardBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
 	}
+	sample.clock.AddTo(sample.commit_ns);
 	vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.pipeline);
 	OpBreadcrumb dispatch_op {};
 	dispatch_op.kind        = BreadcrumbOpKind::DispatchIndirect;
@@ -1172,8 +1238,12 @@ bool RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 	graphics.breadcrumbs.EndOp(graphics, vk_buffer, marker_id);
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::Dispatches);
 	Common::FrameCost::Add(Common::FrameCost::Counter::Dispatches);
+	if (program.info.bvh) {
+		Common::FrameCost::Add(Common::FrameCost::Counter::BvhDispatches);
+	}
 	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader, writes_memory);
 	ResetBindings();
+	sample.Commit();
 	return true;
 }
 

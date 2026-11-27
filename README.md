@@ -11,6 +11,32 @@
 
 **[Development on Discord](https://discord.gg/UNrkMqGaBg)** — KytyPS5 development.
 
+## About this fork
+
+This is a fork of [KytyPS5/KytyPS5](https://github.com/KytyPS5/KytyPS5), default branch `bringup`. It
+tracks upstream `main` and adds bring-up fixes for demanding titles on Linux with AMD GPUs (RADV), plus
+a debugging stack meant to make every run report as much as possible. It is experimental: expect slow
+frames and rendering errors. Anything that proves itself here is meant to go upstream.
+
+What is added on top of upstream:
+
+- **Keep-going mode** (`--keep-going`): fatal errors are logged with a host backtrace and skipped where
+  possible, so one run surfaces many problems instead of the first one.
+- **Switchable fixes** (`--disable-port <names>`): fixes taken from upstream pull requests and other
+  forks can be turned off one by one, each named after its source.
+- **Guards with a log line instead of a GPU hang**: oversized or garbage dispatch counts, runaway shader
+  loops, oversized shader modules (`--max-spirv-words`).
+- **A persistent shader store** with a negative cache, and bounded waits for shaders that are still
+  building (`--async-compute-wait-ms`).
+- **Per-frame cost and memory lines** in the log (`[frame]`, `[fault]`, `[mem]`, `[pipeline-create]`),
+  and a memory limit that names what grew (`--mem-limit-gb`).
+- **Run and triage tools** in [`tools/bringup`](tools/bringup/README.md): a sandboxed run script that
+  collects logs, captures and driver hang dumps per run, and `triage.py`, which turns a log into a ranked
+  summary.
+
+Testing and patches are welcome: open an issue or a pull request on this fork with the triage summary of
+your run. Please do not attach game files, dumps or anything else that is copyrighted.
+
 KytyPS5 is a free and open-source PlayStation 5 translation layer written in C++ for Windows
 and Linux, with experimental macOS support. It is based on a heavily modified version of
 [Kyty](https://github.com/InoriRus/Kyty). The project is in active development, and behavior

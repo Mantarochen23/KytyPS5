@@ -889,6 +889,57 @@ static bool ResolvePrimitiveRestart(const CommandBuffer& buffer,
 	return false;
 }
 
+namespace {
+struct DrawStepSample {
+	Common::FrameCost::StepClock clock;
+	uint64_t                     programs_ns = 0;
+	uint64_t                     targets_ns  = 0;
+	uint64_t                     pipeline_ns = 0;
+	uint64_t                     bind_ns     = 0;
+	uint64_t                     commit_ns   = 0;
+	uint64_t                     record_ns   = 0;
+	bool                         executed    = false;
+
+	explicit DrawStepSample(uint32_t& countdown) noexcept: clock(countdown) {}
+
+	void Commit() noexcept {
+		if (!executed || !clock.Active()) return;
+		clock.AddTo(record_ns);
+		using Common::FrameCost::Counter;
+		Common::FrameCost::Add(Counter::DrawStepSamples);
+		Common::FrameCost::Add(Counter::DrawStepProgramsNs, programs_ns);
+		Common::FrameCost::Add(Counter::DrawStepTargetsNs, targets_ns);
+		Common::FrameCost::Add(Counter::DrawStepPipelineNs, pipeline_ns);
+		Common::FrameCost::Add(Counter::DrawStepBindNs, bind_ns);
+		Common::FrameCost::Add(Counter::DrawStepCommitNs, commit_ns);
+		Common::FrameCost::Add(Counter::DrawStepRecordNs, record_ns);
+		clock.Complete();
+	}
+};
+
+thread_local uint32_t        g_draw_sample_countdown = Common::FrameCost::StepClock::InitialDelay;
+thread_local DrawStepSample* g_draw_sample           = nullptr;
+
+class ScopedDrawSample final {
+public:
+	ScopedDrawSample() noexcept: m_sample(g_draw_sample_countdown), m_previous(g_draw_sample) {
+		if (m_sample.clock.Active()) {
+			g_draw_sample = &m_sample;
+		}
+	}
+	~ScopedDrawSample() {
+		m_sample.Commit();
+		g_draw_sample = m_previous;
+	}
+	ScopedDrawSample(const ScopedDrawSample&)            = delete;
+	ScopedDrawSample& operator=(const ScopedDrawSample&) = delete;
+
+private:
+	DrawStepSample  m_sample;
+	DrawStepSample* m_previous = nullptr;
+};
+} // namespace
+
 bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCallInfo& draw,
                                             DrawRenderState& state) {
 	m_context.GetImageHeap().BeginDraw();
@@ -906,6 +957,7 @@ bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCal
 	                         &ShaderVertexInputInfo::stage)) {
 		return false;
 	}
+	if (g_draw_sample != nullptr) g_draw_sample->clock.AddTo(g_draw_sample->programs_ns);
 	auto& targets       = m_targets;
 	targets.color_count = 0;
 	for (uint32_t slot = 0; slot < RENDER_COLOR_ATTACHMENTS_MAX; slot++) {
@@ -945,8 +997,11 @@ bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCal
 		LogFramebufferSkip(draw.Name(), targets.depth, buffer, draw.index_count, 0);
 		return false;
 	}
+	if (g_draw_sample != nullptr) g_draw_sample->clock.AddTo(g_draw_sample->targets_ns);
 
-	return m_context.GetPipelineCache().EnsureGraphicsPipeline(buffer, state, m_targets);
+	const bool ready = m_context.GetPipelineCache().EnsureGraphicsPipeline(buffer, state, m_targets);
+	if (g_draw_sample != nullptr) g_draw_sample->clock.AddTo(g_draw_sample->pipeline_ns);
+	return ready;
 }
 
 static PreparedIndexBuffer PrepareIndexBuffer(CommandBuffer&               buffer,
@@ -1031,6 +1086,10 @@ static void EmitDrawPrimitives(const HW::UserConfig& ucfg, vk::CommandBuffer vk_
 			break;
 		case Prospero::PrimitiveType::kQuadListLegacy:
 			EXIT_NOT_IMPLEMENTED((draw.index_count & 0x3u) != 0);
+			if (draw.index_count > 4) {
+				Common::FrameCost::Add(Common::FrameCost::Counter::DrawsQuadExtra,
+				                       draw.index_count / 4u - 1u);
+			}
 			for (uint32_t i = 0; i < draw.index_count; i += 4) {
 				if (draw.indexed) {
 					vk_buffer.drawIndexed(4, draw.instance_count, i, emit.vertex_offset,
@@ -1106,6 +1165,7 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 	auto&      ucfg                     = buffer.GetUserConfig();
 	const bool primitive_restart_enable = state.primitive_restart_enable;
 	if (CopyDepthToColor(buffer, draw, emit, state)) {
+		Common::FrameCost::Add(Common::FrameCost::Counter::DrawsSkipped);
 		return;
 	}
 	const auto  vertex_stages = state.VertexStages();
@@ -1133,6 +1193,7 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 	} else if (mesh_active) {
 		const auto primitives = mesh.InputPrimitiveCount(draw.index_count);
 		if (primitives == 0 || draw.instance_count == 0) {
+			Common::FrameCost::Add(Common::FrameCost::Counter::DrawsSkipped);
 			return;
 		}
 		mesh_groups = (primitives - 1u) / mesh.primitives_per_group + 1u;
@@ -1187,7 +1248,9 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 		args_buffer = m_context.GetBufferCache().ObtainBuffer(emit.indirect.address, size, false);
 		EXIT_IF((args_buffer.second & 3u) != 0);
 	}
+	if (g_draw_sample != nullptr) g_draw_sample->clock.AddTo(g_draw_sample->bind_ns);
 	auto& pipeline = m_context.GetPipelineCache().GetGraphicsPipeline(buffer, state, m_targets);
+	if (g_draw_sample != nullptr) g_draw_sample->clock.AddTo(g_draw_sample->pipeline_ns);
 	vk::ImageAspectFlags feedback_aspects;
 	const auto rendering = AcquireRenderTargets(buffer, m_targets.colors, m_targets.color_count,
 	                                            m_targets.depth, feedback_aspects, stages);
@@ -1208,6 +1271,7 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 		auto& stream = m_context.GetBufferCache().GetUtilityBuffer(MemoryUsage::Stream);
 		task_params  = stream.BufferDeviceAddress() + stream.Copy(&params, sizeof(params), 8);
 	}
+	if (g_draw_sample != nullptr) g_draw_sample->clock.AddTo(g_draw_sample->bind_ns);
 
 	// Resource preparation above may synchronously finish and restart the scheduler. From this
 	// point onward, every operation targets the current command buffer and cannot touch guest
@@ -1268,6 +1332,7 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 		buffer.EndRendering();
 		ShaderWriteHazardBarrier(vk_buffer, shader_write_stages);
 	}
+	if (g_draw_sample != nullptr) g_draw_sample->clock.AddTo(g_draw_sample->commit_ns);
 	buffer.BeginRendering(rendering);
 	vk_buffer.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline.pipeline);
 
@@ -1337,6 +1402,7 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 		buffer.EndRendering();
 		ShaderWriteBarrier(vk_buffer, shader_write_stages);
 	}
+	if (g_draw_sample != nullptr) g_draw_sample->executed = true;
 }
 
 // Vulkan offsets for a prepared draw, or nullopt when its indirect records need the CPU:
@@ -1385,16 +1451,19 @@ bool RenderExecutor::DrawIndex(CommandBuffer& buffer, const DrawIndexArgs& args)
 	Common::LockGuard              lock(m_context.GetMutex());
 	lock_wait.Stop();
 	if (args.index_count == 0 || (args.instance_count == 0 && args.indirect.address == 0)) {
+		Common::FrameCost::Add(Common::FrameCost::Counter::DrawsSkipped);
 		return true;
 	}
 
 	if (ConsumeMetadataColorOperation(buffer) || DepthStencilCopy(buffer) ||
 	    ResolveColorTargets(buffer)) {
 		ResetBindings();
+		Common::FrameCost::Add(Common::FrameCost::Counter::DrawsSkipped);
 		return true;
 	}
 
 	if (!DrawHasValidVertexShader(sh_ctx)) {
+		Common::FrameCost::Add(Common::FrameCost::Counter::DrawsSkipped);
 		return true;
 	}
 
@@ -1422,6 +1491,7 @@ bool RenderExecutor::DrawIndex(CommandBuffer& buffer, const DrawIndexArgs& args)
 	DrawRenderState state {.indirect_offsets = args.indirect.offsets,
 	                       .indirect_draw    = args.indirect.address != 0};
 	if (!GetDrawTopology(ucfg, state.topology)) {
+		Common::FrameCost::Add(Common::FrameCost::Counter::DrawsSkipped);
 		return true;
 	}
 
@@ -1450,8 +1520,10 @@ bool RenderExecutor::DrawIndex(CommandBuffer& buffer, const DrawIndexArgs& args)
 	}
 
 	const DrawCallInfo draw {true, args.index_count, args.instance_count};
+	ScopedDrawSample   draw_sample;
 	if (!PrepareDrawRenderState(buffer, draw, state)) {
 		ResetBindings();
+		Common::FrameCost::Add(Common::FrameCost::Counter::DrawsSkipped);
 		return true;
 	}
 
@@ -1478,16 +1550,19 @@ bool RenderExecutor::DrawAuto(CommandBuffer& buffer, const DrawAutoArgs& args) {
 	Common::LockGuard              lock(m_context.GetMutex());
 	lock_wait.Stop();
 	if (args.indirect.address == 0 && (args.vertex_count == 0 || args.instance_count == 0)) {
+		Common::FrameCost::Add(Common::FrameCost::Counter::DrawsSkipped);
 		return true;
 	}
 
 	if (ConsumeMetadataColorOperation(buffer) || DepthStencilCopy(buffer) ||
 	    ResolveColorTargets(buffer)) {
 		ResetBindings();
+		Common::FrameCost::Add(Common::FrameCost::Counter::DrawsSkipped);
 		return true;
 	}
 
 	if (!DrawHasValidVertexShader(sh_ctx)) {
+		Common::FrameCost::Add(Common::FrameCost::Counter::DrawsSkipped);
 		return true;
 	}
 
@@ -1514,10 +1589,13 @@ bool RenderExecutor::DrawAuto(CommandBuffer& buffer, const DrawAutoArgs& args) {
 	                       .indirect_draw    = args.indirect.address != 0};
 	if (!GetDrawTopology(ucfg, state.topology)) {
 		ResetBindings();
+		Common::FrameCost::Add(Common::FrameCost::Counter::DrawsSkipped);
 		return true;
 	}
+	ScopedDrawSample draw_sample;
 	if (!PrepareDrawRenderState(buffer, draw, state)) {
 		ResetBindings();
+		Common::FrameCost::Add(Common::FrameCost::Counter::DrawsSkipped);
 		return true;
 	}
 
@@ -1532,6 +1610,7 @@ bool RenderExecutor::DrawAuto(CommandBuffer& buffer, const DrawAutoArgs& args) {
 			     sh_ctx.GetVs().es_regs.data_addr, sh_ctx.GetVs().gs_regs.data_addr);
 		}
 		ResetBindings();
+		Common::FrameCost::Add(Common::FrameCost::Counter::DrawsSkipped);
 		return true;
 	}
 
