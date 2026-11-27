@@ -242,6 +242,11 @@ void TestLookupCounters() {
 		stats.described++;
 	}
 	Check(!stats.WantsDescription(), "and no more");
+	stats.canonical_checked = 7;
+	stats.canonical_saved   = 4;
+	Check(stats.CanonicalLine() == "[store] canonical: hits that the old key would have missed = 4 "
+	                               "(of 7 stored modules first hit with an old key)",
+	      "the canonical proof line has the documented fields");
 }
 
 } // namespace
