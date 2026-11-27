@@ -72,6 +72,7 @@ struct RuntimeBufferTableCacheEntry {
 	std::array<uint64_t, 2>                         candidate_key {};
 	uint64_t                                        module_id     = 0;
 	uint32_t                                        root_resource = 0;
+	uint64_t                                        reads_key     = 0;
 	std::unique_ptr<Buffer>                         buffer;
 	std::shared_ptr<BufferCache::RuntimeTableState> state;
 	uint64_t                                        built_generation = 0;

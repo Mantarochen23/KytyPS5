@@ -318,7 +318,7 @@ ReportLines FormatWindow(const std::array<uint64_t, CounterCount>& delta, double
 	    "gpu_invalidate_gen_bumps={:.2f} guard_gpu={:.2f} guard_cpu={:.2f} guard_skipped={:.2f} "
 	    "prefetch_scans={:.2f} prefetch_skipped={:.2f} pump={:.2f} pump_skipped={:.2f} "
 	    "table_candidates={:.2f} table_dispatches={:.2f} table_rebuilds={:.2f} "
-	    "timer_sample={} prefetch_backoff={}\n",
+	    "timer_sample={} prefetch_backoff={} table_image_aliased={}\n",
 	    Mean(delta, Counter::BreadcrumbOps, frames),
 	    Mean(delta, Counter::GpuInvalidateCalls, frames),
 	    Mean(delta, Counter::GpuInvalidateSkipped, frames),
@@ -329,7 +329,8 @@ ReportLines FormatWindow(const std::array<uint64_t, CounterCount>& delta, double
 	    Mean(delta, Counter::PumpAsyncSkipped, frames), Mean(delta, Counter::TableCandidates, frames),
 	    Mean(delta, Counter::TableDispatches, frames), Mean(delta, Counter::TableRebuilds, frames),
 	    Config::FrameTimerSample(),
-	    Config::PrefetchBackoffExponent());
+	    Config::PrefetchBackoffExponent(),
+	    delta[static_cast<size_t>(Counter::TableImageAliased)]);
 	const auto total = [&](Counter counter) { return delta[static_cast<size_t>(counter)]; };
 	lines.heap = fmt::format(
 	    "[frame] heap rebinds={:.2f} fast={:.2f} miss_pending={} miss_descriptor_gen={} "

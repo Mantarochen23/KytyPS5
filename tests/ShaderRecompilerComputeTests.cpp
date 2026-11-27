@@ -7921,6 +7921,40 @@ public:
                 cache.WriteStamp(base + 2 * page, page) > high_stamp,
             "a writable table did not preserve GPU ownership and write stamps for later reads");
 
+    // A state registered before its buffers are resolved sees an invalidation that lands while
+    // the build runs, and its write union is set afterwards.
+    {
+      RangeSet dependencies;
+      dependencies.Add(base, page);
+      const auto early = cache.RegisterRuntimeTable(std::move(dependencies));
+      const auto built_from = early->BackingGeneration();
+      cache.InvalidateRuntimeTables(base, page);
+      RangeSet writes;
+      writes.Add(base, page);
+      early->SetWriteRanges(std::move(writes));
+      uint32_t ranges = 0;
+      early->WriteRanges().ForEach([&](uint64_t, uint64_t) { ++ranges; });
+      Require(name, "early registration",
+              early->BackingGeneration() > built_from && ranges == 1,
+              "an invalidation during a build was not recorded against it");
+    }
+
+    // The port off rebuilds on every bind; on, the table is persistent again.
+    {
+      Config::SetDisabledPorts({"runtime-table-cache"});
+      executor.FindBuffers(stages);
+      const auto off_state = bindings.indirect_tables[0].state;
+      executor.FindBuffers(stages);
+      const bool rebuilt_each = bindings.indirect_tables[0].state != off_state;
+      Config::SetDisabledPorts({});
+      executor.FindBuffers(stages);
+      const auto on_state = bindings.indirect_tables[0].state;
+      executor.FindBuffers(stages);
+      Require(name, "port switch",
+              rebuilt_each && bindings.indirect_tables[0].state == on_state,
+              "the runtime-table-cache port did not switch reuse off and on");
+    }
+
     context.UnmapMemory(base, page);
     context.UnmapMemory(base + 2 * page, page);
     scheduler.Finish();
