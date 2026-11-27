@@ -148,7 +148,10 @@ bool ReportAndExit(const Common::HostException::ExceptionInfo& info) {
 	                      std::strstr(g_fault_text, "KytyFaultReportTestNullWrite") != nullptr &&
 	                      frames >= 3;
 	if (!ok) {
+		std::fprintf(stderr, "report length %zu frames %zu pc=%llx:\n", g_fault_length, frames,
+		             static_cast<unsigned long long>(info.exception_address));
 		std::fputs(g_fault_text, stderr);
+		std::fflush(stderr);
 	}
 	std::_Exit(ok ? 0 : 1);
 }
