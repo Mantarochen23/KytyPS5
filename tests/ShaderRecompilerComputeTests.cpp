@@ -7894,9 +7894,10 @@ public:
 
     // Replacing either candidate's backing invalidates the cached BDA table once; the next bind
     // rebuilds it against the merged owner and then becomes stable again.
+    const auto first_buffer_generation = first_state->BufferGeneration();
     (void)cache.FindBuffer(base, 3 * page);
     Require(name, "backing invalidation",
-            first_state->BackingGeneration() > first_generation,
+            first_state->BufferGeneration() > first_buffer_generation,
             "candidate backing replacement did not invalidate the table");
     executor.FindBuffers(stages);
     const auto rebuilt_bda = bindings.indirect_tables[0].table_bda;
