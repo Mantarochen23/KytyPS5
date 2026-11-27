@@ -13516,6 +13516,94 @@ public:
     std::printf("[gpu]     %-32s ok\n", name);
   }
 
+  // A program with GPU-selected calls is stored with its callee code: a restart links the
+  // callees and compiles nothing for the same code, wherever it lies; other code compiles.
+  void CheckCallProgramStore() {
+    constexpr const char* name = "CallProgramStore";
+    constexpr uintptr_t base = 0x0000000204a00000ull;
+    constexpr uint64_t size = 0x10000;
+    constexpr auto table = base + 0x100;
+    constexpr auto first = base + 0x1000;
+    constexpr auto second = base + 0x2000;
+    constexpr auto output = base + 0x4000;
+    // The caller of CheckScalarLeafCall: s[14:15] from the table at +0x20, call, store s20.
+    static std::vector<u32> code{
+        EncodeSMovB32(20, InlineU32(0)),
+        0xbeea03ffu, static_cast<u32>(base), 0xbeeb03ffu, static_cast<u32>(base >> 32u),
+        0xf4080135u, 0xfa000000u, 0xbf8cc07fu, 0xf4240382u, 0xfa000020u,
+        0xbf8cc07fu, 0xbf130e80u, 0xbf840004u, 0xf4240402u, 0xfa000028u,
+        0xbf8cc07fu, 0xbe8e210eu, EncodeVop1(0x01, 1, 20),
+        EncodeMubuf0(0x1c, 0, false), EncodeMubuf1(1, 0, 0)};
+    if (code.back() != EncodeSopp(0x01)) AppendEnd(&code);
+    ShaderMapUserData(reinterpret_cast<uint64_t>(code.data()),
+        {.type = Prospero::ShaderBinaryType::kCs,
+         .code_size_bytes = static_cast<u32>(code.size() * sizeof(u32))});
+    EnsureRuntimeContext();
+    int64_t physical = -1;
+    Require(name, "allocate", LibKernel::Memory::KernelAllocateDirectMemory(
+        0, LibKernel::Memory::KernelGetDirectMemorySize(), size, size, 0, &physical) == 0,
+        "call store fixture allocation failed");
+    void* mapped = reinterpret_cast<void*>(base);
+    Require(name, "map", LibKernel::Memory::KernelMapDirectMemory(
+        &mapped, size, 0x3, 0x10, physical, size) == 0 && mapped == reinterpret_cast<void*>(base),
+        "call store fixture mapping failed");
+    const auto store = std::filesystem::temp_directory_path() /
+                       fmt::format("kyty_call_store_{}",
+                                   std::chrono::steady_clock::now().time_since_epoch().count()) /
+                       "TEST00000.shaders";
+    // One boot: the leaf at `address` returns `value`; result and compute modules compiled.
+    const auto boot = [&](uint64_t address, u32 value) {
+      std::memset(mapped, 0, size);
+      const ShaderBufferResource table_desc{{static_cast<u32>(table),
+          static_cast<u32>(table >> 32u) | (16u << 16u), 8, 0x5204u}};
+      LibKernel::Memory::WriteBacking(base, table_desc.fields, sizeof(table_desc.fields));
+      const std::array leaf{EncodeSMovB32(20, 255), value, EncodeSop1(0x21, 125, 14)};
+      LibKernel::Memory::WriteBacking(address, leaf.data(), sizeof(leaf));
+      const uint64_t target = address | 3u;
+      LibKernel::Memory::WriteBacking(table + 0x20, &target, sizeof(target));
+      RenderContext context(m_runtime_context, store);
+      context.InitializeGpu(nullptr);
+      LibKernel::Memory::InstallGpuResources(&context);
+      u32 actual = 0;
+      context.GetGpu().SendCommandSync([&] {
+        CommandProcessor processor(context, 0);
+        processor.BufferInit();
+        context.MapMemory(base, size);
+        auto& shaders = processor.GetShCtx();
+        shaders.SetCsShader({.data_addr = reinterpret_cast<uint64_t>(code.data()),
+                             .num_thread_x = 1, .num_thread_y = 1, .num_thread_z = 1,
+                             .wave_size = 64, .user_sgpr = 4});
+        ShaderBufferResource out{};
+        out.UpdateAddress48(output);
+        out.fields[2] = 4;
+        out.fields[3] = DstSel(4, 5, 6, 7) |
+            (static_cast<u32>(Prospero::BufferFormat::k32UInt) << 12u);
+        for (u32 i = 0; i < 4; ++i) shaders.SetCsUserSgpr(i, out.fields[i]);
+        processor.DispatchDirect(1, 1, 1, 0x41u);
+        context.GetBufferCache().ReadMemory(output, sizeof(u32));
+        (void)LibKernel::Memory::TryReadBacking(output, &actual, sizeof(actual));
+        context.UnmapMemory(base, size);
+        context.GetCommandScheduler().Finish();
+      });
+      context.ShutdownGpu();
+      LibKernel::Memory::InstallGpuResources(nullptr);
+      const auto compiled = PipelineCacheTestAccess::Compiled(context.GetPipelineCache());
+      return std::pair{actual, compiled[static_cast<size_t>(ShaderType::Compute)]};
+    };
+    Require(name, "cold boot", boot(first, 41) == std::pair{41u, 1u},
+            "the linked program did not run or did not compile once");
+    Require(name, "warm boot", boot(first, 41) == std::pair{41u, 0u},
+            "a restart compiled the linked program again for the same callee code");
+    Require(name, "relocated callee", boot(second, 41) == std::pair{41u, 0u},
+            "the stored module depended on where the callee code lies");
+    Require(name, "other callee code", boot(first, 73) == std::pair{73u, 1u},
+            "another callee code was served by a stored module");
+    Require(name, "both callee sets stored", boot(second, 73) == std::pair{73u, 0u} &&
+                                               boot(first, 41) == std::pair{41u, 0u},
+            "a restart lost one of the callee sets of the program");
+    std::printf("[gpu]     %-32s ok\n", name);
+  }
+
   void CheckScalarLeafCall() {
     constexpr const char* name = "ScalarLeafCall";
     constexpr uintptr_t base = 0x0000000204800000ull;
@@ -59002,6 +59090,7 @@ int main(int argc, char **argv) {
     VulkanHarness vulkan;
     CheckShaderStore(vulkan);
     CheckShaderKeyIndex(vulkan);
+    vulkan.CheckCallProgramStore();
     return 0;
   }
   if (argc == 2 && std::strcmp(argv[1], "--lds-limit-only") == 0) {
