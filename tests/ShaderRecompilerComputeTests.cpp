@@ -4,6 +4,7 @@
 #include "common/recoverable.h"
 #include "common/debugCounters.h"
 #include "common/emulatorConfig.h"
+#include "common/ports.h"
 #include "common/file.h"
 #include "common/hostException.h"
 #include "common/logging/log.h"
@@ -58818,6 +58819,56 @@ void CheckPm4RewindResume(RenderContext &renderer) {
 }
 
 } // namespace
+
+// Programs with indirect descriptor tables; run in both resource layouts by
+// --canonical-equivalence-only.
+static void RunIndirectBufferSuite(VulkanHarness &vulkan) {
+  RunCase(&vulkan, ScalarBufferFromLoopReadlane(32));
+  RunCase(&vulkan, ScalarBufferFromLoopReadlane(64));
+  CheckBoundedFormattedBufferCopy(vulkan);
+  RunCase(&vulkan, BufferStoreWorkgroupDescriptors(2u, 4u));
+  for (u32 groups : {1u, 3u}) RunCase(&vulkan, BufferStoreWorkgroupDescriptors(groups, 2u));
+  for (u32 groups : {1u, 2u}) RunCase(&vulkan, BufferStoreWorkgroupDescriptors(groups));
+  CheckFiniteBufferSelection(vulkan);
+  CheckIndirectBufferStore(vulkan);
+  CheckBoundedRecordBufferAccess(vulkan);
+  CheckGpuSelectedRecordBufferAccess(vulkan);
+  CheckGuardedWaterfallBufferRecords(vulkan);
+  CheckGpuSelectedFormattedRecordStore(vulkan);
+  CheckRuntimeBufferRecords(vulkan);
+  CheckSharedIndirectBufferLoads(vulkan);
+  RunCase(&vulkan, BufferLoadFormatXGpuSelectedDescriptors());
+  RunCase(&vulkan, BufferLoadFormatXGpuSelectedDescriptors64());
+  RunCase(&vulkan, BufferLoadFormatXRejectsPartialRecord());
+  RunCase(&vulkan, BufferLoadFormatXyRejectsPartialRecord());
+  RunCase(&vulkan, BufferLoadDwordx4SnapshotsOverlappingAddress());
+  RunCase(&vulkan, BufferLoadDwordx4ZeroesOnlyOutOfBoundsTail());
+  RunCase(&vulkan, BufferLoadDwordIdxenUsesDescriptorStride());
+  RunCase(&vulkan, BufferStoreFormatXAddTidUsesLaneIndex());
+  RunCase(&vulkan, FlatVirtualAddressRebasesGuestAllocation());
+}
+
+static void RunIndirectImageSuite(VulkanHarness &vulkan) {
+  vulkan.CheckNullTextureDescriptors();
+  CheckCountedRowImageSelector(vulkan);
+  CheckPointerImageTable(vulkan);
+  CheckWorkgroupDividedImageTable(vulkan);
+  CheckWaterfallFloorImageTable(vulkan);
+  CheckMixedDimensionImageTable(vulkan);
+  CheckClampedSiblingImageTable(vulkan);
+  CheckLaneCountedImageTable(vulkan);
+  CheckGuardedSelectorImageTable(vulkan);
+  CheckInclusiveGuardImageTable(vulkan);
+  CheckNestedPointerImageTable(vulkan);
+  CheckGuardedRecordImageTable(vulkan);
+  CheckIndirectImageKeySwitch(vulkan);
+  vulkan.CheckResidentImageHeap();
+  CheckFiniteFirstLaneImageChoice(vulkan);
+  CheckFiniteInlineSamplerPhi(vulkan);
+  CheckSamplerCandidateTables(vulkan);
+  RunCase(&vulkan, ImageCubeGradientsPreserveDerivatives());
+}
+
 } // namespace Libs::Graphics
 
 int main(int argc, char **argv) {
@@ -59330,29 +59381,22 @@ int main(int argc, char **argv) {
   }
   if (argc == 2 && std::strcmp(argv[1], "--indirect-buffer-only") == 0) {
     VulkanHarness vulkan;
-    RunCase(&vulkan, ScalarBufferFromLoopReadlane(32));
-    RunCase(&vulkan, ScalarBufferFromLoopReadlane(64));
-    CheckBoundedFormattedBufferCopy(vulkan);
-    RunCase(&vulkan, BufferStoreWorkgroupDescriptors(2u, 4u));
-    for (u32 groups : {1u, 3u}) RunCase(&vulkan, BufferStoreWorkgroupDescriptors(groups, 2u));
-    for (u32 groups : {1u, 2u}) RunCase(&vulkan, BufferStoreWorkgroupDescriptors(groups));
-    CheckFiniteBufferSelection(vulkan);
-    CheckIndirectBufferStore(vulkan);
-    CheckBoundedRecordBufferAccess(vulkan);
-    CheckGpuSelectedRecordBufferAccess(vulkan);
-    CheckGuardedWaterfallBufferRecords(vulkan);
-    CheckGpuSelectedFormattedRecordStore(vulkan);
-    CheckRuntimeBufferRecords(vulkan);
-    CheckSharedIndirectBufferLoads(vulkan);
-    RunCase(&vulkan, BufferLoadFormatXGpuSelectedDescriptors());
-    RunCase(&vulkan, BufferLoadFormatXGpuSelectedDescriptors64());
-    RunCase(&vulkan, BufferLoadFormatXRejectsPartialRecord());
-    RunCase(&vulkan, BufferLoadFormatXyRejectsPartialRecord());
-    RunCase(&vulkan, BufferLoadDwordx4SnapshotsOverlappingAddress());
-    RunCase(&vulkan, BufferLoadDwordx4ZeroesOnlyOutOfBoundsTail());
-    RunCase(&vulkan, BufferLoadDwordIdxenUsesDescriptorStride());
-    RunCase(&vulkan, BufferStoreFormatXAddTidUsesLaneIndex());
-    RunCase(&vulkan, FlatVirtualAddressRebasesGuestAllocation());
+    RunIndirectBufferSuite(vulkan);
+    return 0;
+  }
+  if (argc == 2 && std::strcmp(argv[1], "--canonical-equivalence-only") == 0) {
+    // The same programs through the old and the canonical resource layout must give the same
+    // results (port canonical-resources changes the generated SPIR-V, not what it computes).
+    CheckImageSamplerSpecialization();
+    VulkanHarness vulkan;
+    for (const bool canonical : {false, true}) {
+      Config::SetDisabledPorts(canonical ? std::vector<std::string>{}
+                                         : std::vector<std::string>{"canonical-resources"});
+      std::printf("[canonical] layout %s\n", canonical ? "canonical" : "old");
+      RunIndirectBufferSuite(vulkan);
+      RunIndirectImageSuite(vulkan);
+    }
+    Config::SetDisabledPorts({});
     return 0;
   }
   if (argc == 2 && std::strcmp(argv[1], "--image-sample-offset-only") == 0) {
@@ -60032,24 +60076,7 @@ int main(int argc, char **argv) {
   if (argc == 2 && std::strcmp(argv[1], "--indirect-image-only") == 0) {
     CheckImageSamplerSpecialization();
     VulkanHarness vulkan;
-    vulkan.CheckNullTextureDescriptors();
-    CheckCountedRowImageSelector(vulkan);
-    CheckPointerImageTable(vulkan);
-    CheckWorkgroupDividedImageTable(vulkan);
-    CheckWaterfallFloorImageTable(vulkan);
-    CheckMixedDimensionImageTable(vulkan);
-    CheckClampedSiblingImageTable(vulkan);
-    CheckLaneCountedImageTable(vulkan);
-    CheckGuardedSelectorImageTable(vulkan);
-    CheckInclusiveGuardImageTable(vulkan);
-    CheckNestedPointerImageTable(vulkan);
-    CheckGuardedRecordImageTable(vulkan);
-    CheckIndirectImageKeySwitch(vulkan);
-    vulkan.CheckResidentImageHeap();
-    CheckFiniteFirstLaneImageChoice(vulkan);
-    CheckFiniteInlineSamplerPhi(vulkan);
-    CheckSamplerCandidateTables(vulkan);
-    RunCase(&vulkan, ImageCubeGradientsPreserveDerivatives());
+    RunIndirectImageSuite(vulkan);
     return 0;
   }
   if (argc == 2 && std::strcmp(argv[1], "--readlane-key-guard-only") == 0) {

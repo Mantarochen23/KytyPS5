@@ -890,6 +890,8 @@ if(BUILD_TESTING)
 	add_test(NAME vr_tracker2 COMMAND $<TARGET_FILE:vr_tracker2_tests>)
 	add_test(NAME user_service COMMAND $<TARGET_FILE:user_service_tests>)
 	add_test(NAME shader_recompiler_compute COMMAND $<TARGET_FILE:shader_recompiler_compute_tests>)
+	add_test(NAME shader_recompiler_canonical_equivalence
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --canonical-equivalence-only)
 	add_test(NAME shader_recompiler_tessellation
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --tessellation-only)
 	add_test(NAME shader_recompiler_float_min_max

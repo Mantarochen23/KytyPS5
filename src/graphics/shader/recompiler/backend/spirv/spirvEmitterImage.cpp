@@ -692,8 +692,10 @@ auto EmitImageAccess(ValueEmitContext& ctx, const IR::Inst& inst, uint32_t resul
 			return emit(image.indirect_resources[kind + 1u], element);
 		};
 		return EmitIndexSwitch(state,
-		                       Binary(state, spv::OpShiftRightLogical, TypeU32(state), entry,
-		                              ConstantU32(state, IR::ImageHeapKindShift)),
+		                       EmitImageHeapArm(state,
+		                                        Binary(state, spv::OpShiftRightLogical, TypeU32(state),
+		                                               entry, ConstantU32(state, IR::ImageHeapKindShift)),
+		                                        image.indirect_mapping_offset, kinds),
 		                       kinds, result_type, EmitKind);
 	}
 	const auto selected = EmitIndirectResourceIndex(

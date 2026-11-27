@@ -30,6 +30,15 @@ namespace Libs::Graphics::ShaderRecompiler::IR {
 constexpr uint32_t MaxIndirectDescriptorProbes = 65536u;
 // A bounded table V# is scanned row by row on the host; only distinct descriptors become resources.
 constexpr uint32_t MaxIndirectScalarTableRows = 262144u;
+// Canonical resource specialization (port canonical-resources): an indirect root's
+// indirect_mapping_offset is IndirectMappingHeader | slot, and flattened_srt[slot] holds the offset
+// of its mapping, so a module does not depend on the lengths of the tables before it. The slot
+// follows from the plan alone (see MaterializeResources). A sparse mapping searched with
+// IndirectSearchRuntime iterations is bounded by its key count at run time instead of an unrolled
+// bit_width(key_count), and a resident heap's mapping carries one word per heap arm after its
+// three words that gives the arm's position in the canonical kind order.
+constexpr uint32_t IndirectMappingHeader = 0x80000000u;
+constexpr uint32_t IndirectSearchRuntime = UINT32_MAX;
 
 enum class ResourceKind {
 	None,
