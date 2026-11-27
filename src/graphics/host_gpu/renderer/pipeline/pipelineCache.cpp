@@ -2070,21 +2070,23 @@ void PipelineCache::GetGraphicsPrograms(const CommandBuffer& command, DrawRender
 	                           depth_control.z_enable && depth_control.z_write_enable;
 	// While the frame stands still the redraw history cannot grow (asyncPlan.h, FrameStallTracker):
 	// after --defer-new-targets-on-stall-ms the other draws may be skipped as well.
-	bool stall_deferrable = false;
-	if (m_async != nullptr && !redrawn && !gbuffer_pass) {
+	// Off (0, the default) it is a no-op: no tracker update and no clock read.
+	bool           stall_deferrable = false;
+	const uint32_t stall_ms         = Config::DeferNewTargetsOnStallMs();
+	if (stall_ms != 0 && m_async != nullptr && !redrawn && !gbuffer_pass) {
 		using Change   = AsyncPlan::FrameStallTracker::Change;
 		auto&  tracker = m_async->frame_stall;
 		Change change  = Change::None;
-		stall_deferrable = tracker.Update(CurrentFrame(), RenderActivity::NowMs(),
-		                                  Config::DeferNewTargetsOnStallMs(), &change);
+		stall_deferrable = tracker.Update(CurrentFrame(), RenderActivity::NowMs(), stall_ms, &change);
 		if (change == Change::Started) {
 			std::printf("[async] no frame for %u ms (frame %" PRIu64 "): draws into targets not seen "
 			            "redrawn are skipped while their shaders build "
 			            "(--defer-new-targets-on-stall-ms)\n",
-			            Config::DeferNewTargetsOnStallMs(), tracker.frame);
+			            stall_ms, tracker.frame);
 		} else if (change == Change::Ended) {
 			std::printf("[async] frame %" PRIu64 " recorded after the stall: %" PRIu64
-			            " draws into targets not seen redrawn were let through (%" PRIu64 " in all)\n",
+			            " draws into targets not seen redrawn were skipped while their shaders built (%" PRIu64
+			            " in all)\n",
 			            tracker.frame, tracker.deferred, tracker.deferred_total);
 		}
 	}
@@ -2140,6 +2142,9 @@ void PipelineCache::GetGraphicsPrograms(const CommandBuffer& command, DrawRender
 		} else {
 			FrameHoles::NoteDrawSkip(FrameHoles::DrawSkipReason::FailedShader, collect_targets());
 		}
+		// Only the stall made this draw skippable (redrawn targets and G-buffer passes never get
+		// here with stall_deferrable set).
+		if (stall_deferrable) m_async->frame_stall.NoteDeferred();
 	}
 }
 

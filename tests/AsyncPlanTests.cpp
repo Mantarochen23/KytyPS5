@@ -288,13 +288,19 @@ void TestFrameStallTracker() {
 	// The same frame for 2 s: the stall starts once.
 	Check(s.Update(2, 3'500, 2'000, &c) && c == Change::Started, "stall starts at the limit");
 	Check(s.Update(2, 9'000, 2'000, &c) && c == Change::None, "stall goes on");
-	Check(s.deferred == 2 && s.deferred_total == 2, "draws counted while stalled");
+	// Only draws that were actually skipped are counted, not every draw seen during the stall.
+	Check(s.deferred == 0 && s.deferred_total == 0, "Update alone counts nothing");
+	s.NoteDeferred();
+	s.NoteDeferred();
+	Check(s.deferred == 2 && s.deferred_total == 2, "skipped draws counted");
 	// The next frame ends it and resets the clock.
 	Check(!s.Update(3, 9'100, 2'000, &c) && c == Change::Ended, "stall ends with the next frame");
 	Check(s.deferred == 2, "the ended stall keeps its count for the log line");
 	Check(!s.Update(3, 11'000, 2'000, &c) && c == Change::None, "new frame clock");
 	Check(s.Update(3, 11'100, 2'000, &c) && c == Change::Started, "second stall");
-	Check(s.deferred == 1 && s.deferred_total == 3, "second stall counted afresh");
+	Check(s.deferred == 0 && s.deferred_total == 2, "second stall starts its count afresh");
+	s.NoteDeferred();
+	Check(s.deferred == 1 && s.deferred_total == 3, "second stall counted");
 	// A clock that goes backwards does not count as a stall.
 	AsyncPlan::FrameStallTracker b;
 	Check(!b.Update(1, 5'000, 2'000, &c), "first");
