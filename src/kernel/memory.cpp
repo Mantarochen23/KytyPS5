@@ -172,6 +172,7 @@ static std::atomic<uint64_t> g_test_free_range_visits {0};
 static std::recursive_mutex g_memory_operation_mutex;
 static std::shared_mutex    g_memory_state_mutex;
 
+#include "common/memAccount.h"
 #include "memoryAddressSpace.inc"
 
 enum class VirtualRangeType {

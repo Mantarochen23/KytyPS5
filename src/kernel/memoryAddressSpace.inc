@@ -78,6 +78,7 @@ public:
 			EXIT("direct-memory backing: writable alias failed: %d\n", errno);
 		}
 		m_backing_base = static_cast<uint8_t*>(backing);
+		Common::MemAccount::NoteGuestBacking(m_size);
 #endif
 	}
 

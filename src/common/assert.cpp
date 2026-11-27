@@ -1,5 +1,6 @@
 #include "common/assert.h"
 
+#include "common/memAccount.h"
 #include "common/subsystems.h"
 #include "kytyGitVersion.h"
 
@@ -68,6 +69,7 @@ RecoverHook SetThreadRecoverHook(RecoverHook hook) {
 		std::fflush(nullptr);
 		std::abort(); // Leaves a core dump for the debugger; skips the orderly shutdown.
 	}
+	MemAccount::NoteExitReason("fatal");
 	Subsystems::EmergencyShutdownActive();
 	std::fflush(nullptr);
 	std::_Exit(321);

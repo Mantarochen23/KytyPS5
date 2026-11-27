@@ -1,6 +1,7 @@
 #include "graphics/host_gpu/pageManager.h"
 
 #include "common/alignment.h"
+#include "common/memAccount.h"
 #include "common/virtualMemory.h"
 #include "graphics/host_gpu/faultStats.h"
 #include "graphics/host_gpu/regionDefinitions.h"
@@ -46,6 +47,7 @@ constexpr uint64_t REGION_PAGES = REGION_SIZE / PAGE_SIZE;
 	va_end(args);
 	std::fputc('\n', stderr);
 	std::fflush(stderr);
+	Common::MemAccount::PrintExit("page-manager-fatal");
 	std::_Exit(322);
 }
 

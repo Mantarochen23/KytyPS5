@@ -621,6 +621,7 @@ void PipelineCache::DrainWarmUp() {
 		for (const auto handle: loader.orphans) m_graphics.device.destroyShaderModule(handle, nullptr);
 		// The cache holds copies of the loaded modules and owns their handles.
 		m_warmup.reset();
+		Common::MemAccount::TrimHeap("store-load-background");
 		CheckpointDriverCache();
 	}
 }
@@ -933,6 +934,7 @@ void PipelineCache::WarmUp(const std::filesystem::path& path) {
 	    frames_ns / 1'000'000u, times.decode.load() / 1'000'000u, times.plans.load() / 1'000'000u,
 	    times.modules.load() / 1'000'000u, times.pipelines.load() / 1'000'000u, threads,
 	    Nanoseconds(start) / 1'000'000u, m_use_rank.size()));
+	Common::MemAccount::TrimHeap("store-load");
 
 	if (modules_left != 0 || pipelines_left != 0) {
 		Log::WriteToConsoleAndLog(fmt::format(

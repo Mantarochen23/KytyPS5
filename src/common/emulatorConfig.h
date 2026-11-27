@@ -197,6 +197,13 @@ struct ConfigOptions {
 	// words) and ~6x below the 11.5-13.8M-word modules that crash the driver.
 	static constexpr uint32_t DefaultMaxSpirvWords      = 2'000'000u;
 	uint32_t                 max_spirv_words            = DefaultMaxSpirvWords;
+	// --heap-tune <n>: at start cap the native allocator at n arenas (instead of 8 per core), return
+	// freed memory to the system sooner and serve large blocks from mmap; trim the heap at the end of
+	// the store load and of each build burst. 0 = the allocator's defaults.
+	uint32_t                 heap_tune_arenas           = 0;
+	// --driver-cache-cap-mb <n>: a driver pipeline cache file larger than n MB is not loaded (the run
+	// starts empty and saves only what it creates), and one that grows past it is not saved. 0 = no cap.
+	uint32_t                 driver_cache_cap_mb        = 0;
 };
 
 void Load(const ConfigOptions& cfg);
@@ -321,6 +328,8 @@ uint32_t MemLimitGb();
 uint32_t FaultStormFaults();
 uint32_t FaultStormFrames();
 uint32_t FaultStormHold();
+uint32_t HeapTuneArenas();
+uint32_t DriverCacheCapMb();
 uint32_t MaxSpirvWords();
 
 } // namespace Config

@@ -183,7 +183,8 @@ static void PrintUsage() {
 	         "                                       background. 0 = load all first. Default: 0.\n"
 	         "  --spirv-compact                     Run conservative SPIR-V cleanup after emission.\n"
 	         "                                       Default: off.\n"
-	         "  --mem-limit-gb <n>                   When the process's RSS + swap passes n GB, print the\n"
+	         "  --mem-limit-gb <n>                   When the process's real footprint (RSS + swap, the swap\n"
+	         "                                       counted at its compressed size on zram hosts) passes n GB, print the\n"
 	         "                                       [mem] table and drop caches; if still over 10 s later\n"
 	         "                                       stop the run with a message. 0 = off. Default: 0.\n"
 	         "  --fault-storm-faults <n>             A guest page whose write watch faults n times within\n"
@@ -194,7 +195,13 @@ static void PrintUsage() {
 	         "  --fault-storm-hold <n>               Frames a marked page stays unwatched. Default: 60.\n"
 	         "  --max-spirv-words <n>                Refuse any emitted or stored shader module larger than\n"
 	         "                                       n SPIR-V words before it reaches the driver. 0 = off.\n"
-	         "                                       Default: 2000000.\n");
+	         "                                       Default: 2000000.\n"
+	         "  --heap-tune <n>                      Cap the native allocator at n arenas, trim freed memory\n"
+	         "                                       sooner, use mmap for large blocks, and trim after the\n"
+	         "                                       store load and each build burst. 0 = off. Default: 0.\n"
+	         "  --driver-cache-cap-mb <n>            Do not load or save a driver pipeline cache file larger\n"
+	         "                                       than n MB (it restarts from what this run creates).\n"
+	         "                                       0 = no cap. Default: 0.\n");
 }
 
 static bool NextArg(int argc, char* argv[], int& index, std::string& out) {
@@ -681,6 +688,16 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 		} else if (arg == "--max-spirv-words") {
 			if (!ParseUint32(value, options.config.max_spirv_words)) {
 				::printf("invalid max SPIR-V words value: %s\n", value.c_str());
+				return false;
+			}
+		} else if (arg == "--heap-tune") {
+			if (!ParseUint32(value, options.config.heap_tune_arenas)) {
+				::printf("invalid heap tune value: %s\n", value.c_str());
+				return false;
+			}
+		} else if (arg == "--driver-cache-cap-mb") {
+			if (!ParseUint32(value, options.config.driver_cache_cap_mb)) {
+				::printf("invalid driver cache cap value: %s\n", value.c_str());
 				return false;
 			}
 		} else {

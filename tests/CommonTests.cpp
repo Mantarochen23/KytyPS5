@@ -696,6 +696,73 @@ TEST(MemAccount, LineNamesEveryOwnerAndTheGap) {
 	          std::string::npos);
 }
 
+TEST(MemAccount, ProcStatusSplitsRss) {
+	const auto memory = Common::MemAccount::ParseProcStatus(
+	    "VmRSS:\t 100 kB\nRssAnon:\t 60 kB\nRssFile:\t 30 kB\nRssShmem:\t 10 kB\n");
+	EXPECT_EQ(memory.rss_anon, 60u * 1024u);
+	EXPECT_EQ(memory.rss_file, 30u * 1024u);
+	EXPECT_EQ(memory.rss_shmem, 10u * 1024u);
+}
+
+TEST(MemAccount, MallocInfoGivesArenasAndSkipsTheTotals) {
+	const char* xml =
+	    "<malloc version=\"1\">\n<heap nr=\"0\">\n<sizes>\n<size from=\"17\" to=\"32\" total=\"32\" "
+	    "count=\"1\"/>\n</sizes>\n<total type=\"fast\" count=\"2\" size=\"100\"/>\n<total type=\"rest\" "
+	    "count=\"3\" size=\"900\"/>\n<system type=\"current\" size=\"4096\"/>\n<system type=\"max\" "
+	    "size=\"8192\"/>\n</heap>\n<heap nr=\"3\">\n<total type=\"fast\" count=\"0\" size=\"0\"/>\n"
+	    "<total type=\"rest\" count=\"1\" size=\"50\"/>\n<system type=\"current\" size=\"2048\"/>\n</heap>\n"
+	    "<total type=\"fast\" count=\"2\" size=\"100\"/>\n<total type=\"mmap\" count=\"1\" size=\"7\"/>\n"
+	    "</malloc>\n";
+	const auto arenas = Common::MemAccount::ParseMallocInfo(xml);
+	ASSERT_EQ(arenas.size(), 2u);
+	EXPECT_EQ(arenas[0].nr, 0u);
+	EXPECT_EQ(arenas[0].free_bytes, 1000u);
+	EXPECT_EQ(arenas[0].system_bytes, 4096u);
+	EXPECT_EQ(arenas[1].nr, 3u);
+	EXPECT_EQ(arenas[1].free_bytes, 50u);
+	EXPECT_EQ(arenas[1].system_bytes, 2048u);
+	EXPECT_TRUE(Common::MemAccount::ParseMallocInfo("").empty());
+}
+
+TEST(MemAccount, ZramCountsSwapAtItsCompressedCost) {
+	const auto zram = Common::MemAccount::ParseZramMmStat(
+	    "8000 2000 2400 0 3000 5 0 0 0\n");
+	EXPECT_TRUE(zram.known);
+	EXPECT_EQ(zram.orig, 8000u);
+	EXPECT_EQ(zram.compressed, 2400u);
+	Common::MemAccount::ProcessMemory process;
+	process.rss  = 1000;
+	process.swap = 1000;
+	EXPECT_EQ(Common::MemAccount::Footprint(process, zram), 1300u); // 1000 + 1000 * 2400/8000
+	EXPECT_EQ(Common::MemAccount::Footprint(process, {}), 2000u);   // no zram: rss + swap
+	EXPECT_FALSE(Common::MemAccount::ParseZramMmStat("garbage").known);
+}
+
+TEST(MemAccount, GrowthNamesTheBiggestHolders) {
+	const std::vector<std::pair<std::string, uint64_t>> before {
+	    {"heap-in-use", 100ull << 20}, {"rss-shmem(guest)", 50ull << 20}, {"ir-table", 10ull << 20}};
+	const std::vector<std::pair<std::string, uint64_t>> after {
+	    {"heap-in-use", 400ull << 20}, {"rss-shmem(guest)", 50ull << 20}, {"ir-table", 30ull << 20},
+	    {"new-owner", 5ull << 20}};
+	const auto text = Common::MemAccount::FormatGrowth(before, after, 2);
+	EXPECT_EQ(text, "heap-in-use +300MiB, ir-table +20MiB");
+	EXPECT_EQ(Common::MemAccount::FormatGrowth(after, before), "nothing");
+}
+
+TEST(MemAccount, LineShowsFootprintArenasAndGuest) {
+	Common::MemAccount::Sample sample;
+	sample.process = {.rss = 3ull << 30, .swap = 1ull << 30};
+	sample.process.rss_shmem = 1ull << 30;
+	sample.zram     = {.known = true, .orig = 4ull << 30, .compressed = 1ull << 30};
+	sample.arenas   = {{0, 100ull << 20, 200ull << 20}, {1, 900ull << 20, 1000ull << 20}};
+	sample.guest_committed = 16ull << 30;
+	const auto line = Common::MemAccount::FormatLine(sample, "now");
+	EXPECT_NE(line.find("footprint=3328MiB"), std::string::npos);
+	EXPECT_NE(line.find("arenas=2 held=1000MiB top: #1=900MiB/1000MiB #0=100MiB/200MiB"),
+	          std::string::npos);
+	EXPECT_NE(line.find("guest: committed=16384MiB touched=1024MiB"), std::string::npos);
+}
+
 TEST(MemAccount, LimitGuardDropsThenStopsOnlyWhileOver) {
 	using Action = Common::MemAccount::LimitGuard::Action;
 	Common::MemAccount::LimitGuard off(0);

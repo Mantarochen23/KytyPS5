@@ -9,6 +9,7 @@
 #include "common/file.h"
 #include "common/ports.h"
 #include "common/logging/log.h"
+#include "common/memAccount.h"
 #include "common/parallelFor.h"
 #include "common/profiler.h"
 #include "common/recoverable.h"
@@ -41,6 +42,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fmt/format.h>
+#include <fstream>
 #include <limits>
 #include <set>
 #include <ranges>
@@ -50,6 +52,12 @@
 #include <utility>
 #include <vector>
 #include <xxhash.h>
+#if defined(__linux__)
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 namespace Libs::Graphics {
 
@@ -1409,6 +1417,80 @@ PipelineCache::~PipelineCache() {
 	m_graphics.device.destroyPipelineCache(m_driver_cache, nullptr);
 }
 
+
+namespace {
+
+// A driver cache file mapped read-only. `payload` is the part after the signature and hash.
+struct DriverCacheFile {
+	const uint8_t* data         = nullptr;
+	size_t         size         = 0;
+	const uint8_t* payload      = nullptr;
+	size_t         payload_size = 0;
+	std::vector<uint8_t> owned; // where the platform has no mapping: the file read into memory
+
+	DriverCacheFile() = default;
+	DriverCacheFile(const DriverCacheFile&)            = delete;
+	DriverCacheFile& operator=(const DriverCacheFile&) = delete;
+	DriverCacheFile& operator=(DriverCacheFile&& other) noexcept {
+		Release();
+		owned = std::move(other.owned);
+		data = std::exchange(other.data, nullptr);
+		size = std::exchange(other.size, 0);
+		payload = std::exchange(other.payload, nullptr);
+		payload_size = std::exchange(other.payload_size, 0);
+		return *this;
+	}
+	~DriverCacheFile() { Release(); }
+	void Release() {
+#if defined(__linux__)
+		if (data != nullptr) {
+			munmap(const_cast<uint8_t*>(data), size);
+		}
+#endif
+		owned.clear();
+		owned.shrink_to_fit();
+		data = nullptr;
+		size = 0;
+		payload = nullptr;
+		payload_size = 0;
+	}
+};
+
+DriverCacheFile MapDriverCacheFile(const std::filesystem::path& path) {
+	DriverCacheFile result;
+#if defined(__linux__)
+	const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+	if (fd < 0) {
+		return result;
+	}
+	struct stat info {};
+	if (fstat(fd, &info) == 0 && info.st_size > 0) {
+		void* map = mmap(nullptr, static_cast<size_t>(info.st_size), PROT_READ, MAP_PRIVATE, fd, 0);
+		if (map != MAP_FAILED) {
+			result.data = static_cast<const uint8_t*>(map);
+			result.size = static_cast<size_t>(info.st_size);
+		}
+	}
+	::close(fd);
+#else
+	// Elsewhere the file is read into memory that this object owns.
+	std::ifstream file(path, std::ios::binary | std::ios::ate);
+	if (file) {
+		const auto length = static_cast<size_t>(file.tellg());
+		result.owned.resize(length);
+		file.seekg(0);
+		file.read(reinterpret_cast<char*>(result.owned.data()), static_cast<std::streamsize>(length));
+		if (file) {
+			result.data = result.owned.data();
+			result.size = length;
+		}
+	}
+#endif
+	return result;
+}
+
+} // namespace
+
 void PipelineCache::InitializeDriverCache() {
 	const auto title_id = PipelineCacheTitleId();
 	if (title_id.empty()) {
@@ -1426,59 +1508,71 @@ void PipelineCache::InitializeDriverCache() {
 	} else {
 		PipelineCacheLog("Vulkan pipeline cache: initializing {}", path);
 	}
-	std::vector<uint8_t> initial_data;
-	if (cache_exists) {
-		Common::File file(m_driver_cache_path, Common::File::Mode::Read);
-		const auto   file_size = file.IsInvalid() ? 0 : file.Size();
-		const auto   signature = DriverCacheSignature(m_graphics.GetPhysicalDeviceProperties());
-		if (file_size >= signature.size() + sizeof(uint64_t) &&
-		    file_size <= std::numeric_limits<uint32_t>::max()) {
-			std::string cached_signature(signature.size(), '\0');
-			uint64_t    payload_hash = 0;
-			initial_data.resize(file_size - signature.size() - sizeof(payload_hash));
-			uint32_t signature_read = 0;
-			uint32_t hash_read      = 0;
-			uint32_t payload_read   = 0;
-			file.Read(cached_signature.data(), static_cast<uint32_t>(cached_signature.size()),
-			          &signature_read);
-			file.Read(&payload_hash, sizeof(payload_hash), &hash_read);
-			file.Read(initial_data.data(), static_cast<uint32_t>(initial_data.size()),
-			          &payload_read);
-			file.Close();
-			if (signature_read != cached_signature.size() || hash_read != sizeof(payload_hash) ||
-			    payload_read != initial_data.size() || cached_signature != signature ||
-			    XXH3_64bits(initial_data.data(), initial_data.size()) != payload_hash) {
-				initial_data.clear();
-				PipelineCacheLog(
-				    "Vulkan pipeline cache: invalidating {} (driver or data mismatch)",
-				    path);
-			}
-		} else {
-			file.Close();
-			PipelineCacheLog("Vulkan pipeline cache: invalidating {} (invalid file size)", path);
+	// A save that was cut short leaves its temporary file; it is never read, so remove it.
+	{
+		auto stale = m_driver_cache_path;
+		stale += ".tmp";
+		std::error_code stale_error;
+		if (std::filesystem::remove(stale, stale_error)) {
+			PipelineCacheLog("Vulkan pipeline cache: removed a stale temporary file {}",
+			                 Common::PathToString(stale));
 		}
 	}
+	// The file is mapped, not read into the heap: the driver copies what it keeps, so a heap buffer
+	// would be a second full copy for as long as it lives. Mapped pages are file cache the kernel can
+	// drop, and the mapping is released as soon as the cache object exists.
+	const size_t cap_bytes = static_cast<size_t>(Config::DriverCacheCapMb()) * 1'000'000u;
+	DriverCacheFile mapped;
+	if (cache_exists) {
+		const auto signature = DriverCacheSignature(m_graphics.GetPhysicalDeviceProperties());
+		mapped               = MapDriverCacheFile(m_driver_cache_path);
+		const auto prefix    = signature.size() + sizeof(uint64_t);
+		if (mapped.data == nullptr || mapped.size < prefix || mapped.size > std::numeric_limits<uint32_t>::max()) {
+			PipelineCacheLog("Vulkan pipeline cache: invalidating {} (invalid file size)", path);
+			mapped.Release();
+		} else if (cap_bytes != 0 && mapped.size > cap_bytes) {
+			PipelineCacheLog("Vulkan pipeline cache: {} is {:.2f} MB, over --driver-cache-cap-mb {}; "
+			                 "not loaded, this run starts empty and saves what it creates",
+			                 path, static_cast<double>(mapped.size) / 1'000'000.0,
+			                 Config::DriverCacheCapMb());
+			mapped.Release();
+		} else {
+			uint64_t payload_hash = 0;
+			std::memcpy(&payload_hash, mapped.data + signature.size(), sizeof(payload_hash));
+			mapped.payload      = mapped.data + prefix;
+			mapped.payload_size = mapped.size - prefix;
+			if (std::memcmp(mapped.data, signature.data(), signature.size()) != 0 ||
+			    XXH3_64bits(mapped.payload, mapped.payload_size) != payload_hash) {
+				mapped.Release();
+				PipelineCacheLog(
+				    "Vulkan pipeline cache: invalidating {} (driver or data mismatch)", path);
+			}
+		}
+	}
+	const size_t loaded_size = mapped.payload_size;
 
 	vk::PipelineCacheCreateInfo create {};
-	create.initialDataSize = initial_data.size();
-	create.pInitialData    = initial_data.empty() ? nullptr : initial_data.data();
+	create.initialDataSize = mapped.payload_size;
+	create.pInitialData    = mapped.payload;
 	auto result = m_graphics.device.createPipelineCache(&create, nullptr, &m_driver_cache);
-	if (result != vk::Result::eSuccess && !initial_data.empty()) {
+	if (result != vk::Result::eSuccess && mapped.payload != nullptr) {
 		PipelineCacheLog("Vulkan pipeline cache: driver rejected {} ({}); starting empty", path,
 		                 vk::to_string(result));
-		initial_data.clear();
+		mapped.Release();
 		create.initialDataSize = 0;
 		create.pInitialData    = nullptr;
 		result = m_graphics.device.createPipelineCache(&create, nullptr, &m_driver_cache);
 	}
+	mapped.Release();
+	Common::MemAccount::TrimHeap("driver-cache-load");
 	if (result != vk::Result::eSuccess) {
 		PipelineCacheLog("Vulkan pipeline cache: disabled ({})", vk::to_string(result));
 		m_driver_cache = nullptr;
 		return;
 	}
-	if (!initial_data.empty()) {
+	if (loaded_size != 0) {
 		PipelineCacheLog("Vulkan pipeline cache: loaded {:.2f} MB from {}",
-		                 static_cast<double>(initial_data.size()) / 1'000'000.0, path);
+		                 static_cast<double>(loaded_size) / 1'000'000.0, path);
 	} else {
 		PipelineCacheLog("Vulkan pipeline cache: initialized empty");
 	}
@@ -1534,6 +1628,13 @@ void PipelineCache::WriteDriverCache() const {
 		return;
 	}
 	payload.resize(size);
+	if (const auto cap = static_cast<size_t>(Config::DriverCacheCapMb()) * 1'000'000u;
+	    cap != 0 && payload.size() > cap) {
+		PipelineCacheLog("Vulkan pipeline cache: {:.2f} MB is over --driver-cache-cap-mb {}; not saved "
+		                 "(the next run starts empty)",
+		                 static_cast<double>(payload.size()) / 1'000'000.0, Config::DriverCacheCapMb());
+		return;
+	}
 	auto       prefix       = DriverCacheSignature(m_graphics.GetPhysicalDeviceProperties());
 	const auto payload_hash = XXH3_64bits(payload.data(), payload.size());
 	prefix.append(reinterpret_cast<const char*>(&payload_hash), sizeof(payload_hash));
