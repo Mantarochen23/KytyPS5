@@ -3333,7 +3333,9 @@ private:
 		const bool atomic = Config::PortEnabled(Config::Port::GpuSelectedWrites) &&
 		                    (opcode == ValueOpcode::BufferAtomicIAdd32 ||
 		                     opcode == ValueOpcode::BufferAtomicOr32);
+		const bool general_formatted_store = Config::PortEnabled(Config::Port::IndirectFormattedStores);
 		if (!atomic && opcode != ValueOpcode::StoreBufferU32 && opcode != ValueOpcode::StoreBufferU32x2 &&
+		    !(general_formatted_store && opcode == ValueOpcode::StoreBufferU32x3) &&
 		    opcode != ValueOpcode::StoreBufferU8 &&
 		    opcode != ValueOpcode::StoreBufferU32x4 && opcode != ValueOpcode::LoadBufferU32x2 &&
 		    opcode != ValueOpcode::LoadBufferU32x3 && opcode != ValueOpcode::LoadBufferU32x4) return false;
@@ -3348,14 +3350,24 @@ private:
 		// Atomics follow the raw indexed DWORD store: the selected candidate receives the update.
 		if (atomic) return memory.idxen && !memory.formatted;
 		if (opcode == ValueOpcode::StoreBufferU32)
-			return !memory.formatted || (memory.idxen && memory.data_bits == 32u && memory.data_dwords == 1u);
+			return !memory.formatted ||
+			       (memory.idxen && memory.data_dwords == 1u &&
+			        (memory.data_bits == 32u || (general_formatted_store && memory.data_bits == 16u)));
 		if (!memory.idxen) return false;
 		if (opcode == ValueOpcode::StoreBufferU8)
 			return !memory.formatted && memory.data_bits == 8u;
 		const auto components = BufferComponentCount(opcode);
-		if (opcode == ValueOpcode::StoreBufferU32x2 || opcode == ValueOpcode::StoreBufferU32x4)
+		if (opcode == ValueOpcode::StoreBufferU32x2 || opcode == ValueOpcode::StoreBufferU32x3 ||
+		    opcode == ValueOpcode::StoreBufferU32x4) {
+			if (general_formatted_store && memory.formatted) {
+				return memory.data_dwords == components &&
+				       ((memory.data_bits == 32u && memory.component_count == components) ||
+				        (opcode == ValueOpcode::StoreBufferU32x2 && memory.data_bits == 16u &&
+				         (memory.component_count == 3u || memory.component_count == 4u)));
+			}
 			return memory.data_bits == 32u && memory.data_dwords == components &&
 			       (!memory.formatted || (components == 4u && memory.component_count == 4u));
+		}
 		return memory.formatted && memory.data_dwords == components &&
 		       ((memory.data_bits == 32u && memory.component_count == components) ||
 		        (opcode == ValueOpcode::LoadBufferU32x2 && memory.data_bits == 16u &&

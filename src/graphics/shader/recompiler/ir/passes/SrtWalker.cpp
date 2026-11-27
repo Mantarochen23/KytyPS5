@@ -78,6 +78,8 @@ bool IsRuntimeSelect(ValueOpcode op) {
 	       op == ValueOpcode::SelectF32;
 }
 
+} // namespace
+
 bool IsRuntimeUniformOp(ValueOpcode op) {
 	switch (op) {
 		case ValueOpcode::ConditionRef:
@@ -138,6 +140,8 @@ bool IsRuntimeUniformOp(ValueOpcode op) {
 		default: return false;
 	}
 }
+
+namespace {
 
 bool ImmediateBits(Value value, uint64_t& bits) {
 	switch (value.GetType()) {

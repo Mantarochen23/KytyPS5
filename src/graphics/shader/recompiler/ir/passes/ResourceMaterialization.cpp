@@ -1,6 +1,7 @@
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
 
 #include "common/assert.h"
+#include "common/ports.h"
 #include "graphics/guest_gpu/gpu_format.h"
 #include "graphics/shader/recompiler/BufferFormat.h"
 #include "graphics/shader/recompiler/ir/Serialize.h"
@@ -267,6 +268,81 @@ bool NormalizeIndexedRawBuffer(DescriptorValue& value, ShaderBufferResource& des
 	return DecodeBufferDescriptor(value, descriptor);
 }
 
+bool IsIdentityFormattedStoreSwizzle(uint32_t swizzle, uint32_t component_count) {
+	if (component_count == 0u || component_count > 4u) return false;
+	for (uint32_t channel = 0u; channel < 4u; ++channel) {
+		const auto sel = GetDstSel(swizzle, channel);
+		if (channel < component_count) {
+			if (sel != 4u + channel) return false;
+		} else if (sel != 0u && sel != 1u && sel != 4u + channel) {
+			return false;
+		}
+	}
+	return true;
+}
+
+std::string DescribeIndirectBufferRefusal(const DescriptorValue& value,
+                                          const ShaderBufferResource& descriptor,
+                                          const Format::BufferFormatInfo& format, bool indexed,
+                                          const BufferResource& resource, std::string_view prefix,
+                                          std::string_view nearest, std::string_view first_diff) {
+	return fmt::format(
+	    "{}: format={}({}) elem_bytes={} stride={} records={} dst_sel=0x{:03x} "
+	    "words={:08x},{:08x},{:08x},{:08x} oob={} swizzle={} add_tid={} "
+	    "shape=indirect_{}_{}_{}(extent={}) nearest={} first_diff={}",
+	    prefix, Format::BufferFormatName(descriptor.Format()),
+	    static_cast<uint32_t>(descriptor.Format()), format.byte_size, descriptor.Stride(),
+	    descriptor.NumRecords(), descriptor.DstSelXYZW(), value.dwords[0], value.dwords[1],
+	    value.dwords[2], value.dwords[3], descriptor.OutOfBounds(), descriptor.SwizzleEnabled(),
+	    descriptor.AddTid(), resource.formatted ? "formatted" : "raw",
+	    indexed ? "indexed" : "byte", resource.written ? "store" : "read",
+	    resource.max_byte_extent, nearest, first_diff);
+}
+
+bool ValidateIndirectFormattedStore(const DescriptorValue& value,
+                                    const ShaderBufferResource& descriptor,
+                                    const Format::BufferFormatInfo& format, bool indexed,
+                                    const BufferResource& resource) {
+	const auto swizzle = descriptor.DstSelXYZW();
+	if (!Config::PortEnabled(Config::Port::IndirectFormattedStores)) {
+		const bool scalar = resource.max_byte_extent == 4u &&
+		    (descriptor.Format() == Prospero::BufferFormat::k32UInt ||
+		     descriptor.Format() == Prospero::BufferFormat::k8UInt ||
+		     descriptor.Format() == Prospero::BufferFormat::k8SInt);
+		const bool rgba16 = resource.max_byte_extent == 16u &&
+		    descriptor.Format() == Prospero::BufferFormat::k16_16_16_16Float;
+		// Constant channels do not address memory in a single-component store.
+		const bool identity = rgba16 ? swizzle == DstSel(4, 5, 6, 7)
+		                             : (swizzle & ~DstSel(0, 1, 1, 1)) == DstSel(4);
+		if ((!scalar && !rgba16) || descriptor.Stride() != format.byte_size || !identity) {
+			const std::string diff =
+			    (!scalar && !rgba16)
+			        ? fmt::format("format_or_extent({} extent={})",
+			                      Format::BufferFormatName(descriptor.Format()),
+			                      resource.max_byte_extent)
+			        : descriptor.Stride() != format.byte_size
+			              ? fmt::format("stride({}!=elem_bytes={})", descriptor.Stride(),
+			                            format.byte_size)
+			              : fmt::format("dst_sel(0x{:03x})", swizzle);
+			return SpecializationFail(DescribeIndirectBufferRefusal(
+			    value, descriptor, format, indexed, resource,
+			    "indirect formatted stores require tight identity UInt8, SInt8, UInt32 or RGBA16Float records",
+			    "indirect_formatted_indexed_store(tight_identity_u8_s8_u32_rgba16f)", diff));
+		}
+		return true;
+	}
+	// General formatted indirect stores: StoreFormattedPrepared packs any supported BufferFormat
+	// in identity channel order at any aligned record stride >= format.byte_size.
+	if (!IsIdentityFormattedStoreSwizzle(swizzle, format.component_count)) {
+		return SpecializationFail(DescribeIndirectBufferRefusal(
+		    value, descriptor, format, indexed, resource,
+		    "indirect formatted stores require identity active-channel swizzle",
+		    "indirect_formatted_indexed_store(identity_active_swizzle)",
+		    fmt::format("dst_sel(0x{:03x} for {} channels)", swizzle, format.component_count)));
+	}
+	return true;
+}
+
 bool NormalizeIndirectBuffer(DescriptorValue& value, bool indexed, const BufferResource& resource) {
 	ShaderBufferResource descriptor;
 	if (!DecodeBufferDescriptor(value, descriptor)) return false;
@@ -297,31 +373,28 @@ bool NormalizeIndirectBuffer(DescriptorValue& value, bool indexed, const BufferR
 	}
 	if (descriptor.SwizzleEnabled() || descriptor.AddTid() ||
 	    descriptor.OutOfBounds() != (indexed ? 0u : 3u)) {
-		return SpecializationFail(fmt::format(
-		    "indirect buffers require exact linear index or byte bounds: "
-		    "descriptor={:08x},{:08x},{:08x},{:08x} swizzle={} add_tid={} oob={} "
-		    "indexed={} formatted={} read={} written={} max_extent={}",
-		    value.dwords[0], value.dwords[1], value.dwords[2], value.dwords[3],
-		    descriptor.SwizzleEnabled(), descriptor.AddTid(), descriptor.OutOfBounds(), indexed,
-		    resource.formatted, resource.read, resource.written, resource.max_byte_extent));
+		const auto format = Format::GetFormatInfo(descriptor.Format());
+		const std::string diff =
+		    descriptor.SwizzleEnabled() ? "swizzle=true"
+		    : descriptor.AddTid()       ? "add_tid=true"
+		                                : fmt::format("oob({}!={})", descriptor.OutOfBounds(), indexed ? 0u : 3u);
+		return SpecializationFail(DescribeIndirectBufferRefusal(
+		    value, descriptor, format, indexed, resource,
+		    "indirect buffers require exact linear index or byte bounds",
+		    indexed ? "indirect_indexed(swizzle=false,add_tid=false,oob=0)"
+		            : "indirect_byte(swizzle=false,add_tid=false,oob=3)",
+		    diff));
 	}
 	if (resource.formatted) {
 		const auto format = Format::GetFormatInfo(descriptor.Format());
 		if (!indexed || format.type == Format::ComponentType::Unknown)
-			return SpecializationFail("indirect formatted buffers require a supported indexed format");
-		if (!formatted_read) {
-			const bool scalar = resource.max_byte_extent == 4u &&
-			    (descriptor.Format() == Prospero::BufferFormat::k32UInt ||
-			     descriptor.Format() == Prospero::BufferFormat::k8UInt ||
-			     descriptor.Format() == Prospero::BufferFormat::k8SInt);
-			const bool rgba16 = resource.max_byte_extent == 16u &&
-			    descriptor.Format() == Prospero::BufferFormat::k16_16_16_16Float;
-			// Constant channels do not address memory in a single-component store.
-			const auto swizzle = descriptor.DstSelXYZW();
-			const bool identity = rgba16 ? swizzle == DstSel(4, 5, 6, 7)
-			                             : (swizzle & ~DstSel(0, 1, 1, 1)) == DstSel(4);
-			if ((!scalar && !rgba16) || descriptor.Stride() != format.byte_size || !identity)
-				return SpecializationFail("indirect formatted stores require tight identity UInt8, SInt8, UInt32 or RGBA16Float records");
+			return SpecializationFail(DescribeIndirectBufferRefusal(
+			    value, descriptor, format, indexed, resource,
+			    "indirect formatted buffers require a supported indexed format",
+			    "indirect_formatted_indexed(known_format)",
+			    !indexed ? "unindexed_access" : "unknown_format"));
+		if (!formatted_read && !ValidateIndirectFormattedStore(value, descriptor, format, indexed, resource)) {
+			return false;
 		}
 		if (formatted_read &&
 		    (descriptor.Base48() == 0u || descriptor.Stride() == 0u || descriptor.NumRecords() == 0u)) {
@@ -333,12 +406,35 @@ bool NormalizeIndirectBuffer(DescriptorValue& value, bool indexed, const BufferR
 		const auto alignment = std::min(4u, format.byte_size);
 		if (descriptor.Stride() < format.byte_size ||
 		    (descriptor.Stride() & (alignment - 1u)) != 0u ||
-		    (descriptor.Base48() & (alignment - 1u)) != 0u)
-			return SpecializationFail("indirect formatted buffers require aligned full-format records");
+		    (descriptor.Base48() & (alignment - 1u)) != 0u) {
+			const std::string diff =
+			    descriptor.Stride() < format.byte_size
+			        ? fmt::format("stride({}<elem_bytes={})", descriptor.Stride(), format.byte_size)
+			        : (descriptor.Stride() & (alignment - 1u)) != 0u
+			              ? fmt::format("stride_align({}%{}!=0)", descriptor.Stride(), alignment)
+			              : fmt::format("base_align({:#x}%{}!=0)", descriptor.Base48(), alignment);
+			return SpecializationFail(DescribeIndirectBufferRefusal(
+			    value, descriptor, format, indexed, resource,
+			    "indirect formatted buffers require aligned full-format records",
+			    "indirect_formatted_indexed(aligned_full_record)", diff));
+		}
 	} else if ((!indexed && descriptor.Stride() != 1u) ||
 	           (indexed && resource.max_byte_extent != 1u &&
 	            (descriptor.Stride() < resource.max_byte_extent || (descriptor.Stride() & 3u) != 0u))) {
-		return SpecializationFail("indirect buffer stores require byte addressing or aligned records covering the write");
+		const auto format = Format::GetFormatInfo(descriptor.Format());
+		const std::string diff =
+		    !indexed
+		        ? fmt::format("byte_stride({}!=1)", descriptor.Stride())
+		        : descriptor.Stride() < resource.max_byte_extent
+		              ? fmt::format("stride({}<extent={})", descriptor.Stride(),
+		                            resource.max_byte_extent)
+		              : fmt::format("stride_align({}%4!=0)", descriptor.Stride());
+		return SpecializationFail(DescribeIndirectBufferRefusal(
+		    value, descriptor, format, indexed, resource,
+		    "indirect buffer stores require byte addressing or aligned records covering the write",
+		    indexed ? "indirect_raw_indexed(aligned_stride>=extent)"
+		            : "indirect_raw_byte(stride==1)",
+		    diff));
 	}
 	return true;
 }

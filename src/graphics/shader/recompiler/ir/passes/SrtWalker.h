@@ -65,6 +65,7 @@ private:
 // image or shared-memory writes of the shader can change, as address reads need an address write.
 enum class RuntimeValueType { Any, Integer, ImmutableInteger, StorageImmutableInteger };
 
+bool IsRuntimeUniformOp(ValueOpcode op);
 bool ValidateRuntimeValue(const ResourcePlan& program, Value value,
                           RuntimeValueType type = RuntimeValueType::Any,
                           bool            allow_dynamic_srt = false);
