@@ -338,6 +338,7 @@ bool PipelineCache::Program::UseStoredCallPlan() {
 	}
 	resource_plan              = std::move(plan);
 	resource_plan.source_reads = call_source->reads;
+	InvalidateMaterializationMemo();
 	return true;
 }
 
@@ -345,7 +346,76 @@ bool PipelineCache::Program::RefreshCallSource(const ShaderRecompiler::IR::SrtRu
 	const auto revision = call_source->revision;
 	ShaderRecompiler::RefreshShaderSource(*call_source, runtime);
 	resource_plan.source_reads = call_source->reads;
-	return revision != call_source->revision;
+	const bool changed = revision != call_source->revision;
+	if (changed) InvalidateMaterializationMemo();
+	return changed;
+}
+
+bool PipelineCache::Program::Materialize(const ShaderRecompiler::IR::SrtRuntime& runtime,
+	                                      std::string* failure_reason) {
+	auto& memo = materialization_memo;
+	const auto hash_read = [&](uint64_t address, uint64_t size, uint64_t& hash) {
+		if (size == 0u) {
+			hash = 0u;
+			return true;
+		}
+		if (runtime.read_specialization_memory == nullptr || (size & 3u) != 0u ||
+		    size / sizeof(uint32_t) > memo.scratch.max_size()) {
+			return false;
+		}
+		memo.scratch.resize(static_cast<size_t>(size / sizeof(uint32_t)));
+		if (!runtime.read_specialization_memory(runtime.userdata, address, memo.scratch)) return false;
+		hash = XXH3_64bits(memo.scratch.data(), static_cast<size_t>(size));
+		return true;
+	};
+	const auto same_bound_state = [&] {
+		if (!memo.valid || resource_plan.info.uses_image_heap ||
+		    memo.shader_base != runtime.shader_base ||
+		    memo.indirect_args_address != runtime.indirect_args_address ||
+		    memo.legacy_hash != runtime.legacy_hash ||
+		    !std::ranges::equal(memo.user_data, runtime.user_data) ||
+		    !std::ranges::equal(memo.workgroup_counts, runtime.workgroup_counts)) {
+			return false;
+		}
+		for (const auto& read: memo.reads) {
+			uint64_t hash = 0;
+			if (!hash_read(read.address, read.size, hash) || hash != read.hash) return false;
+		}
+		return true;
+	};
+	if (same_bound_state()) {
+		++materialization_memo_hits;
+		return true;
+	}
+	// A memo must observe every resource-walk read, including direct descriptors whose contents
+	// affect bindings but not specialization.
+	resource_plan.capture_specialization_reads = true;
+	if (!ShaderRecompiler::IR::MaterializeResources(resource_plan, runtime, resources,
+	                                                specialization, failure_reason)) {
+		memo.valid = false;
+		return false;
+	}
+	if (resource_plan.info.uses_image_heap) {
+		memo.valid = false;
+		return true;
+	}
+	memo.user_data.assign(runtime.user_data.begin(), runtime.user_data.end());
+	memo.workgroup_counts.assign(runtime.workgroup_counts.begin(), runtime.workgroup_counts.end());
+	memo.shader_base           = runtime.shader_base;
+	memo.indirect_args_address = runtime.indirect_args_address;
+	memo.legacy_hash           = runtime.legacy_hash;
+	memo.reads.clear();
+	memo.reads.reserve(resources.specialization_reads.size());
+	for (const auto [address, size]: resources.specialization_reads) {
+		uint64_t hash = 0;
+		if (!hash_read(address, size, hash)) {
+			memo.valid = false;
+			return true;
+		}
+		memo.reads.push_back({address, size, hash});
+	}
+	memo.valid = true;
+	return true;
 }
 
 template <bool HasCalls>
@@ -359,8 +429,7 @@ ShaderModule* PipelineCache::Program::FindModule(const ShaderRecompiler::IR::Srt
 	// for the module a miss will build.
 	auto probe        = runtime;
 	probe.legacy_hash = legacy_unchecked != 0;
-	if (!ShaderRecompiler::IR::MaterializeResources(resource_plan, probe, resources,
-	                                                specialization, materialization_error)) {
+	if (!Materialize(probe, materialization_error)) {
 		if (materialized != nullptr) {
 			*materialized = false;
 		}
@@ -1047,9 +1116,7 @@ const ShaderModule* PipelineCache::GetProgramImpl(const ShaderParams& params, In
 		plan_us = BuildTiming::ElapsedUs(plan_begin);
 		auto&       program = entry->second;
 		std::string mat_error;
-		if (!ShaderRecompiler::IR::MaterializeResources(program.resource_plan, runtime,
-		                                                program.resources, program.specialization,
-		                                                &mat_error)) {
+		if (!program.Materialize(runtime, &mat_error)) {
 			const std::string reason =
 			    mat_error.empty() ? "resource materialization failed"
 			                      : fmt::format("resource materialization failed: {}", mat_error);
@@ -1067,6 +1134,7 @@ const ShaderModule* PipelineCache::GetProgramImpl(const ShaderParams& params, In
 		}
 		capture_use();
 	} else if (source_changed) {
+		entry->second.InvalidateMaterializationMemo();
 		entry->second.resource_plan = ShaderRecompiler::IR::ExtractResourcePlan(translated.program);
 		if (const auto* module = entry->second.FindModule<true>(runtime, push_data, nullptr,
 		                                                        &materialization_error)) {

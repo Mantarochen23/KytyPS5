@@ -757,6 +757,14 @@ struct PipelineCacheTestAccess {
   }
 
   static auto Compiled(const PipelineCache &cache) { return cache.m_compiled; }
+  static uint64_t MaterializationMemoHits(const PipelineCache &cache) {
+    uint64_t result = 0;
+    for (const auto &[key, program] : cache.m_program_cache) {
+      (void)key;
+      result += program.materialization_memo_hits;
+    }
+    return result;
+  }
   // 0: the next store load leaves everything to its background loader; -1: the option.
   static void SetWarmUpBudgetMs(int64_t ms) { PipelineCache::s_warmup_budget_ms_for_tests = ms; }
   // Applies what the background load finished until it is done (at most 10 s).
@@ -51829,6 +51837,48 @@ void CheckStableProgramIds(VulkanHarness &vulkan) {
   std::printf("[gpu]     %-32s ok\n", name);
 }
 
+void CheckProgramMaterializationMemo(VulkanHarness &vulkan) {
+  constexpr const char *name = "ProgramMaterializationMemo";
+  std::vector<u32> code;
+  AppendVMovU32(&code, 1, 7);
+  code.insert(code.end(), {EncodeMubuf0(0x1c), EncodeMubuf1(1, 0, 0)});
+  AppendEnd(&code);
+  ShaderMapUserData(reinterpret_cast<uint64_t>(code.data()),
+                    {.type = Prospero::ShaderBinaryType::kCs,
+                     .code_size_bytes = static_cast<u32>(code.size() * sizeof(u32))});
+  PipelineCache cache(vulkan.RuntimeContext(), nullptr);
+  const auto lookup = [&](u32 stride) {
+    HW::ComputeShaderInfo regs{};
+    regs.cs_regs.data_addr = reinterpret_cast<uint64_t>(code.data());
+    regs.cs_regs.num_thread_x = 1;
+    regs.cs_regs.num_thread_y = 1;
+    regs.cs_regs.num_thread_z = 1;
+    regs.cs_regs.wave_size = 32;
+    regs.cs_regs.user_sgpr = 4;
+    const ShaderBufferResource buffer{{0x10000u, stride << 16u, 64,
+        DstSel(4, 5, 6, 7) | (static_cast<u32>(Prospero::BufferFormat::k32UInt) << 12u)}};
+    std::copy_n(buffer.fields, 4, regs.cs_user_sgpr.value);
+    ShaderComputeInputInfo input{};
+    return cache.GetComputeProgram(regs, input);
+  };
+  const auto *first = lookup(4);
+  Require(name, "initial materialization",
+          first != nullptr && PipelineCacheTestAccess::MaterializationMemoHits(cache) == 0,
+          "the initial program lookup failed or incorrectly reported a memo hit");
+  Require(name, "stable bound state",
+          lookup(4) == first && PipelineCacheTestAccess::MaterializationMemoHits(cache) == 1,
+          "an unchanged program and bound state were materialized again");
+  const auto *changed = lookup(8);
+  Require(name, "changed bound state",
+          changed != nullptr && changed != first &&
+              PipelineCacheTestAccess::MaterializationMemoHits(cache) == 1,
+          "a changed descriptor reused the materialized state");
+  Require(name, "stable changed state",
+          lookup(8) == changed && PipelineCacheTestAccess::MaterializationMemoHits(cache) == 2,
+          "the replacement bound state was not memoized");
+  std::printf("[gpu]     %-32s ok\n", name);
+}
+
 // A lookup finds the same pixel module whatever the draw data's size, and the same vertex
 // module whatever the pixel shader data's size.
 void CheckGraphicsPushDataModules(VulkanHarness &vulkan) {
@@ -59066,6 +59116,11 @@ int main(int argc, char **argv) {
     vulkan.CheckResidentImageHeap();
     return 0;
   }
+  if (argc == 2 && std::strcmp(argv[1], "--materialization-memo-only") == 0) {
+    VulkanHarness vulkan;
+    CheckProgramMaterializationMemo(vulkan);
+    return 0;
+  }
   if (argc == 2 && std::strcmp(argv[1], "--mul-hi24-only") == 0) {
     VulkanHarness vulkan;
     RunCase(&vulkan, VectorMulHi24(32));
@@ -60488,6 +60543,9 @@ int main(int argc, char **argv) {
   RunSuiteStep(summary, "ComputeLdsLimit", [&] { CheckComputeLdsLimit(vulkan); });
   RunSuiteStep(summary, "TessellationWaveSizes", [&] { CheckTessellationWaveSizes(vulkan); });
   RunSuiteStep(summary, "StableProgramIds", [&] { CheckStableProgramIds(vulkan); });
+  RunSuiteStep(summary, "ProgramMaterializationMemo", [&] {
+    CheckProgramMaterializationMemo(vulkan);
+  });
   RunSuiteStep(summary, "ComputeQueueModules", [&] { CheckComputeQueueModules(vulkan); });
   RunSuiteStep(summary, "GraphicsPushDataModules", [&] { CheckGraphicsPushDataModules(vulkan); });
   RunSuiteStep(summary, "VertexFormatModules", [&] { CheckVertexFormatModules(vulkan); });
