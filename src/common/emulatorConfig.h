@@ -174,6 +174,9 @@ struct ConfigOptions {
 	// --async-lookahead: the scan of submitted commands also reads the compute user data, so that
 	// shaders whose resources follow from it are built before their dispatch is reached.
 	uint32_t                 async_lookahead            = 1;
+	// --mem-limit-gb: when the process's RSS + swap passes this, caches are dropped and the memory
+	// table printed; still over 10 s later, the run stops with a message. 0 = off.
+	uint32_t                 mem_limit_gb               = 0;
 };
 
 void Load(const ConfigOptions& cfg);
@@ -288,6 +291,7 @@ const std::filesystem::path& GetRegisteredShaderDumpFolder();
 uint32_t AsyncComputeWaitMs();
 bool     AsyncLookaheadEnabled();
 uint32_t AsyncSpeculativeModulesMode();
+uint32_t MemLimitGb();
 
 } // namespace Config
 
