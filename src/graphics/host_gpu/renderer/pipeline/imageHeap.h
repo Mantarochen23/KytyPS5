@@ -9,7 +9,6 @@
 #include <memory>
 #include <mutex>
 #include <unordered_map>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -69,7 +68,6 @@ private:
 
 	// A stale element's slots move to a new element of its descriptor, a buried one's to null.
 	enum class State : uint8_t { Live, Stale, Buried };
-	enum class RetryKind : uint8_t { None, Dcc, Held };
 
 	struct Element {
 		Key      key;
@@ -82,14 +80,6 @@ private:
 		uint32_t kind   = 0;
 		uint32_t refs   = 0; // Slots of all views that select it.
 		State    state  = State::Live;
-		RetryKind retry = RetryKind::None;
-		uint64_t retry_stamp = 0; // Invalidates page-index entries when the element changes.
-		uint64_t candidate_stamp = 0;
-	};
-
-	struct ElementRef {
-		uint32_t index = 0;
-		uint64_t stamp = 0;
 	};
 
 	struct Memory;
@@ -135,7 +125,6 @@ private:
 	void     Release(uint32_t entry);
 	void     Retire();
 	void     Mark(uint32_t index, State state);
-	void     SetRetry(uint32_t index, RetryKind retry);
 	template <typename Fn>
 	bool     ForEachChanged(Fn&& fn, uint64_t* visited = nullptr);
 	void     Repoint();
@@ -157,28 +146,16 @@ private:
 	std::vector<uint32_t>                             m_free;
 	std::vector<uint32_t>                             m_pending;  // Not yet resolved.
 	std::vector<uint32_t>                             m_released; // Unselected after the upload.
-	std::unordered_set<uint32_t>                      m_retry_elements;
-	std::unordered_map<uint64_t, std::vector<ElementRef>> m_resolution_elements; // Cache page.
-	std::unordered_map<uint64_t, std::vector<uint32_t>>   m_image_elements; // Image serial.
+	std::vector<uint32_t>                             m_held; // Another extent holds the address.
+	std::vector<uint32_t>                             m_dcc;  // Metadata clears apply per draw.
 	std::vector<std::pair<uint64_t, ImageId>>         m_away; // Serial, image: not read layout.
+	uint64_t                                          m_held_serial = 0; // Image::serials.
 	uint64_t                                          m_cache_generation = 0;
-	uint64_t                                          m_heap_change_generation = 0;
-	uint64_t                                          m_descriptor_generation = 0;
-	uint64_t                                          m_rebound_descriptor_generation = 0;
-	uint64_t                                          m_retry_stamp = 0;
-	uint64_t                                          m_candidate_stamp = 0;
-	uint64_t                                          m_fast_rebinds = 0; // Test-visible proof count.
-	uint64_t                                          m_entries_visited = 0; // Test-visible proof count.
-	uint64_t                                          m_entries_skipped = 0; // Test-visible proof count.
-	uint64_t                                          m_entries_resolved = 0; // Test-visible proof count.
 	uint64_t                                          m_resolve_calls    = 0; // Test-visible proof count.
 	std::deque<std::pair<uint64_t, uint32_t>>         m_retired; // Tick, element.
 	std::vector<std::pair<size_t, size_t>>            m_runs;
 	std::vector<uint32_t>                             m_scratch;
 	std::vector<Image::HeapChange>                    m_changes;
-	std::vector<GuestRange>                           m_resolution_changes;
-	std::vector<uint64_t>                             m_changed_pages;
-	std::vector<uint32_t>                             m_retry_candidates;
 	std::vector<std::pair<uint32_t, vk::DescriptorImageInfo>> m_writes;
 	vk::DescriptorSetLayout                           m_layout = nullptr;
 	vk::DescriptorPool                                m_pool   = nullptr;

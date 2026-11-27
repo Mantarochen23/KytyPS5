@@ -299,10 +299,6 @@ private:
 	void                      FreeImage(ImageId id);
 	void                      TouchImage(Image& image);
 	void                      TouchResolutionGenerationLocked(uint64_t address, uint64_t size);
-	// Returns the ranges whose discovery state changed after `generation`, together with one
-	// coherent generation that covers the returned records. ImageHeap is the sole consumer.
-	[[nodiscard]] uint64_t    TakeResolutionChangesSince(uint64_t generation,
-	                                                     std::vector<GuestRange>& changes);
 	void                      TouchRegistrationsLocked(uint64_t address, uint64_t size);
 	[[nodiscard]] bool        RegistrationsSinceLocked(uint64_t address, uint64_t size,
 	                                                   uint64_t generation) const;
@@ -373,11 +369,6 @@ private:
 	ImagePageTable                                    m_image_page_table;
 	RegisteredPageCounts                              m_registered_pages;
 	ResolutionPageTable                               m_resolution_page_table;
-	struct ResolutionChange {
-		GuestRange range;
-		uint64_t   generation = 0;
-	};
-	std::vector<ResolutionChange>                     m_resolution_changes;
 	std::atomic<uint64_t>                             m_resolution_generation {1};
 	std::unordered_map<ExactImageKey, ExactImage, ExactImageKeyHash> m_exact_images;
 	ResolutionPageTable                               m_registration_page_table;

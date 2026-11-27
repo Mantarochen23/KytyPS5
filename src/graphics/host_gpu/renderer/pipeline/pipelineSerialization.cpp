@@ -73,8 +73,9 @@ template <class S, class Key> void IoKey(S& io, Key& key) {
 
 template <class S, class Module> void IoModule(S& io, Module& stage) {
 	// The handle comes from the SPIR-V. Function code: the callee code of a module with calls.
-	IoAll(io, stage.id, stage.info, stage.specialization, stage.function_code,
-	      stage.rect_parameters, stage.mesh_task, stage.legacy_hash);
+	auto& [id, handle, info, specialization, function_code, rect_parameters, mesh_task,
+	       legacy_hash, legacy_checked, spirv_words] = stage;
+	IoAll(io, id, info, specialization, function_code, rect_parameters, mesh_task, legacy_hash);
 }
 
 } // namespace

@@ -24,7 +24,6 @@ std::vector<ThreadCounters*> g_threads;
 std::mutex                   g_report_mutex;
 std::array<uint64_t, CounterCount> g_previous {};
 Clock::time_point                  g_window_start {};
-thread_local ScopedTimer*          g_active_timer = nullptr;
 
 ThreadCounters& Local() {
 	thread_local ThreadCounters* counters = [] {
@@ -58,23 +57,13 @@ double Milliseconds(const std::array<uint64_t, CounterCount>& delta, Counter cou
 	return Mean(delta, counter, frames) / 1'000'000.0;
 }
 
-double NanosecondsPerCall(const std::array<uint64_t, CounterCount>& delta, Counter duration,
-	                      Counter calls) {
-	const auto count = delta[static_cast<size_t>(calls)];
-	return count == 0 ? 0.0 : static_cast<double>(delta[static_cast<size_t>(duration)]) /
-	                            static_cast<double>(count);
-}
-
 } // namespace
 
 void Add(Counter counter, uint64_t value) noexcept {
 	Local().values[static_cast<size_t>(counter)].fetch_add(value, std::memory_order_relaxed);
 }
 
-ScopedTimer::ScopedTimer(Counter duration) noexcept
-    : m_duration(duration), m_start(Clock::now()), m_parent(g_active_timer) {
-	g_active_timer = this;
-}
+ScopedTimer::ScopedTimer(Counter duration) noexcept: m_duration(duration), m_start(Clock::now()) {}
 
 ScopedTimer::~ScopedTimer() {
 	Stop();
@@ -84,10 +73,7 @@ void ScopedTimer::Stop() noexcept {
 	if (m_start == Clock::time_point {}) return;
 	const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - m_start);
 	m_start            = {};
-	const auto elapsed_ns = static_cast<uint64_t>(elapsed.count());
-	if (g_active_timer == this) g_active_timer = m_parent;
-	if (m_parent != nullptr) m_parent->m_child_ns += elapsed_ns;
-	Add(m_duration, elapsed_ns - std::min(elapsed_ns, m_child_ns));
+	Add(m_duration, static_cast<uint64_t>(elapsed.count()));
 }
 
 void FramePresented() noexcept {
@@ -107,53 +93,30 @@ void FramePresented() noexcept {
 	for (size_t i = 0; i < delta.size(); ++i) delta[i] = totals[i] - g_previous[i];
 	const auto frames = delta[static_cast<size_t>(Counter::Frames)];
 	if (frames != 0) {
-		const auto total_ms =
-		    std::chrono::duration<double, std::milli>(elapsed).count() / static_cast<double>(frames);
-		const auto rebind_ms = Milliseconds(delta, Counter::ImageHeapRebindNs, frames);
-		const auto resolve_ms = Milliseconds(delta, Counter::ResolveTextureNs, frames);
-		const auto find_image_ms = Milliseconds(delta, Counter::FindImageNs, frames);
-		const auto materialize_ms = Milliseconds(delta, Counter::MaterializeResourcesNs, frames);
-		const auto find_module_ms = Milliseconds(delta, Counter::FindModuleNs, frames);
-		const auto wait_gpu_ms = Milliseconds(delta, Counter::GpuFenceWaitNs, frames);
-		const auto wait_guest_ms = Milliseconds(delta, Counter::GuestMemoryWaitNs, frames);
-		const auto wait_lock_ms = Milliseconds(delta, Counter::LockWaitNs, frames);
-		const auto idle_ms = Milliseconds(delta, Counter::IdleNs, frames);
-		const auto named_ms = rebind_ms + resolve_ms + find_image_ms + materialize_ms +
-		                      find_module_ms + wait_gpu_ms + wait_guest_ms + wait_lock_ms + idle_ms;
 		Log::WriteToConsoleAndLog(fmt::format(
 		    "[frame] seconds={:.2f} frames={} draws={:.2f} dispatches={:.2f} "
-		    "rebind={:.2f} rebind_fast={:.2f} entries={:.2f} rebind_skipped={:.2f} "
-		    "rebind_resolved={:.2f} resolve={:.2f} find_image={:.2f} find_hits={:.2f} "
-		    "materialize={:.2f} materialize_hits={:.2f} materialize_misses={:.2f} "
-		    "find_module={:.2f} module_hits={:.2f} module_misses={:.2f} "
+		    "rebind={:.2f} entries={:.2f} resolve={:.2f} find_image={:.2f} "
+		    "find_hits={:.2f} materialize={:.2f} find_module={:.2f} "
 		    "ms/frame rebind={:.3f} resolve={:.3f} find_image={:.3f} "
 		    "materialize={:.3f} find_module={:.3f} wait_gpu={:.3f} wait_guest={:.3f} "
-		    "wait_lock={:.3f} idle={:.3f} other={:.3f} total={:.3f} "
-		    "ns/call materialize_hit={:.0f} materialize_miss={:.0f} module_hit={:.0f} "
-		    "module_miss={:.0f}\n",
+		    "wait_lock={:.3f} idle={:.3f}\n",
 		    std::chrono::duration<double>(elapsed).count(), frames,
 		    Mean(delta, Counter::Draws, frames), Mean(delta, Counter::Dispatches, frames),
 		    Mean(delta, Counter::ImageHeapRebindCalls, frames),
-		    Mean(delta, Counter::ImageHeapRebindFastCalls, frames),
 		    Mean(delta, Counter::ImageHeapEntriesVisited, frames),
-		    Mean(delta, Counter::ImageHeapEntriesSkipped, frames),
-		    Mean(delta, Counter::ImageHeapEntriesResolved, frames),
 		    Mean(delta, Counter::ResolveTextureCalls, frames),
 		    Mean(delta, Counter::FindImageCalls, frames), Mean(delta, Counter::FindImageHits, frames),
 		    Mean(delta, Counter::MaterializeResourcesCalls, frames),
-		    Mean(delta, Counter::MaterializationMemoHits, frames),
-		    Mean(delta, Counter::MaterializationMemoMisses, frames),
 		    Mean(delta, Counter::FindModuleCalls, frames),
-		    Mean(delta, Counter::FindModuleHits, frames),
-		    Mean(delta, Counter::FindModuleMisses, frames), rebind_ms, resolve_ms, find_image_ms,
-		    materialize_ms, find_module_ms, wait_gpu_ms, wait_guest_ms, wait_lock_ms, idle_ms,
-		    total_ms - named_ms, total_ms,
-		    NanosecondsPerCall(delta, Counter::MaterializationMemoHitNs,
-		                       Counter::MaterializationMemoHits),
-		    NanosecondsPerCall(delta, Counter::MaterializationMemoMissNs,
-		                       Counter::MaterializationMemoMisses),
-		    NanosecondsPerCall(delta, Counter::FindModuleHitNs, Counter::FindModuleHits),
-		    NanosecondsPerCall(delta, Counter::FindModuleMissNs, Counter::FindModuleMisses)));
+		    Milliseconds(delta, Counter::ImageHeapRebindNs, frames),
+		    Milliseconds(delta, Counter::ResolveTextureNs, frames),
+		    Milliseconds(delta, Counter::FindImageNs, frames),
+		    Milliseconds(delta, Counter::MaterializeResourcesNs, frames),
+		    Milliseconds(delta, Counter::FindModuleNs, frames),
+		    Milliseconds(delta, Counter::GpuFenceWaitNs, frames),
+		    Milliseconds(delta, Counter::GuestMemoryWaitNs, frames),
+		    Milliseconds(delta, Counter::LockWaitNs, frames),
+		    Milliseconds(delta, Counter::IdleNs, frames)));
 	}
 	g_previous     = totals;
 	g_window_start = now;

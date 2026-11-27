@@ -332,8 +332,7 @@ static uint64_t CallCodeHash(std::span<const uint32_t> function_code) {
 }
 
 bool PipelineCache::Program::UseStoredCallPlan() {
-	function_code_hash = CallCodeHash(FunctionCode());
-	const auto found = call_plans.find(function_code_hash);
+	const auto found = call_plans.find(CallCodeHash(FunctionCode()));
 	if (found == call_plans.end()) return false;
 	ShaderRecompiler::IR::ResourcePlan plan;
 	if (!ShaderRecompiler::IR::LoadResourcePlan(found->second, plan)) {
@@ -351,28 +350,12 @@ bool PipelineCache::Program::RefreshCallSource(const ShaderRecompiler::IR::SrtRu
 	ShaderRecompiler::RefreshShaderSource(*call_source, runtime);
 	resource_plan.source_reads = call_source->reads;
 	const bool changed = revision != call_source->revision;
-	if (changed) {
-		function_code_hash = CallCodeHash(FunctionCode());
-		InvalidateMaterializationMemo();
-	} else if (function_code_hash == 0) {
-		function_code_hash = CallCodeHash(FunctionCode());
-	}
+	if (changed) InvalidateMaterializationMemo();
 	return changed;
 }
 
 bool PipelineCache::Program::Materialize(const ShaderRecompiler::IR::SrtRuntime& runtime,
 	                                      std::string* failure_reason) {
-	const auto begin = std::chrono::steady_clock::now();
-	const auto note = [&](bool hit) {
-		const auto elapsed = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-		                                               std::chrono::steady_clock::now() - begin)
-		                                               .count());
-		Common::FrameCost::Add(hit ? Common::FrameCost::Counter::MaterializationMemoHits
-		                           : Common::FrameCost::Counter::MaterializationMemoMisses);
-		Common::FrameCost::Add(hit ? Common::FrameCost::Counter::MaterializationMemoHitNs
-		                           : Common::FrameCost::Counter::MaterializationMemoMissNs,
-		                       elapsed);
-	};
 	auto& memo = materialization_memo;
 	const auto hash_read = [&](uint64_t address, uint64_t size, uint64_t& hash) {
 		if (size == 0u) {
@@ -405,7 +388,6 @@ bool PipelineCache::Program::Materialize(const ShaderRecompiler::IR::SrtRuntime&
 	};
 	if (same_bound_state()) {
 		++materialization_memo_hits;
-		note(true);
 		return true;
 	}
 	// A memo must observe every resource-walk read, including direct descriptors whose contents
@@ -414,13 +396,10 @@ bool PipelineCache::Program::Materialize(const ShaderRecompiler::IR::SrtRuntime&
 	if (!ShaderRecompiler::IR::MaterializeResources(resource_plan, runtime, resources,
 	                                                specialization, failure_reason)) {
 		memo.valid = false;
-		note(false);
 		return false;
 	}
-	specialization_hash = SpecializationHash(specialization);
 	if (resource_plan.info.uses_image_heap) {
 		memo.valid = false;
-		note(false);
 		return true;
 	}
 	memo.user_data.assign(runtime.user_data.begin(), runtime.user_data.end());
@@ -434,13 +413,11 @@ bool PipelineCache::Program::Materialize(const ShaderRecompiler::IR::SrtRuntime&
 		uint64_t hash = 0;
 		if (!hash_read(address, size, hash)) {
 			memo.valid = false;
-			note(false);
 			return true;
 		}
 		memo.reads.push_back({address, size, hash});
 	}
 	memo.valid = true;
-	note(false);
 	return true;
 }
 
@@ -451,17 +428,6 @@ ShaderModule* PipelineCache::Program::FindModule(const ShaderRecompiler::IR::Srt
                                                  std::string* materialization_error) {
 	Common::FrameCost::ScopedTimer timer(Common::FrameCost::Counter::FindModuleNs);
 	Common::FrameCost::Add(Common::FrameCost::Counter::FindModuleCalls);
-	const auto begin = std::chrono::steady_clock::now();
-	const auto note = [&](bool hit) {
-		const auto elapsed = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-		                                               std::chrono::steady_clock::now() - begin)
-		                                               .count());
-		Common::FrameCost::Add(hit ? Common::FrameCost::Counter::FindModuleHits
-		                           : Common::FrameCost::Counter::FindModuleMisses);
-		Common::FrameCost::Add(hit ? Common::FrameCost::Counter::FindModuleHitNs
-		                           : Common::FrameCost::Counter::FindModuleMissNs,
-		                       elapsed);
-	};
 	// The old layout's hash is needed while stored modules wait for their first comparison, and
 	// for the module a miss will build.
 	auto probe        = runtime;
@@ -470,30 +436,23 @@ ShaderModule* PipelineCache::Program::FindModule(const ShaderRecompiler::IR::Srt
 		if (materialized != nullptr) {
 			*materialized = false;
 		}
-		note(false);
 		return nullptr;
 	}
 	if (materialized != nullptr) {
 		*materialized = true;
 	}
-	const auto [first, last] = module_index.equal_range(specialization_hash);
-	for (auto found = first; found != last; ++found) {
-		auto&       candidate = *found->second;
-		const auto& layout    = candidate.info.bindings;
+	for (auto& candidate: modules) {
+		const auto& layout = candidate.info.bindings;
 		if (layout.push_data_start_dword !=
 		        push_data.StartFor(layout.ShaderDataDwords(), candidate.info.stage) ||
 		    candidate.specialization != specialization) {
 			continue;
 		}
 		if constexpr (HasCalls) {
-			if (candidate.function_code_hash != function_code_hash ||
-			    !std::ranges::equal(candidate.function_code, FunctionCode())) {
-				continue;
-			}
+			if (!std::ranges::equal(candidate.function_code, FunctionCode())) continue;
 		} else {
 			if (!candidate.function_code.empty()) continue;
 		}
-		note(true);
 		return &candidate;
 	}
 	if (!probe.legacy_hash && Config::PortEnabled(Config::Port::CanonicalResources) &&
@@ -510,7 +469,6 @@ ShaderModule* PipelineCache::Program::FindModule(const ShaderRecompiler::IR::Srt
 		legacy_of_specialization.insert_or_assign(SpecializationHash(specialization),
 		                                          resources.legacy_hash);
 	}
-	note(false);
 	return nullptr;
 }
 
@@ -627,9 +585,6 @@ void PipelineCache::NoteBuild(BuildTiming::Build build) {
 ShaderModule& PipelineCache::AddModule(Program& program, const ProgramKey& key,
                                        CompiledStage compiled) {
 	auto& module = program.modules.emplace_back(std::move(compiled.module));
-	module.specialization_hash = SpecializationHash(module.specialization);
-	module.function_code_hash  = CallCodeHash(module.function_code);
-	program.module_index.emplace(module.specialization_hash, &module);
 	m_compiled[static_cast<size_t>(key.stage)]++;
 	NoteModuleUse(module);
 	if (const auto legacy = program.legacy_of_specialization.find(SpecializationHash(module.specialization));
