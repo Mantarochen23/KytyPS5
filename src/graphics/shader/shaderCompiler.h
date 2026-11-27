@@ -46,9 +46,23 @@ ShaderParams PrepareProgram(
     ShaderPixelInputInfo&                               input_info);
 ShaderParams PrepareProgram(const HW::ComputeShaderInfo& regs, ShaderComputeInputInfo& input_info);
 struct ComputeShaderPrefetch {
-	HW::CsStageRegisters cs_regs;
-	bool                 dispatch_thread_dimensions = false;
+HW::CsStageRegisters cs_regs;
+bool dispatch_thread_dimensions = false;
+// The compute user data the scan of the command stream followed, when it saw all of them set.
+bool user_data_known = false;
+HW::UserSgprInfo user_data;
 };
+
+// What the compute registrations and their prefetch queue did, for the `[prefetch]` line.
+struct ComputePrefetchQueueStats {
+uint64_t registered = 0; // compute shaders registered
+uint64_t nonzero_offset = 0; // registered with a nonzero code offset in its registers
+uint64_t queued = 0;
+uint64_t queue_full = 0; // dropped: the queue held its limit
+};
+[[nodiscard]] ComputePrefetchQueueStats ShaderComputePrefetchQueueStats();
+// Called by the registration of a compute shader; `nonzero_offset`: its registers held one.
+void ShaderNoteComputeRegistration(bool nonzero_offset);
 
 // Decodes one compute SH register write into `cs_regs`; false if `offset` is not a CS register.
 bool ApplyComputeShRegister(HW::CsStageRegisters& cs_regs, uint32_t offset, uint32_t value);

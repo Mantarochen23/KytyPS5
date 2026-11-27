@@ -68,9 +68,14 @@ struct RequestState {
 // Whether a translation job may also build the stage's module before any draw has named its
 // resources. Only the first request for a stage may: when the cache already has the program, either
 // it came from the shader store or an earlier speculative module did not serve the dispatch that
-// came back, and building the same module again would repeat for ever.
-[[nodiscard]] constexpr bool MaySpeculate(bool enabled, bool compute, bool has_program) {
-	return enabled && compute && !has_program;
+// came back, and building the same module again would repeat for ever. `mode` is
+// --async-speculative-modules: 0 never; 1 only when the request carries the user data the dispatch
+// will have (a dispatch itself, or the scan of the command stream); 2 also for the registration
+// prefetch, which has none, so that its module is built from all-zero user data (the old
+// behaviour, which yields a module no dispatch matches).
+[[nodiscard]] constexpr bool MaySpeculate(uint32_t mode, bool compute, bool has_program,
+                                          bool user_data_known) {
+	return mode != 0 && compute && !has_program && (user_data_known || mode >= 2);
 }
 
 // The memory the finished translations that no draw has asked for yet may hold, as the sum of their

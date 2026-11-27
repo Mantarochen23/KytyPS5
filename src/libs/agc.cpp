@@ -695,9 +695,13 @@ int KYTY_SYSV_ABI AgcCreateShader(Shader** dst, void* header, const volatile voi
 	}
 
 	if (registration_compute) {
-		if (registration_cs_regs.data_addr != 0) {
-			ShaderQueueComputePrefetch(registration_cs_regs, dispatch_thread_dimensions);
-		}
+		// The registers held an offset when they were read above, and the check this replaces
+		// (offset != 0) dropped every shader whose code starts at its base. The shader map names
+		// the code by `base` (ShaderMapUserData above), so that is the address a prefetch must
+		// look up.
+		ShaderNoteComputeRegistration(registration_cs_regs.data_addr != 0);
+		registration_cs_regs.data_addr = base;
+		ShaderQueueComputePrefetch(registration_cs_regs, dispatch_thread_dimensions);
 	}
 
 	*dst = h;

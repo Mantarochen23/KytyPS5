@@ -168,6 +168,12 @@ struct ConfigOptions {
 	// --dump-registered-shaders: copy each distinct registered shader and an index record here.
 	// Empty = off.
 	std::filesystem::path    dump_registered_shaders_folder;
+	// --async-compute-wait-ms: a compute dispatch whose shader is not ready suspends its queue at
+	// most this long, then is skipped for this use while the build goes on. 0 = wait for ever.
+	uint32_t                 async_compute_wait_ms      = 0;
+	// --async-lookahead: the scan of submitted commands also reads the compute user data, so that
+	// shaders whose resources follow from it are built before their dispatch is reached.
+	uint32_t                 async_lookahead            = 1;
 };
 
 void Load(const ConfigOptions& cfg);
@@ -279,6 +285,9 @@ bool     GuestFaultParkEnabled();
 bool     GuestFaultReportOnlyEnabled();
 uint32_t GuestClockHoldMs();
 const std::filesystem::path& GetRegisteredShaderDumpFolder();
+uint32_t AsyncComputeWaitMs();
+bool     AsyncLookaheadEnabled();
+uint32_t AsyncSpeculativeModulesMode();
 
 } // namespace Config
 
