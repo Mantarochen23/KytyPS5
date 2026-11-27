@@ -3,6 +3,7 @@
 
 #include "common/assert.h"
 #include "common/debugCounters.h"
+#include "common/frameCost.h"
 #include "common/emulatorConfig.h"
 #include "common/file.h"
 #include "common/ports.h"
@@ -352,6 +353,8 @@ ShaderModule* PipelineCache::Program::FindModule(const ShaderRecompiler::IR::Srt
                                                  ShaderRecompiler::IR::PushData::Window push_data,
                                                  bool*        materialized,
                                                  std::string* materialization_error) {
+	Common::FrameCost::ScopedTimer timer(Common::FrameCost::Counter::FindModuleNs);
+	Common::FrameCost::Add(Common::FrameCost::Counter::FindModuleCalls);
 	// The old layout's hash is needed while stored modules wait for their first comparison, and
 	// for the module a miss will build.
 	auto probe        = runtime;

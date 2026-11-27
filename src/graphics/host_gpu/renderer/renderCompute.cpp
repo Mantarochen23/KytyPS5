@@ -2,6 +2,7 @@
 #include "common/assert.h"
 #include "common/common.h"
 #include "common/debugCounters.h"
+#include "common/frameCost.h"
 #include "common/emulatorConfig.h"
 #include "common/file.h"
 #include "common/logging/log.h"
@@ -660,7 +661,9 @@ bool RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 		return true;
 	}
 
-	Common::LockGuard lock(m_context.GetMutex());
+	Common::FrameCost::ScopedTimer lock_wait(Common::FrameCost::Counter::LockWaitNs);
+	Common::LockGuard              lock(m_context.GetMutex());
+	lock_wait.Stop();
 	if (sh_ctx.GetCs().cs_regs.data_addr == 0) {
 		LOGF("GraphicsRenderDispatchDirect: temporary: ignoring dispatch with null CS shader, "
 		     "groups=%ux%ux%u mode=%u\n",
@@ -868,6 +871,7 @@ bool RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 	}
 	graphics.breadcrumbs.EndOp(graphics, vk_buffer, marker_id);
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::Dispatches);
+	Common::FrameCost::Add(Common::FrameCost::Counter::Dispatches);
 
 	// The removed host fence also ordered read-only dispatches before later writers.
 	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
@@ -880,7 +884,9 @@ bool RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 	EXIT_IF(args_addr == 0 || (args_addr & 3u) != 0 ||
 	        (mode & Pm4::COMPUTE_DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS) != 0);
 	m_context.GetCommandScheduler().PopPendingOperations();
-	Common::LockGuard lock(m_context.GetMutex());
+	Common::FrameCost::ScopedTimer lock_wait(Common::FrameCost::Counter::LockWaitNs);
+	Common::LockGuard              lock(m_context.GetMutex());
+	lock_wait.Stop();
 	vk::DispatchIndirectCommand args {};
 	if (!m_context.GetBufferCache().HasGpuDirtyBytes(args_addr, sizeof(args)) &&
 	    LibKernel::Memory::TryReadBacking(args_addr, &args, sizeof(args)) &&
@@ -960,6 +966,7 @@ bool RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 	vk_buffer.dispatchIndirect(indirect_buffer, indirect_offset);
 	graphics.breadcrumbs.EndOp(graphics, vk_buffer, marker_id);
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::Dispatches);
+	Common::FrameCost::Add(Common::FrameCost::Counter::Dispatches);
 	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
 	ResetBindings();
 	return true;

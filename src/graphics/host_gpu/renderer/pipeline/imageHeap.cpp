@@ -2,6 +2,7 @@
 
 #include "common/alignment.h"
 #include "common/assert.h"
+#include "common/frameCost.h"
 #include "common/profiler.h"
 #include "graphics/host_gpu/pageManager.h"
 #include "graphics/host_gpu/regionDefinitions.h"
@@ -388,9 +389,10 @@ void ImageHeap::Mark(uint32_t index, State state) {
 
 // Calls fn with each selected element of an image in m_changes, sorted by serial; true if any.
 template <typename Fn>
-bool ImageHeap::ForEachChanged(Fn&& fn) {
+bool ImageHeap::ForEachChanged(Fn&& fn, uint64_t* visited) {
 	bool found = false;
 	for (uint32_t index = 1; !m_changes.empty() && index < m_elements.size(); ++index) {
+		if (visited != nullptr) ++*visited;
 		const auto& element = m_elements[index];
 		if (element.refs != 0u && element.image &&
 		    std::ranges::binary_search(m_changes, element.serial, {}, &Image::HeapChange::serial)) {
@@ -501,6 +503,9 @@ void ImageHeap::Resize(Memory& memory, uint64_t base, uint64_t size) {
 
 void ImageHeap::Rebind(RenderExecutor& executor) {
 	KYTY_PROFILER_FUNCTION();
+	Common::FrameCost::ScopedTimer frame_timer(Common::FrameCost::Counter::ImageHeapRebindNs);
+	Common::FrameCost::Add(Common::FrameCost::Counter::ImageHeapRebindCalls);
+	uint64_t entries_visited = 0;
 	auto& textures = m_context.GetTextureCache();
 	// A changed image refreshes; one that changed identity needs new elements.
 	TakeChanges();
@@ -516,8 +521,10 @@ void ImageHeap::Rebind(RenderExecutor& executor) {
 		}
 		return static_cast<bool>(id);
 	});
-	bool stale = ForEachChanged([&](uint32_t index) { Mark(index, State::Stale); });
+	bool stale = ForEachChanged([&](uint32_t index) { Mark(index, State::Stale); }, &entries_visited);
 	const auto resolve = [&](const Element& element) {
+		Common::FrameCost::ScopedTimer timer(Common::FrameCost::Counter::ResolveTextureNs);
+		Common::FrameCost::Add(Common::FrameCost::Counter::ResolveTextureCalls);
 		const auto& key = element.key;
 		const auto resource = IR::ImageHeapResource(
 		    {.dimension = key.dimension, .depth_compare = key.depth_view, .r128 = key.r128}, element.kind);
@@ -526,6 +533,7 @@ void ImageHeap::Rebind(RenderExecutor& executor) {
 	// A listed element whose descriptor resolves to another image is stale; true once it leaves
 	// the list. A held element whose texture is unmapped stays null.
 	const auto retry = [&](uint32_t index) {
+		++entries_visited;
 		const auto& element = m_elements[index];
 		if (element.state != State::Live) return true;
 		const auto binding = resolve(element);
@@ -547,6 +555,7 @@ void ImageHeap::Rebind(RenderExecutor& executor) {
 	}
 	if (stale) Repoint();
 	for (const auto index: m_pending) {
+		++entries_visited;
 		if (m_elements[index].refs == 0u) continue;
 		auto binding = resolve(m_elements[index]);
 		if (binding.image_id) {
@@ -567,6 +576,7 @@ void ImageHeap::Rebind(RenderExecutor& executor) {
 	}
 	m_pending.clear();
 	WriteDescriptors();
+	Common::FrameCost::Add(Common::FrameCost::Counter::ImageHeapEntriesVisited, entries_visited);
 }
 
 void ImageHeap::WriteDescriptors() {

@@ -2,6 +2,7 @@
 
 #include "common/assert.h"
 #include "common/ports.h"
+#include "common/frameCost.h"
 #include "graphics/guest_gpu/gpu_format.h"
 #include "graphics/shader/recompiler/BufferFormat.h"
 #include "graphics/shader/recompiler/ir/Serialize.h"
@@ -2081,6 +2082,8 @@ ResourcePlan ExtractResourcePlan(const Program& program) {
 bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime,
                           ResourceSnapshot& snapshot, ResourceSpecialization& specialization,
                           std::string* failure_reason) {
+	Common::FrameCost::ScopedTimer timer(Common::FrameCost::Counter::MaterializeResourcesNs);
+	Common::FrameCost::Add(Common::FrameCost::Counter::MaterializeResourcesCalls);
 	const SpecializationFailureScope failure_scope(failure_reason);
 	for (auto& keys: program.selector_keys) keys.resolved = false;
 	if (!program.resource_tracking_complete) return SpecializationFail("resource tracking incomplete");

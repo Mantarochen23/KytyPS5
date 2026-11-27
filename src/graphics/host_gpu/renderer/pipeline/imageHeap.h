@@ -122,7 +122,7 @@ private:
 	void     Retire();
 	void     Mark(uint32_t index, State state);
 	template <typename Fn>
-	bool     ForEachChanged(Fn&& fn);
+	bool     ForEachChanged(Fn&& fn, uint64_t* visited = nullptr);
 	void     Repoint();
 	void     TakeChanges();
 	ImageId  CurrentImage(const Image::HeapChange& change);

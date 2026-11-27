@@ -3,6 +3,7 @@
 #include "common/alignment.h"
 #include "common/assert.h"
 #include "common/debugCounters.h"
+#include "common/frameCost.h"
 #include "common/emulatorConfig.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
@@ -1306,11 +1307,14 @@ ImageId TextureCache::AssociateStencil(ImageId depth_id, GuestRange stencil) {
 }
 
 ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
+	Common::FrameCost::ScopedTimer timer(Common::FrameCost::Counter::FindImageNs);
+	Common::FrameCost::Add(Common::FrameCost::Counter::FindImageCalls);
 	ValidateImageDesc(desc);
 	EXIT_IF(desc.info.data.Empty());
 	const auto metadata_base_layer = desc.view_info.base_layer;
 
 	ImageId result {};
+	bool    cache_hit = false;
 	{
 		std::scoped_lock lock {m_lock};
 		Common::SmallVector<ImageId, 8> candidates;
@@ -1397,6 +1401,7 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 				result = {};
 			}
 		}
+		cache_hit = static_cast<bool>(result);
 		if (!result) {
 			result         = InsertImage(desc.info);
 			auto& inserted = m_slot_images[result];
@@ -1434,6 +1439,7 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 			     "contents\n");
 		}
 	}
+	if (cache_hit) Common::FrameCost::Add(Common::FrameCost::Counter::FindImageHits);
 	return result;
 }
 
