@@ -26,11 +26,14 @@ constexpr uint32_t DispatchDefaultMaxGroups = 1u << 22u;
 constexpr uint64_t DispatchReportInvocations = 1ull << 26u;
 constexpr uint32_t DispatchReportsPerShader  = 4;
 
+// x * y * z, saturating (three full 32-bit counts do not fit 64 bits).
 [[nodiscard]] constexpr uint64_t DispatchGroups(uint32_t x, uint32_t y, uint32_t z) {
-	return uint64_t {x} * y * z;
+	const uint64_t xy = uint64_t {x} * y;
+	if (z != 0 && xy > UINT64_MAX / z) return UINT64_MAX;
+	return xy * z;
 }
 
-// Total invocations; saturates instead of wrapping (2^32 x 2^32 x 2^32 groups does not fit).
+// Total invocations; saturates instead of wrapping.
 [[nodiscard]] constexpr uint64_t DispatchInvocations(uint32_t x, uint32_t y, uint32_t z,
                                                      uint64_t threads_per_group) {
 	const uint64_t groups = DispatchGroups(x, y, z);
