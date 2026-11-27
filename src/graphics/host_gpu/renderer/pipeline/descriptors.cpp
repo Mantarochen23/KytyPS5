@@ -366,7 +366,10 @@ static vk::Format SampledViewFormat(const GraphicContext& graphics, Prospero::Bu
 static vk::Format StorageViewFormat(const ShaderRecompiler::IR::ImageResource& resource,
                                     Prospero::BufferFormat format, vk::Format pixel_format) {
 	if (resource.atomic64) return vk::Format::eR64Uint;
-	if (resource.atomic) return vk::Format::eR32Uint;
+	if (resource.atomic) {
+		return format == Prospero::BufferFormat::k8UInt ? vk::Format::eR8Uint
+		                                                : vk::Format::eR32Uint;
+	}
 	const auto raw_sint_format = ShaderRecompiler::IR::RawSignedStorageFormat(resource, format);
 	if (raw_sint_format != Prospero::BufferFormat::kInvalid) return VulkanFormat(raw_sint_format);
 	return SrgbUnormViewFormat(pixel_format);
@@ -486,6 +489,10 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
                                               const ShaderRecompiler::IR::DescriptorValue& value) {
 	if (resource.atomic64 && !m_context.GetGraphics().shader_image_int64_atomics_enabled) {
 		EXIT("64-bit image atomics require shaderImageInt64Atomics\n");
+	}
+	if (ShaderRecompiler::IR::IsAtomicUint8Image(resource) &&
+	    !m_context.GetGraphics().shader_storage_image_extended_formats_enabled) {
+		EXIT("8-bit image atomics require shaderStorageImageExtendedFormats and R8_UINT storage support\n");
 	}
 	auto descriptor = DecodeNativeDescriptor<ShaderTextureResource>(value);
 	const bool storage = resource.written;

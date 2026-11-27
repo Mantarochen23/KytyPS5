@@ -32,7 +32,22 @@ namespace {
 
 constexpr uint64_t AddressMask            = 0x0000ffffffffffffull;
 
+thread_local std::string* g_specialization_failure_sink = nullptr;
+
+struct SpecializationFailureScope {
+	std::string* previous = nullptr;
+	explicit SpecializationFailureScope(std::string* sink)
+	    : previous(g_specialization_failure_sink) {
+		if (sink != nullptr) sink->clear();
+		g_specialization_failure_sink = sink;
+	}
+	~SpecializationFailureScope() { g_specialization_failure_sink = previous; }
+};
+
 bool SpecializationFail(std::string_view message) {
+	if (g_specialization_failure_sink != nullptr && g_specialization_failure_sink->empty()) {
+		g_specialization_failure_sink->assign(message);
+	}
 	std::fprintf(stderr, "shader resource specialization failed: %.*s\n",
 	             static_cast<int>(message.size()), message.data());
 	return false;
@@ -241,6 +256,17 @@ bool BufferWriteOverlaps(const BufferResource& resource, const DescriptorValue& 
 	});
 }
 
+bool NormalizeIndexedRawBuffer(DescriptorValue& value, ShaderBufferResource& descriptor) {
+	// With OOB_SELECT=3 and swizzle off, NUM_RECORDS is a raw byte bound [0, NUM_RECORDS).
+	// When STRIDE divides NUM_RECORDS evenly (including STRIDE=1), NUM_RECORDS / STRIDE records
+	// of STRIDE bytes span the exact same byte range under linear index bounds (OOB_SELECT=0).
+	const auto stride = descriptor.Stride();
+	if (stride == 0u || descriptor.NumRecords() % stride != 0u) return false;
+	value.dwords[2] = descriptor.NumRecords() / stride;
+	value.dwords[3] &= ~(3u << 28u);
+	return DecodeBufferDescriptor(value, descriptor);
+}
+
 bool NormalizeIndirectBuffer(DescriptorValue& value, bool indexed, const BufferResource& resource) {
 	ShaderBufferResource descriptor;
 	if (!DecodeBufferDescriptor(value, descriptor)) return false;
@@ -265,6 +291,10 @@ bool NormalizeIndirectBuffer(DescriptorValue& value, bool indexed, const BufferR
 		value.dwords[3] |= 3u << 28u;
 		if (!DecodeBufferDescriptor(value, descriptor)) return false;
 	}
+	if (indexed && !descriptor.SwizzleEnabled() && !descriptor.AddTid() &&
+	    descriptor.OutOfBounds() == 3u) {
+		(void)NormalizeIndexedRawBuffer(value, descriptor);
+	}
 	if (descriptor.SwizzleEnabled() || descriptor.AddTid() ||
 	    descriptor.OutOfBounds() != (indexed ? 0u : 3u)) {
 		return SpecializationFail(fmt::format(
@@ -282,6 +312,7 @@ bool NormalizeIndirectBuffer(DescriptorValue& value, bool indexed, const BufferR
 		if (!formatted_read) {
 			const bool scalar = resource.max_byte_extent == 4u &&
 			    (descriptor.Format() == Prospero::BufferFormat::k32UInt ||
+			     descriptor.Format() == Prospero::BufferFormat::k8UInt ||
 			     descriptor.Format() == Prospero::BufferFormat::k8SInt);
 			const bool rgba16 = resource.max_byte_extent == 16u &&
 			    descriptor.Format() == Prospero::BufferFormat::k16_16_16_16Float;
@@ -290,7 +321,7 @@ bool NormalizeIndirectBuffer(DescriptorValue& value, bool indexed, const BufferR
 			const bool identity = rgba16 ? swizzle == DstSel(4, 5, 6, 7)
 			                             : (swizzle & ~DstSel(0, 1, 1, 1)) == DstSel(4);
 			if ((!scalar && !rgba16) || descriptor.Stride() != format.byte_size || !identity)
-				return SpecializationFail("indirect formatted stores require tight identity SInt8, UInt32 or RGBA16Float records");
+				return SpecializationFail("indirect formatted stores require tight identity UInt8, SInt8, UInt32 or RGBA16Float records");
 		}
 		if (formatted_read &&
 		    (descriptor.Base48() == 0u || descriptor.Stride() == 0u || descriptor.NumRecords() == 0u)) {
@@ -1115,7 +1146,8 @@ static bool BuildResourceSpecialization(const ResourcePlan& program, ResourceSna
 		    !storage && base.unfiltered_access_only && format == Prospero::BufferFormat::k16UInt &&
 		    static_cast<Prospero::TileMode>((descriptor.dwords[3] >> 20u) & 0x1fu) ==
 		        Prospero::TileMode::kDepth;
-		image.conversion_format = depth_bits ? format : ImageConversionFormat(format);
+		const bool atomic_u8 = base.atomic && !base.atomic64 && format == Prospero::BufferFormat::k8UInt;
+		image.conversion_format = depth_bits || atomic_u8 ? format : ImageConversionFormat(format);
 		// SKIP_DEGAMMA (S# bit 31) reads sRGB texels as stored.
 		image.skip_degamma = Prospero::IsSrgbFormat(format) &&
 		    std::ranges::any_of(program.info.sampled_pairs, [&](const auto& pair) {
@@ -1734,9 +1766,11 @@ ResourcePlan ExtractResourcePlan(const Program& program) {
 }
 
 bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime,
-                          ResourceSnapshot& snapshot, ResourceSpecialization& specialization) {
+                          ResourceSnapshot& snapshot, ResourceSpecialization& specialization,
+                          std::string* failure_reason) {
+	const SpecializationFailureScope failure_scope(failure_reason);
 	for (auto& keys: program.selector_keys) keys.resolved = false;
-	if (!program.resource_tracking_complete) return false;
+	if (!program.resource_tracking_complete) return SpecializationFail("resource tracking incomplete");
 	const auto uses_workgroup_count = [](const DescriptorSource& source) {
 		return source.indirect_descriptor && source.indirect_descriptor->workgroup_axis != UINT32_MAX;
 	};

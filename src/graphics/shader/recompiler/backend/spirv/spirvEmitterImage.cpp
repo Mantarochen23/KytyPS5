@@ -382,7 +382,7 @@ Format::BufferFormatInfo ImageConversionFormat(const EmitterState&   state,
                                                const IR::MemoryInfo& mem) {
 	const auto& image = state.program.info.images[mem.resource];
 	const auto format = image.conversion_format;
-	if (format == Prospero::BufferFormat::kInvalid) return {};
+	if (format == Prospero::BufferFormat::kInvalid || IR::IsAtomicUint8Image(image)) return {};
 	const auto info = Format::GetFormatInfo(format);
 	if (IR::ReadsDepthBits(image)) return info;
 	const bool raw_signed = IR::RawSignedStorageFormat(image, format) != Prospero::BufferFormat::kInvalid;
@@ -855,6 +855,77 @@ std::array<ImageSampler, 2> LoadImageSamplers(ValueEmitContext& ctx, const IR::I
 	return result;
 }
 
+uint32_t EmitAtomicUint8Image(ValueEmitContext& ctx, const IR::Inst& inst,
+                              const IR::MemoryInfo& mem, const IR::ImageResource& image,
+                              const IR::Inst& address) {
+	auto&      state      = ctx.state;
+	const auto op         = inst.GetOpcode();
+	const auto descriptor = LoadImageDescriptor(state, mem.resource, 0u, 0u);
+	const auto coord      = CoordU32(ctx, mem, address, image.dimension);
+	EmitAtomicMemoryBarrier(state, IR::ResourceKind::Image);
+	const auto texel = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpImageRead, TypeU32Vector(state, 4), texel, descriptor, coord);
+	const auto raw_old = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpCompositeExtract, TypeU32(state), raw_old, texel, 0u);
+	const auto old =
+	    Binary(state, spv::OpBitwiseAnd, TypeU32(state), raw_old, ConstantU32(state, 0xffu));
+	uint32_t next = old;
+	if (op == IR::ValueOpcode::ImageAtomicCompareSwap32) {
+		const auto desired = ctx.Arg(inst, inst.NumArgs() - 3);
+		const auto comparator =
+		    Binary(state, spv::OpBitwiseAnd, TypeU32(state), ctx.Arg(inst, inst.NumArgs() - 2),
+		           ConstantU32(state, 0xffu));
+		const auto equal = Binary(state, spv::OpIEqual, TypeBool(state), old, comparator);
+		next             = Select(state, TypeU32(state), equal, desired, old);
+	} else {
+		const auto data = ctx.Arg(inst, inst.NumArgs() - 2);
+		switch (op) {
+			case IR::ValueOpcode::ImageAtomicSwap32: next = data; break;
+			case IR::ValueOpcode::ImageAtomicIAdd32:
+				next = Binary(state, spv::OpIAdd, TypeU32(state), old, data);
+				break;
+			case IR::ValueOpcode::ImageAtomicSMin32:
+			case IR::ValueOpcode::ImageAtomicSMax32: {
+				const auto s_old =
+				    EmitBitFieldSExtract(state, old, ConstantU32(state, 0u), ConstantU32(state, 8u));
+				const auto s_val =
+				    EmitBitFieldSExtract(state, data, ConstantU32(state, 0u), ConstantU32(state, 8u));
+				next = op == IR::ValueOpcode::ImageAtomicSMin32 ? EmitSMin32(state, s_old, s_val)
+				                                                : EmitSMax32(state, s_old, s_val);
+				break;
+			}
+			case IR::ValueOpcode::ImageAtomicUMin32: next = EmitUMin32(state, old, data); break;
+			case IR::ValueOpcode::ImageAtomicUMax32:
+				next = EmitUMin32(state, EmitUMax32(state, old, data), ConstantU32(state, 0xffu));
+				break;
+			case IR::ValueOpcode::ImageAtomicAnd32:
+				next = Binary(state, spv::OpBitwiseAnd, TypeU32(state), old, data);
+				break;
+			case IR::ValueOpcode::ImageAtomicOr32:
+				next = Binary(state, spv::OpBitwiseOr, TypeU32(state), old, data);
+				break;
+			case IR::ValueOpcode::ImageAtomicXor32:
+				next = Binary(state, spv::OpBitwiseXor, TypeU32(state), old, data);
+				break;
+			case IR::ValueOpcode::ImageAtomicFMin32:
+			case IR::ValueOpcode::ImageAtomicFMax32:
+				next = EmitFloatAtomicReplacement(state, old, data,
+				                                  op == IR::ValueOpcode::ImageAtomicFMax32);
+				break;
+			default: ctx.Fail(inst, "has unsupported 8-bit image atomic opcode"); return old;
+		}
+	}
+	const auto stored =
+	    Binary(state, spv::OpBitwiseAnd, TypeU32(state), next, ConstantU32(state, 0xffu));
+	const auto zero = ConstantU32(state, 0u);
+	const auto out  = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpCompositeConstruct, TypeU32Vector(state, 4), out, stored, zero,
+	                          zero, zero);
+	state.builder.AddFunction(spv::OpImageWrite, descriptor, coord, out);
+	EmitAtomicMemoryBarrier(state, IR::ResourceKind::Image);
+	return old;
+}
+
 } // namespace
 
 void EmitImage(ValueEmitContext& ctx, const IR::Inst& inst) {
@@ -1136,6 +1207,9 @@ void EmitImage(ValueEmitContext& ctx, const IR::Inst& inst) {
 		const auto zero = image.atomic64 ? ConstantU64(state, 0) : ConstantU32(state, 0);
 		ctx.Define(inst, EmitValueOrDefaultIfCondition(
 		                     state, ctx.Arg(inst, inst.NumArgs() - 1), result_type, zero, [&]() {
+			           if (IR::IsAtomicUint8Image(image)) {
+				           return EmitAtomicUint8Image(ctx, inst, mem, image, *address);
+			           }
 			           const auto pointer      = state.builder.AllocateId();
 			           const auto pointer_type =
 			               state.builder.Type(spv::OpTypePointer, spv::StorageClassImage,

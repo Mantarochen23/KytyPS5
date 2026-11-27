@@ -14119,6 +14119,125 @@ void TestNewShaderRecompilerSpirvSizeBaselines() {
 
 #include "ShaderRayTracingTests.inc"
 
+void TestIndirectFormattedUInt8RawBoundsShader() {
+  // Synthetic compute shader: masked GPU-selected index -> s_buffer_load_dwordx4 from a
+  // 16-byte-stride table -> indexed formatted buffer_store_format_x into an OOB_SELECT=3
+  // stride-1 k8UInt buffer candidate.
+  const uint32_t shader[] = {
+      EncodeVop3Word0(0x182, 4),
+      EncodeVop3Word1(256u + 0u, 0, 0), // v_readfirstlane_b32 s4, v0
+      EncodeSop2(0x0e, 4, 4, 255),
+      0x00ffffffu,                      // s_and_b32 s4, s4, 0x00ffffff
+      EncodeSop2(0x1e, 4, 4, 132),      // s_lshl_b32 s4, s4, 4
+      EncodeSmem0(0x0a, 8, 0),
+      4u << 25u,                        // s_buffer_load_dwordx4 s[8:11], s[0:3], s4
+      0xbf8cc07fu,                      // s_waitcnt lgkmcnt(0)
+      EncodeMubuf0(0x04, 0, true),
+      EncodeMubuf1(1, 2, 0),            // buffer_store_format_x v1, v0, s[8:11], 0 idxen
+      EncodeSopp(0x01),                 // s_endpgm
+  };
+  alignas(16) std::array<std::array<uint32_t, 4>, 4> table_rows{{
+      {0x4ae00000u, 0x00010010u, 0x0ae00000u, 0x30005004u}, // stride=1, k8UInt, OOB_SELECT=3
+      {0x50000000u, 0x00040010u, 0x00001000u, 0x00014004u}, // stride=4, k32UInt, OOB_SELECT=0
+      {0u, 0u, 0u, 0u},
+      {0u, 0u, 0u, 0u},
+  }};
+  const auto table_addr = reinterpret_cast<uint64_t>(table_rows.data());
+  std::array<uint32_t, 4> user_data{
+      static_cast<uint32_t>(table_addr),
+      static_cast<uint32_t>((table_addr >> 32u) & 0xffffu) | (16u << 16u),
+      static_cast<uint32_t>(table_rows.size()),
+      0x00005204u,
+  };
+  auto options = MakeCompileOptions(ShaderType::Compute);
+  options.user_data = user_data;
+  const auto result = RecompileForTest(shader, options);
+  CheckSpirvBinaryValidates(result.spirv);
+  spvtools::SpirvTools tools(SPV_ENV_VULKAN_1_3);
+  std::string text;
+  Check(tools.Validate(result.spirv.data(), result.spirv.size()),
+        "indirect formatted k8UInt OOB_SELECT=3 shader failed Vulkan 1.3 SPIR-V validation");
+  Check(tools.Disassemble(result.spirv.data(), result.spirv.size(), &text,
+                          SPV_BINARY_TO_TEXT_OPTION_FRIENDLY_NAMES),
+        "failed to disassemble indirect formatted k8UInt shader");
+  Check(text.find("OpTypeInt 8 0") != std::string::npos &&
+            text.find("OpStore") != std::string::npos,
+        "indirect formatted k8UInt shader did not emit 8-bit storage buffer write");
+}
+
+void TestAtomicImageUint8Shader() {
+  using F = Prospero::BufferFormat;
+  using T = Prospero::ImageType;
+  const auto make_img_desc = [](uint32_t addr_lo, F format) {
+    return std::array<uint32_t, 8>{
+        addr_lo,
+        static_cast<uint32_t>(format) << 20u,
+        0x0003c00fu, // 16x16
+        DstSel(4, 0, 0, 1) | (static_cast<uint32_t>(T::kColor2D) << 28u),
+        0u,
+        0u,
+        0u,
+        0u,
+    };
+  };
+  // Pixel shader with k8UInt image atomics (UMIN, OR, CMPSWAP) plus a k32UInt atomic image
+  // and a non-atomic k8UInt storage image in the same stage.
+  const uint32_t shader[] = {
+      EncodeMimg0(0x15, 0x1, true, 1), EncodeMimg1(0, 0, 0, 1), // image_atomic_umin v0, v[1:2], s[0:7]
+      EncodeMimg0(0x19, 0x1, true, 1), EncodeMimg1(0, 0, 0, 1), // image_atomic_or v0, v[1:2], s[0:7]
+      EncodeMimg0(0x10, 0x3, true, 1), EncodeMimg1(3, 0, 0, 1), // image_atomic_cmpswap v[3:4], v[1:2], s[0:7]
+      EncodeMimg0(0x15, 0x1, true, 1), EncodeMimg1(5, 2, 0, 1), // image_atomic_umin v5, v[1:2], s[8:15] (k32UInt)
+      EncodeMimg0(0x08, 0x1, false, 1), EncodeMimg1(0, 4, 0, 1), // image_store v0, v[1:2], s[16:23] (k8UInt)
+      EncodeSopp(0x01),                                          // s_endpgm
+  };
+  std::array<uint32_t, 24> user_data{};
+  const auto d0 = make_img_desc(0x1000u, F::k8UInt);
+  const auto d1 = make_img_desc(0x2000u, F::k32UInt);
+  const auto d2 = make_img_desc(0x3000u, F::k8UInt);
+  std::copy(d0.begin(), d0.end(), user_data.begin());
+  std::copy(d1.begin(), d1.end(), user_data.begin() + 8);
+  std::copy(d2.begin(), d2.end(), user_data.begin() + 16);
+
+  for (const bool interlock : {false, true}) {
+    ShaderRecompiler::Spirv::Profile profile;
+    profile.fragment_shader_pixel_interlock = interlock;
+    auto options = MakeCompileOptions(ShaderType::Pixel);
+    options.user_data = user_data;
+    options.profile = &profile;
+    const auto result = RecompileForTest(shader, options);
+    spvtools::SpirvTools tools(SPV_ENV_VULKAN_1_3);
+    std::string messages;
+    tools.SetMessageConsumer([&messages](spv_message_level_t, const char *,
+                                         const spv_position_t &position, const char *message) {
+      messages += std::to_string(position.line) + ":" + std::to_string(position.column) + ": " +
+                  message + "\n";
+    });
+    if (!tools.Validate(result.spirv.data(), result.spirv.size())) {
+      std::fprintf(stderr, "k8UInt atomic image SPIR-V validation failed (interlock=%d):\n%s",
+                   interlock, messages.c_str());
+      Check(false, "k8UInt atomic image shader failed Vulkan 1.3 SPIR-V validation");
+    }
+    std::string text;
+    Check(tools.Disassemble(result.spirv.data(), result.spirv.size(), &text,
+                            SPV_BINARY_TO_TEXT_OPTION_FRIENDLY_NAMES),
+          "failed to disassemble k8UInt atomic image shader");
+    Check(text.find("OpCapability StorageImageExtendedFormats") != std::string::npos &&
+              text.find("R8ui") != std::string::npos &&
+              text.find("OpImageRead") != std::string::npos &&
+              text.find("OpImageWrite") != std::string::npos &&
+              text.find("OpMemoryBarrier") != std::string::npos &&
+              text.find("R32ui") != std::string::npos &&
+              text.find("OpAtomicUMin") != std::string::npos,
+          "k8UInt atomic image shader missing expected R8ui RMW or coexisting R32ui atomic ops");
+    const bool has_interlock =
+        text.find("SPV_EXT_fragment_shader_interlock") != std::string::npos &&
+        text.find("OpBeginInvocationInterlockEXT") != std::string::npos &&
+        text.find("OpEndInvocationInterlockEXT") != std::string::npos;
+    Check(has_interlock == interlock,
+          "k8UInt atomic image shader pixel interlock emission did not match profile");
+  }
+}
+
 } // namespace
 } // namespace Libs::Graphics
 
@@ -14150,6 +14269,12 @@ int main(int argc, char** argv) {
     TestGetBdaPointerMissTelemetryShape();
     TestBdaMissBreadcrumbAndReporting();
     TestBdaTableValidator();
+    return 0;
+  }
+  if (argc == 2 && std::strcmp(argv[1], "--matfail-only") == 0) {
+    TestIndirectFormattedUInt8RawBoundsShader();
+    TestAtomicImageUint8Shader();
+    std::puts("ShaderCfgTests (--matfail-only): all cases passed");
     return 0;
   }
   TestVop3FloatConversionDecode();
@@ -14370,6 +14495,8 @@ int main(int argc, char** argv) {
   TestBdaTableValidator();
 
   TestNewShaderRecompilerVop3LaneReadDestinationEncoding();
+  TestIndirectFormattedUInt8RawBoundsShader();
+  TestAtomicImageUint8Shader();
 
   return PassBenchReport();
 }

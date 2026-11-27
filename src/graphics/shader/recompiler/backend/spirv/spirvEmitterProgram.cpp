@@ -127,6 +127,9 @@ std::optional<uint32_t> LoopHeaderIdOfMerge(const IR::Program& program, const IR
 
 void EmitReturn(ValueEmitContext& ctx) {
 	EmitLoopGuardReport(ctx.state);
+	if (ctx.state.pixel_interlock_active) {
+		ctx.state.builder.AddFunction(spv::OpEndInvocationInterlockEXT);
+	}
 	EmitKillIfPixelValidMaskInactive(ctx.state);
 	if (ctx.state.object_primitive_id_variable != 0) {
 		auto& state = ctx.state;
@@ -814,6 +817,9 @@ void EmitProgram(EmitterState& state) {
 		state.builder.AddFunction(spv::OpStore, state.loop_guard_loop, ConstantU32(state, UINT32_MAX));
 	}
 	EmitMemoryBindings(state);
+	if (state.pixel_interlock_active) {
+		state.builder.AddFunction(spv::OpBeginInvocationInterlockEXT);
+	}
 	if (program.blocks.empty()) {
 		EmitReturn(ctx);
 	} else if (state.program.dispatcher_fallback) {

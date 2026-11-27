@@ -173,8 +173,25 @@ struct ImageResource {
 [[nodiscard]] constexpr bool IsSupportedAtomicImageFormat(Prospero::BufferFormat format, bool wide) {
 	using F = Prospero::BufferFormat;
 	// An atomic treats one or two 32-bit channels as a single word regardless of their numeric type.
+	// 8-bit unsigned integer images (k8UInt) are emulated on R8_UINT storage views.
 	return wide ? format >= F::k32_32UInt && format <= F::k32_32Float
-	            : format >= F::k32UInt && format <= F::k32Float;
+	            : (format >= F::k32UInt && format <= F::k32Float) || format == F::k8UInt;
+}
+
+[[nodiscard]] constexpr bool IsAtomicUint8Image(const ImageResource& image) {
+	return image.atomic && !image.atomic64 &&
+	       image.conversion_format == Prospero::BufferFormat::k8UInt;
+}
+
+[[nodiscard]] constexpr uint32_t AtomicUint8ImageIndex(Decoder::ImageDimension dimension) {
+	switch (dimension) {
+		case Decoder::ImageDimension::Dim1D: return 0u;
+		case Decoder::ImageDimension::Dim1DArray: return 1u;
+		case Decoder::ImageDimension::Dim2D: return 2u;
+		case Decoder::ImageDimension::Dim2DArray: return 3u;
+		case Decoder::ImageDimension::Dim3D: return 4u;
+		default: return 0u;
+	}
 }
 
 [[nodiscard]] constexpr Prospero::BufferFormat
@@ -465,7 +482,8 @@ DescriptorBindingForImage(const ImageResource& image) {
 			if (image.numeric_class != Prospero::TextureNumericClass::Uint) {
 				return std::nullopt;
 			}
-			base = AtomicUintBinding + (image.atomic64 ? 5u : 0u);
+			base = IsAtomicUint8Image(image) ? StorageUintBinding
+			                                 : AtomicUintBinding + (image.atomic64 ? 5u : 0u);
 		} else {
 			switch (image.numeric_class) {
 				case Prospero::TextureNumericClass::Float: base = StorageFloatBinding; break;

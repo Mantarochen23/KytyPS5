@@ -1,4 +1,5 @@
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
+#include "graphics/host_gpu/renderer/pipeline/shaderStoreCapability.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderStoreDiff.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderStoreFile.h"
 #include "graphics/shader/shaderCompiler.h"
@@ -240,6 +241,14 @@ void TestLookupCounters() {
 	Check(!stats.WantsDescription(), "and no more");
 }
 
+void TestCapabilityVersionBumped() {
+	Check(kTranslatorCapabilityVersion >= 4u,
+	      "capability version was bumped to retry previously failed shaders");
+	Check(FailureCacheApplies(kTranslatorCapabilityVersion) &&
+	          !FailureCacheApplies(kTranslatorCapabilityVersion - 1u),
+	      "older negative-cache generation no longer applies");
+}
+
 } // namespace
 
 int main() {
@@ -247,6 +256,7 @@ int main() {
 	TestDurableAppendAndReload();
 	TestMissDescriptions();
 	TestLookupCounters();
+	TestCapabilityVersionBumped();
 	std::printf("ShaderStoreTests: ok\n");
 	return 0;
 }
