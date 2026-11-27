@@ -114,7 +114,8 @@ static uint64_t EstimatePlanBytes(const ShaderRecompiler::IR::ResourcePlan& plan
 	bytes += plan.srt_scratch.capacity() * sizeof(uint64_t) + plan.material_keys.capacity() * sizeof(uint32_t);
 	bytes += plan.control_phi_predecessors.size() * 64;
 	if (plan.srt_code != nullptr) {
-		bytes += plan.srt_code->getSize();
+		// Xbyak's default code buffer (the type is incomplete here, so its size cannot be read).
+		bytes += 4096;
 	}
 	uint64_t scan = 0;
 	for (const auto& entry: plan.scan_cache) {
