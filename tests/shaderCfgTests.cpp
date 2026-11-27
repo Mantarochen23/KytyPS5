@@ -14271,6 +14271,12 @@ int main(int argc, char** argv) {
     TestBdaTableValidator();
     return 0;
   }
+  if (argc == 2 && std::strcmp(argv[1], "--matfail-only") == 0) {
+    TestIndirectFormattedUInt8RawBoundsShader();
+    TestAtomicImageUint8Shader();
+    std::puts("ShaderCfgTests (--matfail-only): all cases passed");
+    return 0;
+  }
   TestVop3FloatConversionDecode();
   TestRayTracingInstructions();
   TestShaderBufferResourceSize();
