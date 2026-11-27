@@ -224,15 +224,31 @@ uint32_t SharedIndirectBufferResource(const EmitterState& state, uint32_t resour
 	return representative;
 }
 
+bool UsesDynamicIndirectBufferSlots(const EmitterState& state, uint32_t resource) {
+	const auto& buffers = state.program.info.buffers;
+	if (resource >= buffers.size()) return false;
+	const auto& root = buffers[resource];
+	if (root.indirect_root != resource || root.scalar ||
+	    root.descriptor_index == UINT32_MAX || root.indirect_resources.size() < 2u) {
+		return false;
+	}
+	for (const auto candidate: root.indirect_resources) {
+		if (EmptyIndirectBufferCandidate(state, candidate)) continue;
+		if (buffers[candidate].descriptor_index == UINT32_MAX) return false;
+	}
+	return true;
+}
+
 void EmitMemoryBindings(EmitterState& state) {
 	const auto count = state.program.bindings.descriptor_counts[static_cast<size_t>(IR::DescriptorBindingKind::Buffers)];
 	state.memory_byte_offsets.resize(count);
 	state.memory_byte_sizes.resize(count);
 	std::vector<bool> dynamic_offsets(count);
 	for (uint32_t resource = 0; resource < state.program.info.buffers.size(); ++resource) {
-		if (SharedIndirectBufferResource(state, resource) == UINT32_MAX) continue;
+		if (!UsesDynamicIndirectBufferSlots(state, resource)) continue;
 		for (const auto candidate: state.program.info.buffers[resource].indirect_resources) {
-			dynamic_offsets[state.program.info.buffers[candidate].descriptor_index] = true;
+			const auto slot = state.program.info.buffers[candidate].descriptor_index;
+			if (slot < count) dynamic_offsets[slot] = true;
 		}
 	}
 	for (uint32_t i = 0; i < count; i += 4u) {
@@ -694,30 +710,41 @@ spv::Op SpirvAtomicOpcode(IR::ValueOpcode opcode) {
 	}
 }
 
-uint32_t EmitAtomicOperation(ValueEmitContext& ctx, const IR::Inst& inst, uint32_t pointer,
-                             uint32_t scope) {
-	const auto opcode = SpirvAtomicOpcode(inst.GetOpcode());
-	const auto old    = ctx.state.builder.AllocateId();
-	const bool wide   = inst.GetType() == IR::Type::U64;
-	const auto type   = wide ? TypeU64(ctx.state) : TypeU32(ctx.state);
+uint32_t EmitAtomicOperation(EmitterState& state, IR::ValueOpcode ir_opcode, bool wide,
+                             uint32_t pointer, uint32_t scope, uint32_t value_or_desired,
+                             uint32_t comparator) {
+	const auto opcode = SpirvAtomicOpcode(ir_opcode);
+	const auto old    = state.builder.AllocateId();
+	const auto type   = wide ? TypeU64(state) : TypeU32(state);
 	if (opcode == spv::OpAtomicCompareExchange) {
-		auto desired    = ctx.Arg(inst, inst.NumArgs() - 3);
-		auto comparator = ctx.Arg(inst, inst.NumArgs() - 2);
-		if (inst.GetOpcode() == IR::ValueOpcode::SharedAtomicCmpSwap32) {
+		auto desired = value_or_desired;
+		if (ir_opcode == IR::ValueOpcode::SharedAtomicCmpSwap32) {
 			// RDNA2 DS compares DATA and stores DATA2, opposite to BUFFER atomics.
 			std::swap(desired, comparator);
 		}
-		ctx.state.builder.AddFunction(
-		    spv::OpAtomicCompareExchange, TypeU32(ctx.state), old, pointer,
-		    ConstantU32(ctx.state, scope), ConstantU32(ctx.state, spv::MemorySemanticsMaskNone),
-		    ConstantU32(ctx.state, spv::MemorySemanticsMaskNone), desired, comparator);
+		state.builder.AddFunction(
+		    spv::OpAtomicCompareExchange, TypeU32(state), old, pointer,
+		    ConstantU32(state, scope), ConstantU32(state, spv::MemorySemanticsMaskNone),
+		    ConstantU32(state, spv::MemorySemanticsMaskNone), desired, comparator);
 	} else {
-		const auto value = ctx.Arg(inst, inst.NumArgs() - 2);
-		ctx.state.builder.AddFunction(opcode, type, old, pointer,
-		                              ConstantU32(ctx.state, scope),
-		                              ConstantU32(ctx.state, spv::MemorySemanticsMaskNone), value);
+		state.builder.AddFunction(opcode, type, old, pointer,
+		                          ConstantU32(state, scope),
+		                          ConstantU32(state, spv::MemorySemanticsMaskNone), value_or_desired);
 	}
 	return old;
+}
+
+uint32_t EmitAtomicOperation(ValueEmitContext& ctx, const IR::Inst& inst, uint32_t pointer,
+                             uint32_t scope) {
+	const auto opcode = SpirvAtomicOpcode(inst.GetOpcode());
+	const bool wide   = inst.GetType() == IR::Type::U64;
+	if (opcode == spv::OpAtomicCompareExchange) {
+		return EmitAtomicOperation(ctx.state, inst.GetOpcode(), wide, pointer, scope,
+		                           ctx.Arg(inst, inst.NumArgs() - 3),
+		                           ctx.Arg(inst, inst.NumArgs() - 2));
+	}
+	return EmitAtomicOperation(ctx.state, inst.GetOpcode(), wide, pointer, scope,
+	                           ctx.Arg(inst, inst.NumArgs() - 2));
 }
 
 void EmitAtomicMemoryBarrier(EmitterState& state, IR::ResourceKind kind) {

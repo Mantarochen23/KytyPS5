@@ -2,6 +2,7 @@
 #define EMULATOR_INCLUDE_EMULATOR_LIBS_LIBS_H_
 
 #include "common/abi.h"
+#include "common/fpEnv.h"
 #include "common/logging/log.h"
 #include "common/stringUtils.h"
 #include "common/threads.h"
@@ -122,6 +123,30 @@ void            LogFilteredCall(const char* library, const char* function, const
                                 uint64_t result);
 void            LogFailedCall(const char* library, const char* function, const uint64_t (&args)[6],
                               uint64_t result);
+// One `[fpenv]` line: the FP control state `env` differs from `expected` at `site` in a call of
+// library::function (Common::FpControlFirstDeviation decides that it is the first on the thread).
+void ReportCallFpEnv(Common::FpCheckSite site, const char* library, const char* function,
+                     Common::FpEnv env, Common::FpEnv expected);
+// A library function declared to return float or double returned: counted, and the first zero or
+// non-finite result of each function is logged (`[fp-return]`): a stub that returns 0.0 to a
+// caller that divides by it gives the guest an infinity.
+void NoteFloatReturn(const void* fn_key, const char* library, const char* function, double value);
+uint64_t FloatReturnCalls();
+
+// Around every library call (default on, two control-word reads per call): the guest's state on
+// entry, and whether the call returned with another one.
+inline void CheckCallEntryFpEnv(const char* library, const char* function, Common::FpEnv env) {
+	if (Common::FpControlFirstDeviation(Common::FpCheckSite::LibraryEntry, env)) {
+		ReportCallFpEnv(Common::FpCheckSite::LibraryEntry, library, function, env,
+		                Common::GuestFpEnv);
+	}
+}
+inline void CheckCallExitFpEnv(const char* library, const char* function, Common::FpEnv before) {
+	const auto after = Common::ReadFpEnv();
+	if (Common::FpControlFirstDeviation(Common::FpCheckSite::LibraryChanged, after, before)) {
+		ReportCallFpEnv(Common::FpCheckSite::LibraryChanged, library, function, after, before);
+	}
+}
 
 template <size_t N>
 struct FixedString {
@@ -176,16 +201,24 @@ struct LibThunkHelper<Fn, Library, Name, Ret (KYTY_SYSV_ABI*)(Args...)> {
 		size_t   arg_idx = 0;
 		(PushSysvIntArg(raw_args, arg_idx, args), ...);
 		const auto guest_ret = reinterpret_cast<uint64_t>(__builtin_return_address(0));
+		const auto fp_before = Common::ReadFpEnv();
 		auto&      record    = RecordThreadCallEntry(Library.data, Name.data, raw_args, guest_ret);
+		CheckCallEntryFpEnv(Library.data, Name.data, fp_before);
 		const bool trace_all = g_trace_calls_filtered && MatchesTraceFilter(Library.data);
 		if constexpr (std::is_void_v<Ret>) {
 			Fn(args...);
+			CheckCallExitFpEnv(Library.data, Name.data, fp_before);
 			record.completed = true;
 			if (trace_all) {
 				LogFilteredCall(Library.data, Name.data, raw_args, 0);
 			}
 		} else {
 			Ret      ret        = Fn(args...);
+			CheckCallExitFpEnv(Library.data, Name.data, fp_before);
+			if constexpr (std::is_floating_point_v<Ret>) {
+				NoteFloatReturn(reinterpret_cast<const void*>(&Call), Library.data, Name.data,
+				                static_cast<double>(ret));
+			}
 			uint64_t raw_result = 0;
 			const bool failed   = IsFailureReturn(ret, raw_result);
 			record.result       = raw_result;

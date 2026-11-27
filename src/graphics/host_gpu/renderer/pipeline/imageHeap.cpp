@@ -2,6 +2,8 @@
 
 #include "common/alignment.h"
 #include "common/assert.h"
+#include "common/frameCost.h"
+#include "common/ports.h"
 #include "common/profiler.h"
 #include "graphics/host_gpu/pageManager.h"
 #include "graphics/host_gpu/regionDefinitions.h"
@@ -388,9 +390,10 @@ void ImageHeap::Mark(uint32_t index, State state) {
 
 // Calls fn with each selected element of an image in m_changes, sorted by serial; true if any.
 template <typename Fn>
-bool ImageHeap::ForEachChanged(Fn&& fn) {
+bool ImageHeap::ForEachChanged(Fn&& fn, uint64_t* visited) {
 	bool found = false;
 	for (uint32_t index = 1; !m_changes.empty() && index < m_elements.size(); ++index) {
+		if (visited != nullptr) ++*visited;
 		const auto& element = m_elements[index];
 		if (element.refs != 0u && element.image &&
 		    std::ranges::binary_search(m_changes, element.serial, {}, &Image::HeapChange::serial)) {
@@ -501,6 +504,9 @@ void ImageHeap::Resize(Memory& memory, uint64_t base, uint64_t size) {
 
 void ImageHeap::Rebind(RenderExecutor& executor) {
 	KYTY_PROFILER_FUNCTION();
+	Common::FrameCost::ScopedTimer frame_timer(Common::FrameCost::Counter::ImageHeapRebindNs);
+	Common::FrameCost::Add(Common::FrameCost::Counter::ImageHeapRebindCalls);
+	uint64_t entries_visited = 0;
 	auto& textures = m_context.GetTextureCache();
 	// A changed image refreshes; one that changed identity needs new elements.
 	TakeChanges();
@@ -516,18 +522,41 @@ void ImageHeap::Rebind(RenderExecutor& executor) {
 		}
 		return static_cast<bool>(id);
 	});
-	bool stale = ForEachChanged([&](uint32_t index) { Mark(index, State::Stale); });
-	const auto resolve = [&](const Element& element) {
+	bool stale = ForEachChanged([&](uint32_t index) { Mark(index, State::Stale); }, &entries_visited);
+	const auto resolve = [&](Element& element) {
+		Common::FrameCost::ScopedTimer timer(Common::FrameCost::Counter::ResolveTextureNs);
+		Common::FrameCost::Add(Common::FrameCost::Counter::ResolveTextureCalls);
+		++m_resolve_calls;
 		const auto& key = element.key;
 		const auto resource = IR::ImageHeapResource(
 		    {.dimension = key.dimension, .depth_compare = key.depth_view, .r128 = key.r128}, element.kind);
-		return executor.ResolveTexture(resource, element.key.value);
+		auto binding = executor.ResolveTexture(resource, element.key.value);
+		element.descriptor_hash = Hash(element.key.value);
+		element.cache_generation = textures.ResolutionGeneration();
+		element.data               = binding.desc.info.data;
+		element.metadata           = binding.desc.info.metadata.range;
+		return binding;
+	};
+	const auto unchanged = [&](Element& element) {
+		if (!Config::PortEnabled(Config::Port::ImageHeapIncremental) ||
+		    element.descriptor_hash != Hash(element.key.value) || element.cache_generation == 0u) {
+			return false;
+		}
+		uint64_t current = 0;
+		if (textures.ResolutionChangedSince(element.data, element.metadata,
+		                                    element.cache_generation, current)) {
+			return false;
+		}
+		element.cache_generation = current;
+		return true;
 	};
 	// A listed element whose descriptor resolves to another image is stale; true once it leaves
 	// the list. A held element whose texture is unmapped stays null.
 	const auto retry = [&](uint32_t index) {
-		const auto& element = m_elements[index];
+		++entries_visited;
+		auto& element = m_elements[index];
 		if (element.state != State::Live) return true;
+		if (unchanged(element)) return false;
 		const auto binding = resolve(element);
 		if (binding.image_id == element.image &&
 		    (!element.image || textures.m_slot_images[element.image].serial == element.serial)) {
@@ -538,7 +567,11 @@ void ImageHeap::Rebind(RenderExecutor& executor) {
 		return true;
 	};
 	// Discovery applies the color metadata clears written since the last draw.
-	std::erase_if(m_dcc, retry);
+	const auto cache_generation = textures.ResolutionGeneration();
+	if (!Config::PortEnabled(Config::Port::ImageHeapIncremental) ||
+	    cache_generation != m_cache_generation) {
+		std::erase_if(m_dcc, retry);
+	}
 	// Held elements retry once an image is created, such as a render target of their extent.
 	if (const auto serial = Image::serials.load(std::memory_order_relaxed);
 	    m_held_serial != serial) {
@@ -547,6 +580,7 @@ void ImageHeap::Rebind(RenderExecutor& executor) {
 	}
 	if (stale) Repoint();
 	for (const auto index: m_pending) {
+		++entries_visited;
 		if (m_elements[index].refs == 0u) continue;
 		auto binding = resolve(m_elements[index]);
 		if (binding.image_id) {
@@ -567,6 +601,8 @@ void ImageHeap::Rebind(RenderExecutor& executor) {
 	}
 	m_pending.clear();
 	WriteDescriptors();
+	m_cache_generation = textures.ResolutionGeneration();
+	Common::FrameCost::Add(Common::FrameCost::Counter::ImageHeapEntriesVisited, entries_visited);
 }
 
 void ImageHeap::WriteDescriptors() {

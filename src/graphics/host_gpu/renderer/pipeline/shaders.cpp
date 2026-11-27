@@ -1,5 +1,6 @@
 #include "common/assert.h"
 #include "common/common.h"
+#include "common/faultReport.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
 #include "gpu_blit_shaders/gpu_mesh_indirect_spv.h"
@@ -248,6 +249,21 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
                             const GraphicsPipelineKey&                 key,
                             const std::array<const ShaderModule*, 4>& stages,
                             vk::PipelineCache                          driver_cache) {
+	const ShaderModule* largest     = stages[0];
+	uint64_t            total_words = 0;
+	for (const auto* stage: stages) {
+		if (stage == nullptr) continue;
+		total_words += stage->spirv_words;
+		if (largest == nullptr || stage->spirv_words > largest->spirv_words) largest = stage;
+	}
+	char fault_activity_text[160];
+	std::snprintf(fault_activity_text, sizeof(fault_activity_text),
+	              "pipeline-create stage=%s hash=0x%016" PRIx64 " words=%" PRIu64
+	              " (total=%" PRIu64 ")",
+	              largest != nullptr ? ShaderRecompiler::StageName(largest->info.stage) : "GFX",
+	              largest != nullptr ? largest->info.shader_hash : uint64_t {0},
+	              largest != nullptr ? largest->spirv_words : uint64_t {0}, total_words);
+	Common::FaultReport::ScopedActivity fault_activity(fault_activity_text);
 	const auto& rendering     = key.rendering;
 	const auto& vertex_input  = key.vertex_input;
 	const auto& static_params = key.static_params;
@@ -504,6 +520,12 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 
 void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& pipeline,
                             const ShaderModule& module, vk::PipelineCache driver_cache) {
+	char fault_activity_text[160];
+	std::snprintf(fault_activity_text, sizeof(fault_activity_text),
+	              "pipeline-create stage=%s hash=0x%016" PRIx64 " words=%" PRIu64,
+	              ShaderRecompiler::StageName(module.info.stage), module.info.shader_hash,
+	              module.spirv_words);
+	Common::FaultReport::ScopedActivity fault_activity(fault_activity_text);
 	vk::PipelineShaderStageCreateInfo                     comp_shader_stage_info {};
 	vk::PipelineShaderStageRequiredSubgroupSizeCreateInfo comp_subgroup_size {};
 	comp_shader_stage_info.stage     = vk::ShaderStageFlagBits::eCompute;

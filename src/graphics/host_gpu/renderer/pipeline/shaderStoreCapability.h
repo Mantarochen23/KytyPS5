@@ -17,6 +17,15 @@ inline constexpr uint64_t kTranslatorCapabilityVersion = 5;
   return stored_version == kTranslatorCapabilityVersion;
 }
 
+// Per-record validity for ports that only widen what the translator accepts (common/ports.h,
+// widens_translation). A stored failure remembers which such ports were on when it failed
+// (`stored_ports`) and still applies only if no port is on now that was not then: a newly enabled
+// port may translate it. A failure that predates the field has stored_ports = 0.
+[[nodiscard]] inline constexpr bool FailureCacheApplies(uint64_t stored_version, uint32_t stored_ports,
+                                                        uint32_t current_ports) {
+  return FailureCacheApplies(stored_version) && (current_ports & ~stored_ports) == 0u;
+}
+
 } // namespace Libs::Graphics
 
 #endif // EMULATOR_SRC_GRAPHICS_HOST_GPU_RENDERER_PIPELINE_SHADERSTORECAPABILITY_H_

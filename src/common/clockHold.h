@@ -94,8 +94,16 @@ public:
 		while (seen < value &&
 		       !last.compare_exchange_weak(seen, value, std::memory_order_relaxed)) {
 		}
+		if (seen >= value) {
+			// The guest gets a value it already had: a delta of 0 between two of its reads.
+			m_repeats.fetch_add(1, std::memory_order_relaxed);
+		}
 		return seen > value ? seen : value;
 	}
+
+	// Readings (all domains) that returned a value already handed out in their domain. Each is a
+	// zero time delta for the guest; a guest dividing by its frame time gets an infinity from it.
+	[[nodiscard]] uint64_t RepeatedReads() const { return m_repeats.load(std::memory_order_relaxed); }
 
 private:
 	static constexpr uint64_t kNone = UINT64_MAX;
@@ -116,6 +124,7 @@ private:
 	std::atomic<uint32_t> m_holds {0};
 	std::atomic<bool>     m_ever {false};
 	std::atomic<uint64_t> m_last[static_cast<size_t>(Domain::Count)] {};
+	std::atomic<uint64_t> m_repeats {0};
 };
 
 // The process wide guest clock hold.

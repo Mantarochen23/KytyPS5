@@ -12,6 +12,8 @@
 #include <bitset>
 #include <optional>
 #include <span>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace Libs::Graphics::ShaderRecompiler {
@@ -27,6 +29,20 @@ struct CompileOptions {
 	std::span<const uint32_t>   user_data;
 	std::span<const uint32_t>   back_code;
 	ShaderStageInputInfo        input_info;
+	// Optional per-call override for emitted SPIR-V word budget (0 = unlimited).
+	// When unset, Config::MaxSpirvWords() is enforced.
+	std::optional<uint32_t>     max_spirv_words;
+};
+
+struct SpirvWordBudgetError: std::runtime_error {
+	uint64_t         words  = 0;
+	uint32_t         budget = 0;
+	Spirv::EmitStats emit_stats;
+
+	SpirvWordBudgetError(std::string message, uint64_t emitted_words, uint32_t limit,
+	                     Spirv::EmitStats stats)
+	    : std::runtime_error(std::move(message)), words(emitted_words), budget(limit),
+	      emit_stats(stats) {}
 };
 
 struct TranslateResult {
@@ -40,6 +56,7 @@ struct CompileResult {
 	std::string            decoded_dump;
 	std::string            ir_dump;
 	IR::Program            program;
+	Spirv::EmitStats       emit_stats;
 };
 
 // Decoded source and typed scalar call queries are retained once per cache source.

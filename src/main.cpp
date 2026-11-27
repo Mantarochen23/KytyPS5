@@ -134,9 +134,10 @@ static void PrintUsage() {
 	::printf("  --buffer-probe <hashes>              Debug: before each dispatch of a listed shader, compare the guest\n"
 	         "                                       memory of every bound buffer with the host copy the GPU reads\n"
 	         "                                       and log the differences. Also reads KYTY_BUFFER_PROBE.\n");
-	::printf("  --loop-guard <n>                     Debug: after n evaluated loop exits an invocation leaves all\n"
-	         "                                       its loops and the shader hash and loop are logged. 0 = off\n"
-	         "                                       (default). Also reads KYTY_LOOP_GUARD.\n");
+	::printf("  --loop-guard <n>                     After n evaluated loop exits an invocation leaves all its\n"
+	         "                                       loops and the shader hash and loop are logged. Given, it\n"
+	         "                                       applies to every shader; 0 = off. Default: compute shaders\n"
+	         "                                       only, n = 1048576. Also reads KYTY_LOOP_GUARD.\n");
 	::printf("  --disable-port <names>               Turn off ported fixes (comma-separated names, or all):\n");
 	for (const auto& port: Config::PORTS) {
 		::printf("                                         %s (%s)\n", port.name, port.source);
@@ -184,7 +185,16 @@ static void PrintUsage() {
 	         "                                       Default: off.\n"
 	         "  --mem-limit-gb <n>                   When the process's RSS + swap passes n GB, print the\n"
 	         "                                       [mem] table and drop caches; if still over 10 s later\n"
-	         "                                       stop the run with a message. 0 = off. Default: 0.\n");
+	         "                                       stop the run with a message. 0 = off. Default: 0.\n"
+	         "  --fault-storm-faults <n>             A guest page whose write watch faults n times within\n"
+	         "                                       --fault-storm-frames frames stays unwatched (and is\n"
+	         "                                       uploaded on every pass) for --fault-storm-hold frames.\n"
+	         "                                       0 = off. Default: 0.\n"
+	         "  --fault-storm-frames <n>             Window of the rule above. Default: 8.\n"
+	         "  --fault-storm-hold <n>               Frames a marked page stays unwatched. Default: 60.\n"
+	         "  --max-spirv-words <n>                Refuse any emitted or stored shader module larger than\n"
+	         "                                       n SPIR-V words before it reaches the driver. 0 = off.\n"
+	         "                                       Default: 2000000.\n");
 }
 
 static bool NextArg(int argc, char* argv[], int& index, std::string& out) {
@@ -591,6 +601,7 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				::printf("invalid loop guard limit: %s\n", value.c_str());
 				return false;
 			}
+			options.config.loop_guard_explicit = true;
 		} else if (arg == "--disable-port") {
 			if (!Config::ParseDisabledPorts(value, options.config.disabled_ports)) {
 				::printf("unknown port in --disable-port: %s\n", value.c_str());
@@ -650,6 +661,26 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 		} else if (arg == "--mem-limit-gb") {
 			if (!ParseUint32(value, options.config.mem_limit_gb)) {
 				::printf("invalid memory limit value: %s\n", value.c_str());
+				return false;
+			}
+		} else if (arg == "--fault-storm-faults") {
+			if (!ParseUint32(value, options.config.fault_storm_faults)) {
+				::printf("invalid fault storm faults value: %s\n", value.c_str());
+				return false;
+			}
+		} else if (arg == "--fault-storm-frames") {
+			if (!ParseUint32(value, options.config.fault_storm_frames)) {
+				::printf("invalid fault storm frames value: %s\n", value.c_str());
+				return false;
+			}
+		} else if (arg == "--fault-storm-hold") {
+			if (!ParseUint32(value, options.config.fault_storm_hold)) {
+				::printf("invalid fault storm hold value: %s\n", value.c_str());
+				return false;
+			}
+		} else if (arg == "--max-spirv-words") {
+			if (!ParseUint32(value, options.config.max_spirv_words)) {
+				::printf("invalid max SPIR-V words value: %s\n", value.c_str());
 				return false;
 			}
 		} else {

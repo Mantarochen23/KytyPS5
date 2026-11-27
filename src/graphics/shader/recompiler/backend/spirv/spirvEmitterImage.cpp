@@ -681,6 +681,19 @@ auto EmitImageAccess(ValueEmitContext& ctx, const IR::Inst& inst, uint32_t resul
 	    image.indirect_resources.size() < 2u) {
 		ctx.Fail(inst, "has no indirect image runtime mapping");
 	}
+	const auto words_before = state.builder.FunctionWordCount();
+	struct ContributorGuard {
+		EmitterState& state;
+		const char*   kind;
+		uint32_t      resource;
+		uint32_t      candidates;
+		size_t        before;
+		~ContributorGuard() {
+			RecordEmitContributor(state, kind, resource, candidates, 1u,
+			                      state.builder.FunctionWordCount() - before);
+		}
+	} contributor_guard {state, image.heap ? "indirect-image-heap" : "indirect-image", mem.resource,
+	                     static_cast<uint32_t>(image.indirect_resources.size()), words_before};
 	if (image.heap) {
 		const auto entry = EmitImageHeapEntry(state, key, image.indirect_mapping_offset);
 		const auto kinds = static_cast<uint32_t>(image.indirect_resources.size()) - 1u;

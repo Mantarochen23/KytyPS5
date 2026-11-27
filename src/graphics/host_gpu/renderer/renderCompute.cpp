@@ -2,6 +2,7 @@
 #include "common/assert.h"
 #include "common/common.h"
 #include "common/debugCounters.h"
+#include "common/frameCost.h"
 #include "common/emulatorConfig.h"
 #include "common/file.h"
 #include "common/logging/log.h"
@@ -14,6 +15,8 @@
 #include "graphics/guest_gpu/pm4.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/dispatchGuard.h"
+#include "graphics/host_gpu/renderer/dispatchLimits.h"
+#include "graphics/host_gpu/renderer/dispatchOrigin.h"
 #include "graphics/host_gpu/renderer/image/imageInfo.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
@@ -34,6 +37,7 @@
 #include <array>
 #include <atomic>
 #include <bit>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -643,9 +647,157 @@ static bool HasStorageWrites(const ShaderComputeInputInfo& input_info,
 	       });
 }
 
+// The guest buffers a compute program names through descriptors, with how it uses them. Memory it
+// reaches through pointers it computes itself is not listed.
+static std::vector<SkipTaint::Use> ComputeBufferUses(const ShaderStageRuntime& stage) {
+	std::vector<SkipTaint::Use> uses;
+	const auto& metadata  = stage.module->info.info.buffers;
+	const auto& snapshot  = stage.resources->buffers;
+	for (uint32_t i = 0; i < metadata.size() && i < snapshot.size(); i++) {
+		if (metadata[i].descriptor_index == UINT32_MAX) continue;
+		const auto descriptor = DecodeNativeDescriptor<ShaderBufferResource>(snapshot[i]);
+		auto       size       = ShaderRecompiler::IR::BufferBindingSize(metadata[i], descriptor);
+		if (descriptor.NumRecords() == UINT32_MAX) size = std::min<uint64_t>(size, 256u << 20u);
+		if (descriptor.Base48() == 0 || size == 0) continue;
+		uses.push_back({descriptor.Base48(), size, metadata[i].read || !metadata[i].written,
+		                metadata[i].written});
+	}
+	return uses;
+}
+
+static uint64_t SteadyNowMs() {
+	return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+	                                 std::chrono::steady_clock::now().time_since_epoch())
+	                                 .count());
+}
+
+void RenderExecutor::TaintSkippedDispatch() {
+	m_skip_taint.Taint(m_pending_uses, SteadyNowMs());
+	m_pending_uses.clear();
+}
+
+// Before a ready dispatch records: true when it reads memory a skipped dispatch was to write. It is
+// then skipped itself and its outputs are tainted. Otherwise what it writes is fresh again.
+// Only with --async-compute-wait-ms; costs one empty() test while nothing was skipped.
+static bool SkipOnTaintedInput(SkipTaint& taint, const ShaderStageRuntime& stage,
+                               const std::vector<SkipTaint::Use>& extra_reads = {}) {
+	if (Config::AsyncComputeWaitMs() == 0) return false;
+	if (taint.Empty()) return false;
+	auto uses = ComputeBufferUses(stage);
+	// Memory the dispatch itself reads before the shader runs (indirect group counts).
+	uses.insert(uses.end(), extra_reads.begin(), extra_reads.end());
+	const auto now  = SteadyNowMs();
+	if (taint.ReadsTainted(uses, now)) {
+		taint.Taint(uses, now);
+		static std::atomic<uint32_t> log_count {0};
+		if (log_count.fetch_add(1, std::memory_order_relaxed) < 64) {
+			LOGF("[skip] cs hash=0x%016" PRIx64 " reads a buffer a skipped dispatch was to write; "
+			     "skipped too (tainted ranges=%zu)\n",
+			     stage.module->info.shader_hash, taint.Size());
+		}
+		return true;
+	}
+	taint.ClearWritten(uses);
+	return false;
+}
+
+// The guest words of `count` dwords from `vaddr` as `[dispatch]   <what> <index>: ...` lines;
+// one "not readable" line when the range is not backed.
+static void LogGuestWords(const char* what, uint64_t vaddr, size_t count, int64_t first_index) {
+	uint32_t words[DispatchWindowDwords + 8] {};
+	count = std::min(count, std::size(words));
+	if (vaddr == 0 || !LibKernel::Memory::TryReadBacking(vaddr, words, count * sizeof(uint32_t))) {
+		LOGF("[dispatch]   %s 0x%016" PRIx64 ": not readable\n", what, vaddr);
+		return;
+	}
+	char prefix[64];
+	std::snprintf(prefix, sizeof(prefix), "[dispatch]   %s ", what);
+	LOGF("%s", FormatDwordWindow(prefix, words, count, first_index).c_str());
+}
+
+// Where a reported dispatch came from (dispatchOrigin.h): the submitting guest thread with its FP
+// control state and last library calls, the 64 dwords before the packet and the packet, and for an
+// indirect dispatch the words around its arguments.
+static void LogDispatchOrigin(const DispatchOrigin* origin) {
+	if (origin == nullptr) {
+		LOGF("[dispatch]   origin: not known\n");
+		return;
+	}
+	const auto* submitter = origin->submitter;
+	LOGF("[dispatch]   origin: packet=0x%016" PRIx64 " args=0x%012" PRIx64
+	     " args_gpu_written=%d submitter_thread=%d submitter_mxcsr=0x%04" PRIx32
+	     " submitter_x87=0x%04" PRIx32 "\n",
+	     reinterpret_cast<uint64_t>(origin->packet), origin->args_addr, origin->args_gpu_written,
+	     submitter != nullptr ? submitter->thread_id : -1,
+	     submitter != nullptr ? submitter->mxcsr : 0u,
+	     submitter != nullptr ? static_cast<uint32_t>(submitter->x87_cw) : 0u);
+	LOGF("[dispatch]   submitter calls (oldest first): %s\n",
+	     submitter != nullptr ? FormatSubmitterCalls(*submitter).c_str() : "not known");
+	if (origin->packet != nullptr) {
+		// The packet is 5 dwords (header, x, y, z, initiator) for a direct dispatch; index 0 = header.
+		const auto packet = reinterpret_cast<uint64_t>(origin->packet);
+		LogGuestWords("words", packet - DispatchWindowDwords * sizeof(uint32_t),
+		              DispatchWindowDwords + 5, -static_cast<int64_t>(DispatchWindowDwords));
+	}
+	if (origin->args_addr != 0) {
+		// index 0 = the x count
+		LogGuestWords("args", origin->args_addr - 8 * sizeof(uint32_t), 24, -8);
+	}
+}
+
+// A dispatch whose group counts the guest chose: names it in the log when it is large (default on,
+// rate-limited per shader) and says whether it must be skipped because it is above the group limit
+// (dispatchLimits.h). `args_addr` is the indirect argument address, 0 for a direct dispatch;
+// `source` names where the counts came from.
+static bool JudgeLargeDispatch(SkipTaint& taint, const ShaderStageRuntime& stage,
+                               const HW::ComputeShaderInfo& cs, const uint32_t (&threads)[3],
+                               const uint32_t (&groups)[3], uint32_t mode, uint64_t args_addr,
+                               const char* source) {
+	const uint64_t group_threads = uint64_t {std::max(threads[0], 1u)} * std::max(threads[1], 1u) *
+	                               std::max(threads[2], 1u);
+	const bool     may_skip      = DispatchArgsGuard::Enabled();
+	const auto     verdict       = JudgeDispatch(groups[0], groups[1], groups[2], group_threads,
+	                                             DispatchGroupLimit(), may_skip);
+	if (verdict == DispatchVerdict::Run) return false;
+	const uint64_t hash = stage.module->info.shader_hash;
+	static DispatchReportLimiter limiter;
+	if (limiter.Allow(hash)) {
+		const auto& user  = cs.cs_user_sgpr.value;
+		const int   count = FindCountDword(user, 16, groups[0], std::max(threads[0], 1u));
+		bool        tainted_args  = false;
+		bool        tainted_input = false;
+		if (!taint.Empty()) {
+			const auto now = SteadyNowMs();
+			if (args_addr != 0) {
+				tainted_args = taint.ReadsTainted(
+				    {{args_addr, sizeof(vk::DispatchIndirectCommand), true, false}}, now);
+			}
+			tainted_input = taint.ReadsTainted(ComputeBufferUses(stage), now);
+		}
+		char count_text[96] = "none";
+		if (count >= 0) {
+			std::snprintf(count_text, sizeof(count_text), "user[%d]=0x%08" PRIx32 " (as float %g)",
+			              count, user[count], static_cast<double>(DwordAsFloat(user[count])));
+		}
+		LOGF("[dispatch] cs hash=0x%016" PRIx64 " source=%s args=0x%012" PRIx64
+		     " groups=0x%" PRIx32 ",0x%" PRIx32 ",0x%" PRIx32 " (%" PRIu64 " groups, %" PRIu64
+		     " invocations) local=%ux%ux%u initiator=0x%08" PRIx32
+		     " [thread_dims=%u partial=%u ordered_append=%u wave32=%u] count_from_dword=%s "
+		     "tainted_input=%u tainted_args=%u action=%s limit=%" PRIu32 "\n",
+		     hash, source, args_addr, groups[0], groups[1], groups[2],
+		     DispatchGroups(groups[0], groups[1], groups[2]),
+		     DispatchInvocations(groups[0], groups[1], groups[2], group_threads), threads[0],
+		     threads[1], threads[2], mode, (mode >> 5u) & 1u, (mode >> 1u) & 1u, (mode >> 3u) & 1u,
+		     (mode >> 15u) & 1u, count_text, tainted_input ? 1u : 0u, tainted_args ? 1u : 0u,
+		     verdict == DispatchVerdict::Skip ? "skipped" : "run", DispatchGroupLimit());
+		LogDispatchOrigin(t_dispatch_origin);
+	}
+	return verdict == DispatchVerdict::Skip;
+}
+
 bool RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group_x,
                                     uint32_t thread_group_y, uint32_t thread_group_z, uint32_t mode,
-                                    bool async_compute, bool allow_async) {
+                                    bool async_compute, bool allow_async, uint64_t indirect_args) {
 	m_context.GetCommandScheduler().PopPendingOperations();
 	auto& sh_ctx = buffer.GetShaders();
 
@@ -660,7 +812,10 @@ bool RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 		return true;
 	}
 
-	Common::LockGuard lock(m_context.GetMutex());
+	Common::FrameCost::ScopedTimer lock_wait(Common::FrameCost::Counter::LockWaitNs);
+	Common::LockGuard              lock(m_context.GetMutex());
+	lock_wait.Stop();
+	m_pending_uses.clear();
 	if (sh_ctx.GetCs().cs_regs.data_addr == 0) {
 		LOGF("GraphicsRenderDispatchDirect: temporary: ignoring dispatch with null CS shader, "
 		     "groups=%ux%ux%u mode=%u\n",
@@ -718,6 +873,20 @@ bool RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 
 	const auto& program   = input_info.stage.module->info;
 	const auto& resources = *input_info.stage.resources;
+	{
+		uint32_t final_groups[3] = {thread_group_x, thread_group_y, thread_group_z};
+		if (use_thread_dimensions) {
+			std::copy(std::begin(input_info.workgroup_counts), std::end(input_info.workgroup_counts),
+			          std::begin(final_groups));
+		}
+		if (JudgeLargeDispatch(m_skip_taint, input_info.stage, sh_ctx.GetCs(), input_info.threads_num,
+		                       final_groups, mode, indirect_args,
+		                       indirect_args != 0 ? "indirect-threads" : "direct")) {
+			m_pending_uses = ComputeBufferUses(input_info.stage);
+			TaintSkippedDispatch();
+			return true;
+		}
+	}
 	if (resources.specialization_reads.empty() &&
 	    (TryConsumeComputeMetaClear(input_info, buffer) ||
 	     TryConsumeComputeFill(input_info, buffer, thread_group_x, thread_group_y,
@@ -726,7 +895,21 @@ bool RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 		return true;
 	}
 	if (allow_async && !m_context.GetPipelineCache().EnsureComputePipeline(input_info, pending)) {
+		if (pending && Config::AsyncComputeWaitMs() != 0) {
+			m_pending_uses = ComputeBufferUses(input_info.stage);
+		}
 		return !pending;
+	}
+	// The thread counts of an indirect thread-dimension dispatch are an input too (read by the
+	// command processor from the argument buffer): a skipped producer's counts are stale.
+	if (allow_async &&
+	    SkipOnTaintedInput(m_skip_taint, input_info.stage,
+	                       indirect_args != 0
+	                           ? std::vector<SkipTaint::Use> {{indirect_args,
+	                                                           sizeof(vk::DispatchIndirectCommand),
+	                                                           true, false}}
+	                           : std::vector<SkipTaint::Use> {})) {
+		return true;
 	}
 
 	if (use_thread_dimensions) {
@@ -766,7 +949,9 @@ bool RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 	const auto vk_buffer = buffer.Handle();
 	CommitBindings(buffer, vk::PipelineBindPoint::eCompute, pipeline,
 	               std::span {&descriptor_stage, 1u});
-	if (HasStorageWrites(input_info, bindings)) {
+	const bool writes_memory = HasStorageWrites(input_info, bindings) || program.info.uses_dma ||
+	                           bindings.gds.buffer != nullptr;
+	if (writes_memory) {
 		// A host fence used to serialize every dispatch. Preserve its read-before-write ordering
 		// while allowing the queue to execute asynchronously.
 		ShaderWriteHazardBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
@@ -868,9 +1053,10 @@ bool RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 	}
 	graphics.breadcrumbs.EndOp(graphics, vk_buffer, marker_id);
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::Dispatches);
+	Common::FrameCost::Add(Common::FrameCost::Counter::Dispatches);
 
 	// The removed host fence also ordered read-only dispatches before later writers.
-	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
+	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader, writes_memory);
 	ResetBindings();
 	return true;
 }
@@ -880,11 +1066,16 @@ bool RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 	EXIT_IF(args_addr == 0 || (args_addr & 3u) != 0 ||
 	        (mode & Pm4::COMPUTE_DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS) != 0);
 	m_context.GetCommandScheduler().PopPendingOperations();
-	Common::LockGuard lock(m_context.GetMutex());
+	Common::FrameCost::ScopedTimer lock_wait(Common::FrameCost::Counter::LockWaitNs);
+	Common::LockGuard              lock(m_context.GetMutex());
+	lock_wait.Stop();
+	m_pending_uses.clear();
 	vk::DispatchIndirectCommand args {};
-	if (!m_context.GetBufferCache().HasGpuDirtyBytes(args_addr, sizeof(args)) &&
-	    LibKernel::Memory::TryReadBacking(args_addr, &args, sizeof(args)) &&
-	    (args.x == 0 || args.y == 0 || args.z == 0)) {
+	// The counts are known here only when the guest wrote them (the GPU-written ones are checked
+	// by DispatchArgsGuard on the GPU).
+	const bool args_on_host = !m_context.GetBufferCache().HasGpuDirtyBytes(args_addr, sizeof(args)) &&
+	                          LibKernel::Memory::TryReadBacking(args_addr, &args, sizeof(args));
+	if (args_on_host && (args.x == 0 || args.y == 0 || args.z == 0)) {
 		return true;
 	}
 	const auto& cs_regs = buffer.GetShaders().GetCs();
@@ -901,7 +1092,25 @@ bool RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 		return !pending;
 	}
 	if (allow_async && !m_context.GetPipelineCache().EnsureComputePipeline(input_info, pending)) {
+		if (pending && Config::AsyncComputeWaitMs() != 0) {
+			m_pending_uses = ComputeBufferUses(input_info.stage);
+		}
 		return !pending;
+	}
+	// The argument buffer is an input of the dispatch: a skipped producer's counts are stale.
+	if (allow_async &&
+	    SkipOnTaintedInput(m_skip_taint, input_info.stage,
+	                       {{args_addr, sizeof(vk::DispatchIndirectCommand), true, false}})) {
+		return true;
+	}
+	if (args_on_host) {
+		const uint32_t final_groups[3] = {args.x, args.y, args.z};
+		if (JudgeLargeDispatch(m_skip_taint, input_info.stage, cs_regs, input_info.threads_num,
+		                       final_groups, mode, args_addr, "indirect")) {
+			m_pending_uses = ComputeBufferUses(input_info.stage);
+			TaintSkippedDispatch();
+			return true;
+		}
 	}
 	buffer.EndRendering();
 	auto& pipeline = m_context.GetPipelineCache().GetComputePipeline(input_info);
@@ -945,7 +1154,9 @@ bool RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 	CommitBindings(buffer, vk::PipelineBindPoint::eCompute, pipeline,
 	               std::span {&descriptor_stage, 1u});
 	const auto vk_buffer = buffer.Handle();
-	if (HasStorageWrites(input_info, bindings)) {
+	const bool writes_memory = HasStorageWrites(input_info, bindings) || program.info.uses_dma ||
+	                           bindings.gds.buffer != nullptr;
+	if (writes_memory) {
 		ShaderWriteHazardBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
 	}
 	vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.pipeline);
@@ -960,7 +1171,8 @@ bool RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 	vk_buffer.dispatchIndirect(indirect_buffer, indirect_offset);
 	graphics.breadcrumbs.EndOp(graphics, vk_buffer, marker_id);
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::Dispatches);
-	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
+	Common::FrameCost::Add(Common::FrameCost::Counter::Dispatches);
+	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader, writes_memory);
 	ResetBindings();
 	return true;
 }

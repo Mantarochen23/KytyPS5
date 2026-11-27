@@ -86,6 +86,22 @@ void TestDomainsAreClampedSeparately() {
 	Check(hold.Apply(ClockHold::Domain::Realtime, 5, 0) == 5, "realtime domain keeps its own last value");
 }
 
+void TestRepeatedReadsAreCounted() {
+	ClockHold hold;
+	Check(Guest(hold, 5 * MS) == 5 * MS && hold.RepeatedReads() == 0, "never held: not counted");
+	hold.Update(100 * MS, true);
+	(void)Guest(hold, 100 * MS);
+	const auto before = hold.RepeatedReads();
+	(void)Guest(hold, 150 * MS);
+	(void)Guest(hold, 200 * MS);
+	Check(hold.RepeatedReads() == before + 2, "two frozen reads are two zero deltas");
+	hold.Update(300 * MS, false);
+	(void)Guest(hold, 310 * MS);
+	const auto after = hold.RepeatedReads();
+	(void)Guest(hold, 320 * MS);
+	Check(hold.RepeatedReads() == after, "a moving clock adds none");
+}
+
 void TestTicks() {
 	Check(Common::HeldNsToTicks(1000000000u, 1600000000u) == 1600000000u, "1 s = 1.6 G ticks");
 	Check(Common::HeldNsToTicks(500 * MS, 1000000000u) == 500 * MS, "1 GHz is one tick per ns");
@@ -186,6 +202,7 @@ int main() {
 	TestNeverGoesBackwardsOrForwardsOfRaw();
 	TestLateReadingIsClamped();
 	TestDomainsAreClampedSeparately();
+	TestRepeatedReadsAreCounted();
 	TestTicks();
 	TestShouldHold();
 	TestBusyClassification();

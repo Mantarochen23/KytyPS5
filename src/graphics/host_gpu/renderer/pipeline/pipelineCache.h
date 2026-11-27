@@ -135,6 +135,8 @@ struct ShaderModule {
 	uint64_t                                     legacy_hash = 0;
 	// Runtime only: a lookup compared legacy_hash with its own inputs (or it was built this run).
 	bool                                         legacy_checked = true;
+	// Runtime only: emitted SPIR-V word count, for worker fault-report activity tags.
+	uint64_t                                     spirv_words    = 0;
 };
 
 // A draw's depth target and its first color_count color targets.
@@ -315,10 +317,28 @@ private:
 	friend struct PipelineCacheTestAccess;
 
 	struct Program {
+		struct MaterializationRead {
+			uint64_t address = 0;
+			uint64_t size    = 0;
+			uint64_t hash    = 0;
+		};
+		struct MaterializationMemo {
+			std::vector<uint32_t>            user_data;
+			std::vector<uint32_t>            workgroup_counts;
+			std::vector<MaterializationRead> reads;
+			std::vector<uint32_t>            scratch;
+			uint64_t                         shader_base           = 0;
+			uint64_t                         indirect_args_address = 0;
+			bool                             legacy_hash           = false;
+			bool                             valid                 = false;
+		};
+
 		std::unique_ptr<ShaderRecompiler::ShaderSource> call_source;
 		ShaderRecompiler::IR::ResourcePlan           resource_plan;
 		ShaderRecompiler::IR::ResourceSnapshot       resources;
 		ShaderRecompiler::IR::ResourceSpecialization specialization;
+		MaterializationMemo                          materialization_memo;
+		uint64_t                                     materialization_memo_hits = 0;
 		// A deque, so pipelines being made on workers keep valid pointers to their modules.
 		std::deque<ShaderModule>                     modules;
 		bool                                         skip_dispatch   = false;
@@ -334,6 +354,9 @@ private:
 		uint32_t                               legacy_unchecked = 0;
 
 		[[nodiscard]] std::span<const uint32_t> FunctionCode() const;
+		bool Materialize(const ShaderRecompiler::IR::SrtRuntime& runtime,
+		                 std::string* failure_reason = nullptr);
+		void InvalidateMaterializationMemo() { materialization_memo.valid = false; }
 		bool RefreshCallSource(const ShaderRecompiler::IR::SrtRuntime& runtime);
 		// Takes the plan stored for the current callee code; false if there is none.
 		bool UseStoredCallPlan();
@@ -388,6 +411,8 @@ private:
 	// The steps and SPIR-V size of the last CompileModule, for the render thread's build line.
 	BuildTiming::Steps                     m_last_compile_steps;
 	uint64_t                               m_last_compile_words = 0;
+	std::array<BuildTiming::Contributor, 3> m_last_compile_contributors {};
+	uint32_t                               m_last_compile_contributor_count = 0;
 	std::unordered_map<uint64_t, uint32_t> m_built_count;
 	// "served from store" uses, per hash.
 	FlowPlan::UseCounter     m_served;
@@ -404,10 +429,12 @@ private:
 
 	// A stage built from its translation, before the cache holds it.
 	struct CompiledStage {
-		ShaderModule          module;
-		std::vector<uint32_t> spirv;
+		ShaderModule                            module;
+		std::vector<uint32_t>                   spirv;
 		// What the SPIR-V emission and the module creation took.
-		BuildTiming::Steps    steps;
+		BuildTiming::Steps                      steps;
+		std::array<BuildTiming::Contributor, 3> top_contributors {};
+		uint32_t                                contributor_count = 0;
 	};
 	// What a worker needs to translate and compile one stage, copied from the draw that asked.
 	struct StageInputs;

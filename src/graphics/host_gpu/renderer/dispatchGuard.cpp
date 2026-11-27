@@ -5,6 +5,7 @@
 #include "gpu_blit_shaders/gpu_dispatch_guard_spv.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/commandScheduler.h"
+#include "graphics/host_gpu/renderer/dispatchLimits.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/vulkanCommon.h"
@@ -76,14 +77,7 @@ DispatchArgsGuard::DispatchArgsGuard(GraphicContext& graphics, CommandScheduler&
 
 	// A full-screen 4K pass of 8x8 groups is about 130,000 groups. More than 4M is taken as
 	// garbage: it keeps the host GPU busy for seconds, which the driver answers with a reset.
-	if (const char* text = std::getenv("KYTY_DISPATCH_GUARD_MAX_GROUPS");
-	    text != nullptr && text[0] != '\0') {
-		char*      end    = nullptr;
-		const auto parsed = std::strtoull(text, &end, 0);
-		if (end != text && *end == '\0' && parsed >= 1024 && parsed <= UINT32_MAX) {
-			m_max_groups = static_cast<uint32_t>(parsed);
-		}
-	}
+	m_max_groups = DispatchGroupLimit();
 	LOGF("DispatchArgsGuard: temporary workaround: indirect dispatches above %u groups are zeroed "
 	     "(--disable-port dispatch-guard disables, KYTY_DISPATCH_GUARD_MAX_GROUPS sets the limit)\n",
 	     m_max_groups);

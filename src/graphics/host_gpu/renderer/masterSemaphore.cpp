@@ -2,6 +2,7 @@
 
 #include "common/assert.h"
 #include "common/debugCounters.h"
+#include "common/frameCost.h"
 #include "graphics/host_gpu/graphicContext.h"
 
 namespace Libs::Graphics {
@@ -55,6 +56,7 @@ void MasterSemaphore::Wait(uint64_t tick) {
 
 	Common::DebugCounters::ScopedTimer timer(Common::DebugCounters::Counter::GpuWaits,
 	                                         Common::DebugCounters::Counter::GpuWaitNs);
+	Common::FrameCost::ScopedTimer frame_timer(Common::FrameCost::Counter::GpuFenceWaitNs);
 	const auto result = m_graphics.device.waitSemaphores(&wait_info, UINT64_MAX);
 	if (result == vk::Result::eErrorDeviceLost) {
 		ReportDeviceLost(m_graphics, "vkWaitSemaphores", result, tick, KnownGpuTick());

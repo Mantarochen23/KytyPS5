@@ -71,6 +71,7 @@ void Load(const ConfigOptions& cfg) {
 			EXIT("invalid KYTY_LOOP_GUARD value: %s\n", env_guard);
 		}
 		g_config->loop_guard_limit = static_cast<uint32_t>(std::min<unsigned long long>(limit, MaxLoopGuardLimit));
+		g_config->loop_guard_explicit = true;
 	}
 	g_config->loop_guard_limit = std::min<uint32_t>(g_config->loop_guard_limit, MaxLoopGuardLimit);
 	SetDisabledPorts(g_config->disabled_ports);
@@ -490,6 +491,11 @@ uint32_t LoopGuardLimit() {
 	return g_config != nullptr ? g_config->loop_guard_limit : 0u;
 }
 
+uint32_t ComputeLoopGuardLimit() {
+	if (g_config == nullptr) return 0u;
+	return g_config->loop_guard_explicit ? g_config->loop_guard_limit : DefaultComputeLoopGuardLimit;
+}
+
 uint32_t HangDumpWaitSeconds() {
 	return g_config != nullptr ? g_config->hang_dump_wait_seconds : 60u;
 }
@@ -516,6 +522,18 @@ uint32_t AsyncComputeWaitMs() {
 
 uint32_t MemLimitGb() {
 	return g_config != nullptr ? g_config->mem_limit_gb : 0u;
+}
+
+uint32_t FaultStormFaults() {
+	return g_config != nullptr ? g_config->fault_storm_faults : 0u;
+}
+
+uint32_t FaultStormFrames() {
+	return g_config != nullptr ? g_config->fault_storm_frames : 8u;
+}
+
+uint32_t FaultStormHold() {
+	return g_config != nullptr ? g_config->fault_storm_hold : 60u;
 }
 
 bool AsyncLookaheadEnabled() {
@@ -557,6 +575,10 @@ uint32_t WarmUpBudgetSeconds() {
 
 bool SpirvCompactEnabled() {
 	return g_config != nullptr && g_config->spirv_compact_enabled;
+}
+
+uint32_t MaxSpirvWords() {
+	return g_config != nullptr ? g_config->max_spirv_words : ConfigOptions::DefaultMaxSpirvWords;
 }
 
 } // namespace Config

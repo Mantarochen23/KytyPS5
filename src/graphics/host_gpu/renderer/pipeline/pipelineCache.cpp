@@ -3,7 +3,9 @@
 
 #include "common/assert.h"
 #include "common/debugCounters.h"
+#include "common/frameCost.h"
 #include "common/emulatorConfig.h"
+#include "common/faultReport.h"
 #include "common/file.h"
 #include "common/ports.h"
 #include "common/logging/log.h"
@@ -280,7 +282,8 @@ ShaderRecompiler::Spirv::Profile SpirvProfile(const GraphicContext& graphics) {
 	        .relaxed_float          = Config::RelaxedShaderFloatEnabled(),
 	        .ray_query                       = graphics.ray_query_enabled,
 	        .loop_guard_limit                = Config::LoopGuardLimit(),
-	        .fragment_shader_pixel_interlock = graphics.fragment_shader_pixel_interlock_enabled};
+	        .fragment_shader_pixel_interlock = graphics.fragment_shader_pixel_interlock_enabled,
+	        .loop_guard_compute_limit        = Config::ComputeLoopGuardLimit()};
 }
 
 std::filesystem::path ShaderStorePath() {
@@ -292,13 +295,14 @@ std::filesystem::path ShaderStorePath() {
 	if (title_id.empty()) {
 		return {};
 	}
-	// Ported fixes that change shader code keep their programs in a store of their own
-	// (common/ports.h), and a non-zero loop-guard limit selects its own file as well, so a
-	// store never mixes programs built with different ports or with and without the guard.
-	const auto ports = Config::ShaderPortMask();
+	// Ported fixes that change the code of shaders the translator already accepted keep their
+	// programs in a store of their own (common/ports.h affects_codegen), and a non-zero loop-guard
+	// limit selects its own file as well, so a store never mixes programs built with different
+	// such ports or with and without the guard. A port that only widens what translates is not
+	// in the name: it cannot change a stored module, and stored failures carry its state.
 	return std::filesystem::path("_PipelineCache") /
-	       (title_id + (ports != 0 ? fmt::format(".ports{:x}", ports) : std::string {}) +
-	        ShaderStoreSuffix(Config::LoopGuardLimit()) + ".shaders");
+	       ShaderStoreFileName(title_id, Config::ShaderPortMask(),
+	                           ShaderStoreSuffix(Config::LoopGuardLimit(), Config::ComputeLoopGuardLimit()));
 }
 
 bool GraphicsPipelineKey::operator==(const GraphicsPipelineKey& other) const {
@@ -337,6 +341,7 @@ bool PipelineCache::Program::UseStoredCallPlan() {
 	}
 	resource_plan              = std::move(plan);
 	resource_plan.source_reads = call_source->reads;
+	InvalidateMaterializationMemo();
 	return true;
 }
 
@@ -344,7 +349,76 @@ bool PipelineCache::Program::RefreshCallSource(const ShaderRecompiler::IR::SrtRu
 	const auto revision = call_source->revision;
 	ShaderRecompiler::RefreshShaderSource(*call_source, runtime);
 	resource_plan.source_reads = call_source->reads;
-	return revision != call_source->revision;
+	const bool changed = revision != call_source->revision;
+	if (changed) InvalidateMaterializationMemo();
+	return changed;
+}
+
+bool PipelineCache::Program::Materialize(const ShaderRecompiler::IR::SrtRuntime& runtime,
+	                                      std::string* failure_reason) {
+	auto& memo = materialization_memo;
+	const auto hash_read = [&](uint64_t address, uint64_t size, uint64_t& hash) {
+		if (size == 0u) {
+			hash = 0u;
+			return true;
+		}
+		if (runtime.read_specialization_memory == nullptr || (size & 3u) != 0u ||
+		    size / sizeof(uint32_t) > memo.scratch.max_size()) {
+			return false;
+		}
+		memo.scratch.resize(static_cast<size_t>(size / sizeof(uint32_t)));
+		if (!runtime.read_specialization_memory(runtime.userdata, address, memo.scratch)) return false;
+		hash = XXH3_64bits(memo.scratch.data(), static_cast<size_t>(size));
+		return true;
+	};
+	const auto same_bound_state = [&] {
+		if (!memo.valid || resource_plan.info.uses_image_heap ||
+		    memo.shader_base != runtime.shader_base ||
+		    memo.indirect_args_address != runtime.indirect_args_address ||
+		    memo.legacy_hash != runtime.legacy_hash ||
+		    !std::ranges::equal(memo.user_data, runtime.user_data) ||
+		    !std::ranges::equal(memo.workgroup_counts, runtime.workgroup_counts)) {
+			return false;
+		}
+		for (const auto& read: memo.reads) {
+			uint64_t hash = 0;
+			if (!hash_read(read.address, read.size, hash) || hash != read.hash) return false;
+		}
+		return true;
+	};
+	if (same_bound_state()) {
+		++materialization_memo_hits;
+		return true;
+	}
+	// A memo must observe every resource-walk read, including direct descriptors whose contents
+	// affect bindings but not specialization.
+	resource_plan.capture_specialization_reads = true;
+	if (!ShaderRecompiler::IR::MaterializeResources(resource_plan, runtime, resources,
+	                                                specialization, failure_reason)) {
+		memo.valid = false;
+		return false;
+	}
+	if (resource_plan.info.uses_image_heap) {
+		memo.valid = false;
+		return true;
+	}
+	memo.user_data.assign(runtime.user_data.begin(), runtime.user_data.end());
+	memo.workgroup_counts.assign(runtime.workgroup_counts.begin(), runtime.workgroup_counts.end());
+	memo.shader_base           = runtime.shader_base;
+	memo.indirect_args_address = runtime.indirect_args_address;
+	memo.legacy_hash           = runtime.legacy_hash;
+	memo.reads.clear();
+	memo.reads.reserve(resources.specialization_reads.size());
+	for (const auto [address, size]: resources.specialization_reads) {
+		uint64_t hash = 0;
+		if (!hash_read(address, size, hash)) {
+			memo.valid = false;
+			return true;
+		}
+		memo.reads.push_back({address, size, hash});
+	}
+	memo.valid = true;
+	return true;
 }
 
 template <bool HasCalls>
@@ -352,12 +426,13 @@ ShaderModule* PipelineCache::Program::FindModule(const ShaderRecompiler::IR::Srt
                                                  ShaderRecompiler::IR::PushData::Window push_data,
                                                  bool*        materialized,
                                                  std::string* materialization_error) {
+	Common::FrameCost::ScopedTimer timer(Common::FrameCost::Counter::FindModuleNs);
+	Common::FrameCost::Add(Common::FrameCost::Counter::FindModuleCalls);
 	// The old layout's hash is needed while stored modules wait for their first comparison, and
 	// for the module a miss will build.
 	auto probe        = runtime;
 	probe.legacy_hash = legacy_unchecked != 0;
-	if (!ShaderRecompiler::IR::MaterializeResources(resource_plan, probe, resources,
-	                                                specialization, materialization_error)) {
+	if (!Materialize(probe, materialization_error)) {
 		if (materialized != nullptr) {
 			*materialized = false;
 		}
@@ -419,8 +494,10 @@ ShaderModule& PipelineCache::CompileModule(Program& program, const ProgramKey& k
 	options.profile    = &profile;
 	auto compiled = CompileStage(m_graphics.device, key, options, std::move(translated),
 	                             program.specialization, push_data, program.FunctionCode());
-	m_last_compile_steps = compiled.steps;
-	m_last_compile_words = compiled.spirv.size();
+	m_last_compile_steps             = compiled.steps;
+	m_last_compile_words             = compiled.spirv.size();
+	m_last_compile_contributors      = compiled.top_contributors;
+	m_last_compile_contributor_count = compiled.contributor_count;
 	return AddModule(program, key, std::move(compiled));
 }
 
@@ -432,6 +509,11 @@ PipelineCache::CompiledStage PipelineCache::CompileStage(
 	Common::DebugCounters::ScopedTimer timer(Common::DebugCounters::Counter::ShadersCompiled,
 	                                         Common::DebugCounters::Counter::ShaderCompileNs,
 	                                         Common::DebugCounters::Peak::ShaderCompileNs);
+	const auto* stage      = ShaderRecompiler::StageName(key.stage);
+	char        activity[160];
+	std::snprintf(activity, sizeof(activity), "shader-emit stage=%s hash=0x%016" PRIx64, stage,
+	              key.hash);
+	Common::FaultReport::ScopedActivity emit_activity(activity);
 	const auto& profile    = *options.profile;
 	const auto  emit_begin = std::chrono::steady_clock::now();
 	auto        result =
@@ -449,9 +531,12 @@ PipelineCache::CompiledStage PipelineCache::CompileStage(
 	inputs.Raw(function_code.data(), function_code.size_bytes()); // Last, so it needs no size.
 	const auto id = XXH3_64bits(inputs.bytes.data(), inputs.bytes.size());
 
-	const auto* stage = ShaderRecompiler::StageName(key.stage);
 	DumpShader(result.spirv, fmt::format("{}_{:016x}_{:016x}.spv", stage, key.hash, id));
 	ValidateShaderSpirv(stage, key.hash, result.spirv, profile.maintenance8);
+	std::snprintf(activity, sizeof(activity),
+	              "shader-module stage=%s hash=0x%016" PRIx64 " words=%zu", stage, key.hash,
+	              result.spirv.size());
+	Common::FaultReport::SetThreadActivity(activity);
 	const auto module_begin  = std::chrono::steady_clock::now();
 	auto       host_module   = CompileSPV(result.spirv, device);
 	const auto module_us     = BuildTiming::ElapsedUs(module_begin);
@@ -461,6 +546,7 @@ PipelineCache::CompiledStage PipelineCache::CompileStage(
 	                            .info           = std::move(info),
 	                            .specialization = specialization,
 	                            .function_code  = {function_code.begin(), function_code.end()},
+	                            .spirv_words    = result.spirv.size(),
 	                        }};
 	auto& module = compiled.module;
 	// The inputs of these come from the stage's static key.
@@ -470,9 +556,18 @@ PipelineCache::CompiledStage PipelineCache::CompileStage(
 	} else if (key.stage == ShaderType::Mesh) {
 		module.mesh_task = options.input_info.vertex->indirect_draw;
 	}
-	compiled.steps.emit_us   = emit_us;
-	compiled.steps.module_us = module_us;
-	compiled.spirv           = std::move(result.spirv);
+	compiled.steps.emit_us      = emit_us;
+	compiled.steps.module_us    = module_us;
+	compiled.contributor_count  = result.emit_stats.contributor_count;
+	for (uint32_t i = 0; i < compiled.contributor_count && i < compiled.top_contributors.size(); ++i) {
+		const auto& src              = result.emit_stats.top_contributors[i];
+		compiled.top_contributors[i] = {.kind       = src.kind,
+		                                .resource   = src.resource,
+		                                .candidates = src.candidates,
+		                                .accesses   = src.accesses,
+		                                .words      = src.words};
+	}
+	compiled.spirv = std::move(result.spirv);
 	return compiled;
 }
 
@@ -482,6 +577,9 @@ void PipelineCache::NoteBuild(BuildTiming::Build build) {
 		build.number = ++m_built_count[build.hash];
 	}
 	std::printf("%s\n", BuildTiming::Line(build).c_str());
+	if (const auto warn = BuildTiming::WarningLine(build); !warn.empty()) {
+		Log::WriteToConsoleAndLog(warn + "\n");
+	}
 }
 
 ShaderModule& PipelineCache::AddModule(Program& program, const ProgramKey& key,
@@ -1044,9 +1142,7 @@ const ShaderModule* PipelineCache::GetProgramImpl(const ShaderParams& params, In
 		plan_us = BuildTiming::ElapsedUs(plan_begin);
 		auto&       program = entry->second;
 		std::string mat_error;
-		if (!ShaderRecompiler::IR::MaterializeResources(program.resource_plan, runtime,
-		                                                program.resources, program.specialization,
-		                                                &mat_error)) {
+		if (!program.Materialize(runtime, &mat_error)) {
 			const std::string reason =
 			    mat_error.empty() ? "resource materialization failed"
 			                      : fmt::format("resource materialization failed: {}", mat_error);
@@ -1064,6 +1160,7 @@ const ShaderModule* PipelineCache::GetProgramImpl(const ShaderParams& params, In
 		}
 		capture_use();
 	} else if (source_changed) {
+		entry->second.InvalidateMaterializationMemo();
 		entry->second.resource_plan = ShaderRecompiler::IR::ExtractResourcePlan(translated.program);
 		if (const auto* module = entry->second.FindModule<true>(runtime, push_data, nullptr,
 		                                                        &materialization_error)) {
@@ -1094,18 +1191,59 @@ const ShaderModule* PipelineCache::GetProgramImpl(const ShaderParams& params, In
 		}
 	}
 	const auto compile_begin = std::chrono::steady_clock::now();
-	auto&      built         = CompileModule(entry->second, entry->first, options,
-	                                          std::move(translated), push_data);
+	ShaderModule* built_ptr  = nullptr;
+	try {
+		built_ptr = &CompileModule(entry->second, entry->first, options, std::move(translated),
+		                           push_data);
+	} catch (const ShaderRecompiler::SpirvWordBudgetError& e) {
+		BuildTiming::Build oversized {
+		    .stage             = ShaderRecompiler::StageName(options.stage),
+		    .hash              = params.hash,
+		    .words             = e.words,
+		    .where             = "render",
+		    .reason            = "budget-refused",
+		    .contributor_count = e.emit_stats.contributor_count,
+		};
+		for (uint32_t i = 0; i < e.emit_stats.contributor_count && i < oversized.top_contributors.size(); ++i) {
+			const auto& src = e.emit_stats.top_contributors[i];
+			oversized.top_contributors[i] = {
+			    .kind       = src.kind,
+			    .resource   = src.resource,
+			    .candidates = src.candidates,
+			    .accesses   = src.accesses,
+			    .words      = src.words,
+			};
+		}
+		if (const auto warn = BuildTiming::WarningLine(oversized); !warn.empty()) {
+			Log::WriteToConsoleAndLog(warn + "\n");
+		}
+		PipelineCacheLog("!!! SHADER DISPATCH SKIP ({}) shader=0x{:016x}; rendering is incomplete",
+		                 e.what(), params.hash);
+		if (entry->second.modules.empty()) {
+			entry->second.skip_dispatch  = true;
+			entry->second.logged_neg_hit = true;
+			entry->second.failure_reason = e.what();
+			PipelineCacheLog(
+			    "ShaderRecompiler {} translation end: hash=0x{:016x} outcome=failed ({})",
+			    ShaderRecompiler::StageName(options.stage), params.hash,
+			    entry->second.failure_reason);
+			StoreFailedProgram(m_lookup_key, entry->second.failure_reason);
+		}
+		return nullptr;
+	}
+	auto& built = *built_ptr;
 	{
 		const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
 		                    std::chrono::steady_clock::now() - sync_begin)
 		                    .count();
 		BuildTiming::Build build {
-		    .stage  = ShaderRecompiler::StageName(options.stage),
-		    .hash   = params.hash,
-		    .words  = m_last_compile_words,
-		    .where  = "render",
-		    .reason = std::is_same_v<InputInfo, ShaderComputeInputInfo> ? "dispatch" : "draw",
+		    .stage             = ShaderRecompiler::StageName(options.stage),
+		    .hash              = params.hash,
+		    .words             = m_last_compile_words,
+		    .where             = "render",
+		    .reason            = std::is_same_v<InputInfo, ShaderComputeInputInfo> ? "dispatch" : "draw",
+		    .top_contributors  = m_last_compile_contributors,
+		    .contributor_count = m_last_compile_contributor_count,
 		};
 		build.steps = m_last_compile_steps;
 		build.steps.translate_us  = translate_us;

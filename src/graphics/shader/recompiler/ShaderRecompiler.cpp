@@ -761,8 +761,9 @@ CompileResult CompileProgram(TranslateResult translated, const CompileOptions& o
 
 	LOGF("ShaderRecompiler %s phase begin: hash=0x%016" PRIx64 " SPIR-V EmitProgram\n", stage,
 	     ir.shader_hash);
+	Spirv::EmitStats emit_stats;
 	auto spirv = Spirv::EmitProgram(ir, options.input_info, push_data, *options.profile,
-	                                options.emit_debug_info);
+	                                options.emit_debug_info, &emit_stats);
 	if (Config::SpirvCompactEnabled()) {
 		const auto before = spirv.size();
 		std::vector<uint32_t> compact;
@@ -782,6 +783,28 @@ CompileResult CompileProgram(TranslateResult translated, const CompileOptions& o
 			     stage, ir.shader_hash, error.c_str());
 		}
 	}
+	emit_stats.total_words = spirv.size();
+	const uint32_t word_budget = options.max_spirv_words.value_or(Config::MaxSpirvWords());
+	if (word_budget != 0u && spirv.size() > word_budget) {
+		std::string contributors;
+		for (uint32_t i = 0u; i < emit_stats.contributor_count && i < emit_stats.top_contributors.size(); ++i) {
+			const auto& c = emit_stats.top_contributors[i];
+			const auto  per_access = c.accesses != 0u ? (c.words / c.accesses) : c.words;
+			if (!contributors.empty()) contributors += ", ";
+			contributors += fmt::format("{}#{}: words={} cand={} acc={} w/a={}",
+			                            c.kind != nullptr ? c.kind : "other", c.resource, c.words,
+			                            c.candidates, c.accesses, per_access);
+		}
+		std::string reason =
+		    contributors.empty()
+		        ? fmt::format("emitted SPIR-V exceeds word budget ({} > {})", spirv.size(),
+		                      word_budget)
+		        : fmt::format("emitted SPIR-V exceeds word budget ({} > {}); top: {}", spirv.size(),
+		                      word_budget, contributors);
+		LOGF("ShaderRecompiler %s SPIR-V word budget exceeded: hash=0x%016" PRIx64 " %s\n", stage,
+		     ir.shader_hash, reason.c_str());
+		throw SpirvWordBudgetError(std::move(reason), spirv.size(), word_budget, emit_stats);
+	}
 	LOGF("ShaderRecompiler %s phase end: hash=0x%016" PRIx64 " SPIR-V EmitProgram words=%" PRIu64
 	     " wave_size=%u elapsed_ms=%" PRIu64 "\n",
 	     stage, ir.shader_hash, static_cast<uint64_t>(spirv.size()), ir.wave_size,
@@ -789,8 +812,9 @@ CompileResult CompileProgram(TranslateResult translated, const CompileOptions& o
 	                               std::chrono::steady_clock::now() - emit_begin)
 	                               .count()));
 	CompileResult result;
-	result.spirv   = std::move(spirv);
-	result.program = std::move(ir);
+	result.spirv      = std::move(spirv);
+	result.program    = std::move(ir);
+	result.emit_stats = emit_stats;
 	if (options.dump_ir) {
 		result.decoded_dump = std::move(translated.decoded_dump);
 		result.ir_dump      = std::move(ir_dump);

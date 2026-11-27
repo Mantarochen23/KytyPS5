@@ -37,6 +37,15 @@ driver_hang = []; fatal = []; device_lost = []; in_device_lost = False; tail = c
 
 # Findings. All of these are bounded: the log is read once, line by line, and no
 # line buffer grows with the size of the log.
+# `[fault]` lines (three per 5 s interval): rates of the write-watch path. Bounded: at most 2000
+# intervals are kept; block totals are a Counter capped at 4000 keys.
+fault_re = re.compile(rb'^\[fault\] ([\d.]+)s write=([\d.]+)/s read=([\d.]+)/s armed=([\d.]+) pg/s '
+                      rb'released=([\d.]+) pg/s protect-calls=([\d.]+)/s protect=([\d.]+) ms/s '
+                      rb'handler=([\d.]+) ms/s invalidate=([\d.]+) ms/s fast-skip=([\d.]+)/s '
+                      rb'storm\(on=(\d+)\) marked=(\d+) kept=([\d.]+) pg/s expired=(\d+)')
+fault_wait_re = re.compile(rb'(\w+)=([\d.]+)\(([\d.]+)\)')
+fault_block_re = re.compile(rb'(0x[0-9a-f]+)=(\d+)')
+fault_rows = []; fault_waits = collections.Counter(); fault_blocks = collections.Counter()
 frame_count = 0; frame_t = collections.Counter(); last_frame_t = None; last_frame_no = None
 gaps = []                 # frame gaps >= 3 s: start, end, length, frame number
 stalls = collections.OrderedDict()   # (seconds, frame) -> phases + times
@@ -52,6 +61,7 @@ jobs_samples = []; worst_pump = (0.0, 0.0); pump_peak = (0.0, 0.0); stages_tail 
 cache_lines = []; last_store = None; store_lookups = None
 skip_lines = 0; skip_t_first = None; skip_t_last = None
 ledger_lines = []; ledger_t = None
+frame_cost_lines = []
 
 # diag2 findings. Every collection is bounded so a large log cannot grow memory
 # without limit; only the first/last examples and the largest builds are kept.
@@ -179,6 +189,19 @@ with open(path, 'rb') as f:
                 driver_hang.append(line.rstrip().decode(errors='replace')[:400])
             if c == b'@' and line.startswith(b'@@T '):
                 t = float(line[4:]); continue
+            if c == b'[' and line.startswith(b'[fault] '):
+                m = fault_re.match(line)
+                if m:
+                    if len(fault_rows) < 2000:
+                        fault_rows.append([round(t, 1)] + [float(x) for x in m.groups()])
+                elif line.startswith(b'[fault] lock-wait'):
+                    for name, ms, n in fault_wait_re.findall(line):
+                        fault_waits[name.decode()] += float(ms)
+                elif line.startswith(b'[fault] top 64K blocks:'):
+                    for addr, n in fault_block_re.findall(line):
+                        if addr in fault_blocks or len(fault_blocks) < 4000:
+                            fault_blocks[addr] += int(n)
+                continue
             if c == b'[' and b'][trace] ' in line[:24]:
                 m = trace_re.match(line)
                 if m:
@@ -270,6 +293,10 @@ with open(path, 'rb') as f:
                                       else module_for_pc(pc))
                             park_threads.append(dict(t=round(t, 1), id=int(pm.group(1)),
                                                      pc=pc, module=modoff))
+                    continue
+                if line.startswith(b'[frame]'):
+                    if len(frame_cost_lines) < 2000:
+                        frame_cost_lines.append((round(t, 1), line.rstrip().decode(errors='replace')))
                     continue
                 if line.startswith(b'[build]'):
                     add_build(line, t)
@@ -396,6 +423,8 @@ timeline = dict(last_frame_t=last_frame_t, frames=frame_count,
                                       for a, b, c in post_loading_frames],
                 parse_errors=parse_errors, t=round(t, 1))
 findings['timeline'] = timeline
+findings['fault_cost'] = dict(intervals=len(fault_rows), blocks={a.decode(): c for a, c in fault_blocks.most_common(8)},
+                              lock_wait_ms_total=dict(fault_waits))
 
 stall_list = []
 for (secs, frame), g in sorted(stalls.items(), key=lambda kv: (-(float(kv[0][0]) if str(kv[0][0]).replace('.', '', 1).isdigit() else -1.0), str(kv[0][1]))):
@@ -478,6 +507,7 @@ for line in ledger_lines:
     if m and int(m.group(2)):
         lead[m.group(1)] = dict(n=int(m.group(2)), min=int(m.group(3)) if m.group(3) else None)
 findings['ledger'] = dict(registered=registered, used=used, lead=lead, t=ledger_t)
+findings['frame_cost'] = [dict(t=tt, line=line) for tt, line in frame_cost_lines]
 
 stages_text = stages_tail or ''
 def stages_dict(tail):
@@ -655,6 +685,34 @@ def lines_build_rate():
     return sec
 
 
+def lines_fault_cost():
+    if not fault_rows:
+        return []
+    n = len(fault_rows)
+    col = lambda i: [r[i] for r in fault_rows]
+    mean = lambda v: sum(v) / len(v)
+    secs = sum(col(1))
+    sec = ['@%s-%s s: %d intervals (%.0f s); rates per second, mean / peak:' % (fault_rows[0][0], fault_rows[-1][0], n, secs)]
+    for label, i, unit in (('write faults', 2, '/s'), ('read faults', 3, '/s'), ('pages armed', 4, ' pg/s'),
+                           ('pages released', 5, ' pg/s'), ('protect calls', 6, '/s'),
+                           ('in protect syscalls', 7, ' ms/s'), ('in fault handler', 8, ' ms/s'),
+                           ('in buffer invalidate', 9, ' ms/s'), ('fast skips (no lock)', 10, '/s')):
+        sec.append('  %-22s %9.1f / %9.1f%s' % (label, mean(col(i)), max(col(i)), unit))
+    waits = ['%s=%.1f' % (k, v / n) for k, v in sorted(fault_waits.items(), key=lambda kv: -kv[1]) if v > 0]
+    sec.append('  lock wait ms/s by caller (mean): %s' % (' '.join(waits) or 'none'))
+    storm_on = fault_rows[-1][11]
+    sec.append('  fault-storm rule: %s; pages marked %d, re-arms skipped %.0f pg/s (mean), pages expired %d' %
+               ('on' if storm_on else 'off', sum(col(12)), mean(col(13)), sum(col(14))))
+    if fault_blocks:
+        sec.append('  top 64K blocks by faults over the run: %s' %
+                   ' '.join('%s=%d' % (a.decode(), c) for a, c in fault_blocks.most_common(8)))
+    hot = mean(col(8))
+    if hot >= 100:
+        sec.append('  VERDICT: the handler takes %.0f ms of every second (%.0f%% of one core): see the '
+                   'lock-wait split and the top blocks' % (hot, hot / 10))
+    return sec
+
+
 def lines_parked():
     sec = []
     for p in park_threads:
@@ -710,6 +768,10 @@ def lines_ledger():
             '@%s s lead time min ms: %s' % (ledger_t, ' '.join('%s=%s' % (s, v['min']) for s, v in sorted(lead.items())))]
 
 
+def lines_frame_cost():
+    return ['@%s s: %s' % (tt, line) for tt, line in frame_cost_lines]
+
+
 print("VERDICT:")
 if not verdict: print("  no data")
 for i, line in enumerate(verdict, 1): print("  %d. %s" % (i, line))
@@ -717,9 +779,9 @@ print("FINDINGS:")
 for name, builder in (('TIMELINE', lines_timeline), ('STALLS', lines_stalls),
                       ('QUEUES', lines_queues), ('SHADERS', lines_shaders),
                       ('ASYNC', lines_async), ('BUILD RATE', lines_build_rate),
-                      ('PARKED', lines_parked), ('HOLES', lines_holes),
+                      ('PARKED', lines_parked), ('FAULT COST', lines_fault_cost), ('HOLES', lines_holes),
                       ('STORE', lines_store), ('REJECTIONS', lines_rejections),
-                      ('LEDGER', lines_ledger)):
+                      ('LEDGER', lines_ledger), ('FRAME COST', lines_frame_cost)):
     section(name, safe(name, builder))
 
 

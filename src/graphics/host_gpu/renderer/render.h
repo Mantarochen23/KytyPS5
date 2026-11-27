@@ -7,6 +7,7 @@
 #include "graphics/host_gpu/renderer/dispatchGuard.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
+#include "graphics/host_gpu/renderer/pipeline/skipTaint.h"
 #include "graphics/host_gpu/renderer/renderTarget.h"
 #include "graphics/host_gpu/renderer/upscaler/upscaler.h"
 #include "graphics/host_gpu/vulkanCommon.h"
@@ -143,12 +144,17 @@ public:
 	~RenderExecutor();
 	KYTY_CLASS_NO_COPY(RenderExecutor);
 
+	// `indirect_args`: the guest argument address of a thread-dimension indirect dispatch whose
+	// counts the command processor read (an input of the dispatch), 0 for a direct packet.
 	bool DispatchDirect(CommandBuffer& buffer, uint32_t thread_group_x, uint32_t thread_group_y,
 	                    uint32_t thread_group_z, uint32_t mode, bool async_compute,
-	                    bool allow_async = false);
+	                    bool allow_async = false, uint64_t indirect_args = 0);
 	bool DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr, uint32_t mode,
 	                      bool async_compute, bool allow_async = false);
 	void ProcessPssr(CommandBuffer& buffer, const Pssr::Request& request);
+	// The dispatch that just returned false (shader work pending) is being skipped: what it would
+	// have written is tainted (--async-compute-wait-ms, skipTaint.h).
+	void TaintSkippedDispatch();
 
 	void PrepareBindings(const ShaderStageRuntime& runtime, PreparedBindings& prepared);
 	void                           FindBuffers(std::span<PreparedBindings* const> stages);
@@ -227,6 +233,9 @@ private:
 	vk::DescriptorSetLayout               m_pssr_descriptor_layout = nullptr;
 	vk::PipelineLayout                    m_pssr_pipeline_layout   = nullptr;
 	vk::Pipeline                          m_pssr_pipeline          = nullptr;
+	// Outputs of skipped dispatches, and the buffer use of the dispatch that last returned pending.
+	SkipTaint                             m_skip_taint;
+	std::vector<SkipTaint::Use>           m_pending_uses;
 	// Created by the first guarded indirect dispatch.
 	std::unique_ptr<DispatchArgsGuard>    m_dispatch_guard;
 	std::vector<UpscalerContext>          m_upscaler_contexts;

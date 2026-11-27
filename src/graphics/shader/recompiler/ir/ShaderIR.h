@@ -30,6 +30,9 @@ namespace Libs::Graphics::ShaderRecompiler::IR {
 constexpr uint32_t MaxIndirectDescriptorProbes = 65536u;
 // A bounded table V# is scanned row by row on the host; only distinct descriptors become resources.
 constexpr uint32_t MaxIndirectScalarTableRows = 262144u;
+// Distinct materialized candidates per indirect buffer root; bounds host descriptor binding
+// updates and emitted indirect dispatch tables.
+constexpr uint32_t MaxIndirectBufferCandidates = 4096u;
 // Canonical resource specialization (port canonical-resources): an indirect root's
 // indirect_mapping_offset is IndirectMappingHeader | slot, and flattened_srt[slot] holds the offset
 // of its mapping, so a module does not depend on the lengths of the tables before it. The slot

@@ -182,6 +182,21 @@ struct ConfigOptions {
 	// --mem-limit-gb: when the process's RSS + swap passes this, caches are dropped and the memory
 	// table printed; still over 10 s later, the run stops with a message. 0 = off.
 	uint32_t                 mem_limit_gb               = 0;
+	// Set when --loop-guard (or KYTY_LOOP_GUARD) was given, so that an explicit 0 turns off the
+	// default compute-shader loop guard.
+	bool                     loop_guard_explicit        = false;
+	// --fault-storm-faults / --fault-storm-frames / --fault-storm-hold: a guest page whose write
+	// watch is re-armed and faults again `faults` times within `frames` frames stays unwatched (and
+	// is uploaded as modified on every pass) for `hold` frames, then is re-armed. faults 0 = off.
+	uint32_t                 fault_storm_faults         = 0;
+	uint32_t                 fault_storm_frames         = 8;
+	uint32_t                 fault_storm_hold           = 60;
+	// --max-spirv-words: refuse any emitted or stored shader module larger than this many SPIR-V
+	// words before CompileSPV or the graphics driver sees it. 0 = unlimited.
+	// Default 2,000,000 words (~7.6 MiB): ~3.7x above the largest measured good module (534,825
+	// words) and ~6x below the 11.5-13.8M-word modules that crash the driver.
+	static constexpr uint32_t DefaultMaxSpirvWords      = 2'000'000u;
+	uint32_t                 max_spirv_words            = DefaultMaxSpirvWords;
 };
 
 void Load(const ConfigOptions& cfg);
@@ -283,6 +298,10 @@ bool     BufferProbeShader(uint64_t hash);
 bool     BufferProbeEnabled();
 const std::vector<uint64_t>& BufferProbeHashes();
 uint32_t LoopGuardLimit();
+// Loop exits one invocation of a compute shader may evaluate before every loop is left: the value
+// of --loop-guard when given, else DefaultComputeLoopGuardLimit.
+inline constexpr uint32_t DefaultComputeLoopGuardLimit = 1u << 20u;
+uint32_t ComputeLoopGuardLimit();
 bool ShaderKeyIndexEnabled();
 uint32_t AsyncPumpBudgetMs();
 uint32_t AsyncWorkers();
@@ -299,6 +318,10 @@ uint32_t AsyncSpeculativeModulesMode();
 uint32_t WarmUpBudgetSeconds();
 bool SpirvCompactEnabled();
 uint32_t MemLimitGb();
+uint32_t FaultStormFaults();
+uint32_t FaultStormFrames();
+uint32_t FaultStormHold();
+uint32_t MaxSpirvWords();
 
 } // namespace Config
 

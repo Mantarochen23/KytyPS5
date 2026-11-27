@@ -5,9 +5,24 @@
 #include "common/stringUtils.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 
+#include <array>
 #include <vector>
 
 namespace Libs::Graphics::ShaderRecompiler::Spirv {
+
+struct EmitContributor {
+	const char* kind       = "";
+	uint32_t    resource   = 0;
+	uint32_t    candidates = 0;
+	uint32_t    accesses   = 0;
+	uint64_t    words      = 0;
+};
+
+struct EmitStats {
+	uint64_t                       total_words       = 0;
+	std::array<EmitContributor, 3> top_contributors {};
+	uint32_t                       contributor_count = 0;
+};
 
 // Host device capabilities and user options that change the emitted SPIR-V. Built once per device.
 struct Profile {
@@ -29,6 +44,9 @@ struct Profile {
 	uint32_t loop_guard_limit = 0;
 	// VK_EXT_fragment_shader_interlock pixel interlock for emulated 8-bit image atomics in pixel shaders.
 	bool fragment_shader_pixel_interlock = false;
+	// Loop guard limit for compute shaders (the same meaning as loop_guard_limit); a compute shader
+	// uses this, every other stage uses loop_guard_limit.
+	uint32_t loop_guard_compute_limit = 0;
 };
 
 inline constexpr Profile DefaultProfile {};
@@ -37,7 +55,8 @@ inline constexpr Profile DefaultProfile {};
 std::vector<uint32_t> EmitProgram(IR::Program& program, ShaderStageInputInfo input_info,
                                   IR::PushData::Window push_data       = {},
                                   const Profile&       profile         = DefaultProfile,
-                                  bool                 emit_debug_info = false);
+                                  bool                 emit_debug_info = false,
+                                  EmitStats*           stats           = nullptr);
 
 } // namespace Libs::Graphics::ShaderRecompiler::Spirv
 

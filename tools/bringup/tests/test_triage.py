@@ -55,7 +55,7 @@ def sections(text):
 
 
 ALL_SECTIONS = ('TIMELINE', 'STALLS', 'QUEUES', 'SHADERS', 'ASYNC',
-                'BUILD RATE', 'PARKED', 'HOLES', 'STORE', 'REJECTIONS', 'LEDGER')
+                'BUILD RATE', 'PARKED', 'FAULT COST', 'HOLES', 'STORE', 'REJECTIONS', 'LEDGER')
 
 
 class TriageTests(unittest.TestCase):
@@ -403,6 +403,40 @@ class TriageTests(unittest.TestCase):
                     self.assertTrue(h.startswith(b'0xaaaa') or
                                     re.fullmatch(rb'0?x?0{6}[0-9a-f]{10}', h),
                                     'unmasked value: %r' % h)
+
+
+class FaultCostTest(unittest.TestCase):
+    LOG = (
+        "@@T 10.0\n"
+        "[fault] 5.0s write=2000/s read=10/s armed=2500 pg/s released=2000 pg/s protect-calls=2400/s "
+        "protect=150.0 ms/s handler=300.0 ms/s invalidate=120.0 ms/s fast-skip=40/s storm(on=3) "
+        "marked=5 kept=100 pg/s expired=1\n"
+        "[fault] lock-wait ms/s (waits/s): other=0.0(0) fault=90.5(800) upload=30.0(20) download=0.0(0) "
+        "mark=0.0(0) unmark=0.0(0) texture=1.5(3)\n"
+        "[fault] top 64K blocks: 0xaaaa0000=900 0xaaaa10000=300\n"
+        "@@T 15.0\n"
+        "[fault] 5.0s write=1000/s read=0/s armed=1200 pg/s released=1000 pg/s protect-calls=1100/s "
+        "protect=50.0 ms/s handler=100.0 ms/s invalidate=60.0 ms/s fast-skip=10/s storm(on=3) "
+        "marked=0 kept=50 pg/s expired=0\n"
+        "[fault] lock-wait ms/s (waits/s): other=0.0(0) fault=10.0(100) upload=0.0(0) download=0.0(0) "
+        "mark=0.0(0) unmark=0.0(0) texture=0.0(0)\n"
+        "[fault] top 64K blocks: 0xaaaa0000=500\n")
+
+    def test_section(self):
+        text, data = run_triage(self.LOG)
+        body = sections(text)['FAULT COST']
+        joined = '\n'.join(body)
+        self.assertIn('2 intervals', joined)
+        self.assertIn('write faults', joined)
+        self.assertIn('1500.0 /    2000.0/s', joined)
+        self.assertIn('fault=50.2', joined)
+        self.assertIn('0xaaaa0000=1400', joined)
+        self.assertIn('rule: on', joined)
+        self.assertIn('VERDICT', joined)
+
+    def test_absent(self):
+        text, _ = run_triage("@@T 1.0\n")
+        self.assertEqual(sections(text)['FAULT COST'], ['no data'])
 
 
 if __name__ == '__main__':
