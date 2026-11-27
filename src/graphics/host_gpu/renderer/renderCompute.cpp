@@ -14,6 +14,7 @@
 #include "graphics/guest_gpu/pm4.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/dispatchGuard.h"
+#include "graphics/host_gpu/renderer/dispatchLimits.h"
 #include "graphics/host_gpu/renderer/image/imageInfo.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
@@ -676,10 +677,13 @@ void RenderExecutor::TaintSkippedDispatch() {
 // Before a ready dispatch records: true when it reads memory a skipped dispatch was to write. It is
 // then skipped itself and its outputs are tainted. Otherwise what it writes is fresh again.
 // Only with --async-compute-wait-ms; costs one empty() test while nothing was skipped.
-static bool SkipOnTaintedInput(SkipTaint& taint, const ShaderStageRuntime& stage) {
+static bool SkipOnTaintedInput(SkipTaint& taint, const ShaderStageRuntime& stage,
+                               const std::vector<SkipTaint::Use>& extra_reads = {}) {
 	if (Config::AsyncComputeWaitMs() == 0) return false;
 	if (taint.Empty()) return false;
-	const auto uses = ComputeBufferUses(stage);
+	auto uses = ComputeBufferUses(stage);
+	// Memory the dispatch itself reads before the shader runs (indirect group counts).
+	uses.insert(uses.end(), extra_reads.begin(), extra_reads.end());
 	const auto now  = SteadyNowMs();
 	if (taint.ReadsTainted(uses, now)) {
 		taint.Taint(uses, now);
@@ -693,6 +697,50 @@ static bool SkipOnTaintedInput(SkipTaint& taint, const ShaderStageRuntime& stage
 	}
 	taint.ClearWritten(uses);
 	return false;
+}
+
+// A dispatch whose group counts the guest chose: names it in the log when it is large (default on,
+// rate-limited per shader) and says whether it must be skipped because it is above the group limit
+// (dispatchLimits.h). `args_addr` is the indirect argument address, 0 for a direct dispatch.
+static bool JudgeLargeDispatch(SkipTaint& taint, const ShaderStageRuntime& stage,
+                               const HW::ComputeShaderInfo& cs, const uint32_t (&threads)[3],
+                               const uint32_t (&groups)[3], uint32_t mode, uint64_t args_addr) {
+	const uint64_t group_threads = uint64_t {std::max(threads[0], 1u)} * std::max(threads[1], 1u) *
+	                               std::max(threads[2], 1u);
+	const bool     may_skip      = DispatchArgsGuard::Enabled();
+	const auto     verdict       = JudgeDispatch(groups[0], groups[1], groups[2], group_threads,
+	                                             DispatchGroupLimit(), may_skip);
+	if (verdict == DispatchVerdict::Run) return false;
+	const uint64_t hash = stage.module->info.shader_hash;
+	static DispatchReportLimiter limiter;
+	if (limiter.Allow(hash)) {
+		const auto& user  = cs.cs_user_sgpr.value;
+		const int   count = FindCountDword(user, 16, groups[0], std::max(threads[0], 1u));
+		bool        tainted = false;
+		if (args_addr != 0) {
+			tainted = taint.ReadsTainted({{args_addr, sizeof(vk::DispatchIndirectCommand), true, false}},
+			                             SteadyNowMs());
+		} else if (!taint.Empty()) {
+			tainted = taint.ReadsTainted(ComputeBufferUses(stage), SteadyNowMs());
+		}
+		char count_text[96] = "none";
+		if (count >= 0) {
+			std::snprintf(count_text, sizeof(count_text), "user[%d]=0x%08" PRIx32 " (as float %g)",
+			              count, user[count], static_cast<double>(DwordAsFloat(user[count])));
+		}
+		LOGF("[dispatch] cs hash=0x%016" PRIx64 " source=%s args=0x%012" PRIx64
+		     " groups=0x%" PRIx32 ",0x%" PRIx32 ",0x%" PRIx32 " (%" PRIu64 " groups, %" PRIu64
+		     " invocations) local=%ux%ux%u initiator=0x%08" PRIx32
+		     " [thread_dims=%u partial=%u ordered_append=%u wave32=%u] count_from_dword=%s "
+		     "tainted_input=%u action=%s limit=%" PRIu32 "\n",
+		     hash, args_addr != 0 ? "indirect" : "direct", args_addr, groups[0], groups[1],
+		     groups[2], DispatchGroups(groups[0], groups[1], groups[2]),
+		     DispatchInvocations(groups[0], groups[1], groups[2], group_threads), threads[0],
+		     threads[1], threads[2], mode, (mode >> 5u) & 1u, (mode >> 1u) & 1u, (mode >> 3u) & 1u,
+		     (mode >> 15u) & 1u, count_text, tainted ? 1u : 0u,
+		     verdict == DispatchVerdict::Skip ? "skipped" : "run", DispatchGroupLimit());
+	}
+	return verdict == DispatchVerdict::Skip;
 }
 
 bool RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group_x,
@@ -771,6 +819,19 @@ bool RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 
 	const auto& program   = input_info.stage.module->info;
 	const auto& resources = *input_info.stage.resources;
+	{
+		uint32_t final_groups[3] = {thread_group_x, thread_group_y, thread_group_z};
+		if (use_thread_dimensions) {
+			std::copy(std::begin(input_info.workgroup_counts), std::end(input_info.workgroup_counts),
+			          std::begin(final_groups));
+		}
+		if (JudgeLargeDispatch(m_skip_taint, input_info.stage, sh_ctx.GetCs(), input_info.threads_num,
+		                       final_groups, mode, 0)) {
+			m_pending_uses = ComputeBufferUses(input_info.stage);
+			TaintSkippedDispatch();
+			return true;
+		}
+	}
 	if (resources.specialization_reads.empty() &&
 	    (TryConsumeComputeMetaClear(input_info, buffer) ||
 	     TryConsumeComputeFill(input_info, buffer, thread_group_x, thread_group_y,
@@ -942,9 +1003,11 @@ bool RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 	Common::LockGuard lock(m_context.GetMutex());
 	m_pending_uses.clear();
 	vk::DispatchIndirectCommand args {};
-	if (!m_context.GetBufferCache().HasGpuDirtyBytes(args_addr, sizeof(args)) &&
-	    LibKernel::Memory::TryReadBacking(args_addr, &args, sizeof(args)) &&
-	    (args.x == 0 || args.y == 0 || args.z == 0)) {
+	// The counts are known here only when the guest wrote them (the GPU-written ones are checked
+	// by DispatchArgsGuard on the GPU).
+	const bool args_on_host = !m_context.GetBufferCache().HasGpuDirtyBytes(args_addr, sizeof(args)) &&
+	                          LibKernel::Memory::TryReadBacking(args_addr, &args, sizeof(args));
+	if (args_on_host && (args.x == 0 || args.y == 0 || args.z == 0)) {
 		return true;
 	}
 	const auto& cs_regs = buffer.GetShaders().GetCs();
@@ -966,8 +1029,20 @@ bool RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 		}
 		return !pending;
 	}
-	if (allow_async && SkipOnTaintedInput(m_skip_taint, input_info.stage)) {
+	// The argument buffer is an input of the dispatch: a skipped producer's counts are stale.
+	if (allow_async &&
+	    SkipOnTaintedInput(m_skip_taint, input_info.stage,
+	                       {{args_addr, sizeof(vk::DispatchIndirectCommand), true, false}})) {
 		return true;
+	}
+	if (args_on_host) {
+		const uint32_t final_groups[3] = {args.x, args.y, args.z};
+		if (JudgeLargeDispatch(m_skip_taint, input_info.stage, cs_regs, input_info.threads_num,
+		                       final_groups, mode, args_addr)) {
+			m_pending_uses = ComputeBufferUses(input_info.stage);
+			TaintSkippedDispatch();
+			return true;
+		}
 	}
 	buffer.EndRendering();
 	auto& pipeline = m_context.GetPipelineCache().GetComputePipeline(input_info);

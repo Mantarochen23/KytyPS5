@@ -546,6 +546,11 @@ add_executable(skip_taint_tests EXCLUDE_FROM_ALL
 )
 target_include_directories(skip_taint_tests PRIVATE ${inc_headers})
 
+add_executable(dispatch_limits_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/DispatchLimitsTests.cpp"
+)
+target_include_directories(dispatch_limits_tests PRIVATE ${inc_headers})
+
 add_executable(wait_diagnostics_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/WaitDiagnosticsTests.cpp"
 )
