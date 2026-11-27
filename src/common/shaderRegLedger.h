@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -43,6 +44,8 @@ struct DumpRegistrationInfo {
 	bool             group_id[3]           = {};
 	uint32_t         thread_ids_num        = 0;
 	bool             tg_size_en            = false;
+	uint32_t         workgroup_register    = 0;
+	bool             dispatch_thread_dimensions = false;
 };
 // The shared immutable copy is the same one retained by the shader map. The enqueue path never
 // waits for queue space or the writer lock; a contended/full queue drops the dump and counts it.
@@ -50,6 +53,40 @@ void DumpRegistration(uint64_t hash, const DumpRegistrationInfo& info,
                       std::shared_ptr<const std::vector<uint32_t>> code);
 void NoteUse(uint64_t hash, Stage stage, uint64_t variant_key);
 void PrintSummary();
+
+// First-use records (--dump-registered-shaders): what the translator and the resource
+// materialization read when a stage was first used. One record per (stage, hash), written to
+// use.jsonl and one blob file. Guest addresses appear only inside the blob and the memory range
+// list, which together are replayed by the offline tool as a private virtual memory.
+struct UseRange {
+	uint64_t address = 0;
+	uint64_t bytes   = 0;
+};
+struct UseRecord {
+	std::string           stage; // cs, ps, vs, ls, hs, tes, ms
+	uint64_t              hash = 0;
+	uint32_t              options_wave_size = 64;
+	uint32_t              user_data_base    = 0;
+	uint32_t              push_begin        = 0;
+	uint32_t              push_end          = 0;
+	uint32_t              workgroup_counts[3] = {};
+	uint64_t              indirect_args_address = 0;
+	uint64_t              shader_base           = 0;
+	bool                  uses_image_heap       = false;
+	bool                  memory_truncated      = false;
+	std::vector<uint32_t> user_data;
+	std::vector<uint8_t>  input_info; // Raw bytes of the stage input struct, pointers cleared.
+	std::vector<uint32_t> back_code;
+	std::vector<UseRange> ranges;
+	std::vector<uint8_t>  memory; // The bytes of `ranges`, back to back.
+};
+[[nodiscard]] bool UseDumpEnabled();
+// True once per (stage, hash) while the use dump is enabled; the caller then builds the record.
+[[nodiscard]] bool WantUse(uint64_t hash, std::string_view stage);
+// Never blocks: a contended or full queue drops the record and counts it.
+void DumpUse(UseRecord&& record);
+// Counted reasons a wanted record was not produced (call targets, failed materialization, ...).
+void NoteUseSkipped(std::string_view reason);
 
 struct Lifecycle {
 	static constexpr const char* name               = "ShaderRegLedger";
