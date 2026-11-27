@@ -344,6 +344,10 @@ struct ImageHeapTestAccess {
   }
   static size_t IndexCount(const ImageHeap &heap) { return heap.m_index.size(); }
   static size_t HeldCount(const ImageHeap &heap) { return heap.m_held.size(); }
+  static uint64_t ResolveCalls(const ImageHeap &heap) { return heap.m_resolve_calls; }
+  static void RetryEveryDraw(ImageHeap &heap, uint32_t entry) {
+    heap.m_dcc.push_back(entry & ((1u << ShaderRecompiler::IR::ImageHeapKindShift) - 1u));
+  }
   static const auto &Slots(const ImageHeap &heap, size_t memory) {
     return heap.m_memories.at(memory)->views.at(0)->slots;
   }
@@ -361,6 +365,9 @@ struct TextureCacheTestAccess {
   static_assert(TextureCache::ImagePageTable::kFirstLevelBits == 14);
 
   static uint64_t GcTick(const TextureCache &cache) { return cache.m_gc_tick; }
+  static void TouchResolution(TextureCache &cache, uint64_t address, uint64_t size) {
+    cache.TouchResolutionGeneration(address, size);
+  }
   // Suspend points that collect nothing.
   static void SkipFrames(TextureCache &cache, uint64_t frames) {
     cache.m_gc_tick += frames;
@@ -6807,6 +6814,34 @@ public:
       Require(name, "resident images",
               resident && textures.GetImage(resident).heap_refs.load() == 1u,
               "the shared heap element did not pin its image exactly once");
+      // Incremental discovery does no texture work for a stable entry. A descriptor write,
+      // eviction, or relevant texture-cache generation change each makes it resolve once.
+      const auto texture = [](uint32_t index) { return base + 0x10000u + index * 0x1000u; };
+      ImageHeapTestAccess::RetryEveryDraw(heap, filtered.slots[40]);
+      auto resolves = ImageHeapTestAccess::ResolveCalls(heap);
+      Require(name, "unchanged discovery", acquire(sampled), "the view was declined");
+      draw();
+      Require(name, "unchanged entry skipped", ImageHeapTestAccess::ResolveCalls(heap) == resolves,
+              "an unchanged entry was resolved again");
+      TextureCacheTestAccess::TouchResolution(textures, texture(1), 0x1000u);
+      Require(name, "generation discovery", acquire(sampled), "the view was declined");
+      draw();
+      Require(name, "generation entry resolved", ImageHeapTestAccess::ResolveCalls(heap) == ++resolves,
+              "a relevant texture-cache generation did not resolve the entry");
+      write(5, descriptor(2, Format::k8_8_8_8UNorm));
+      Require(name, "descriptor discovery", acquire(sampled), "the view was declined");
+      draw();
+      Require(name, "descriptor entry resolved", ImageHeapTestAccess::ResolveCalls(heap) == ++resolves,
+              "changed descriptor words did not resolve the entry");
+      ImageHeapTestAccess::RetryEveryDraw(heap, filtered.slots[40]);
+      textures.UnmapMemory(texture(2), 0x1000u);
+      Require(name, "eviction discovery", acquire(sampled), "the view was declined");
+      draw();
+      Require(name, "evicted entry resolved", ImageHeapTestAccess::ResolveCalls(heap) == ++resolves,
+              "an evicted backing image did not resolve the entry");
+      write(5, descriptor(1, Format::k8_8_8_8UNorm));
+      Require(name, "restore descriptor", acquire(sampled), "the view was declined");
+      draw();
       // A CPU write to a resident image reaches the next draw without rediscovering it.
       const uint32_t texel = 0xff00ff00u;
       Libs::LibKernel::Memory::WriteBacking(base + 0x10000u, &texel, sizeof(texel));
@@ -6964,7 +6999,6 @@ public:
       // Tables keep the descriptors of unmapped textures, which PS5 never samples. Their words
       // stay null in every view, even when the memory is mapped again before the next draw,
       // until one of their own words changes.
-      const auto texture = [](uint32_t index) { return base + 0x10000u + index * 0x1000u; };
       write(20, descriptor(20, Format::k8_8_8_8UNorm));
       Require(name, "live texture", acquire(sampled), "the view was declined");
       draw();

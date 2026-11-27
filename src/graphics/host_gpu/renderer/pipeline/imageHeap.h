@@ -73,6 +73,10 @@ private:
 		Key      key;
 		ImageId  image;
 		uint64_t serial = 0; // Image::serial of image.
+		uint64_t descriptor_hash = 0; // Descriptor words at the last resolution.
+		uint64_t cache_generation = 0; // Texture-cache generation at that resolution.
+		GuestRange data;
+		GuestRange metadata;
 		uint32_t kind   = 0;
 		uint32_t refs   = 0; // Slots of all views that select it.
 		State    state  = State::Live;
@@ -146,6 +150,8 @@ private:
 	std::vector<uint32_t>                             m_dcc;  // Metadata clears apply per draw.
 	std::vector<std::pair<uint64_t, ImageId>>         m_away; // Serial, image: not read layout.
 	uint64_t                                          m_held_serial = 0; // Image::serials.
+	uint64_t                                          m_cache_generation = 0;
+	uint64_t                                          m_resolve_calls    = 0; // Test-visible proof count.
 	std::deque<std::pair<uint64_t, uint32_t>>         m_retired; // Tick, element.
 	std::vector<std::pair<size_t, size_t>>            m_runs;
 	std::vector<uint32_t>                             m_scratch;

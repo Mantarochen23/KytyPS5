@@ -225,6 +225,7 @@ void TextureCache::RegisterImage(ImageId id) {
 	ForEachPage(data.address, data.size, [this, &entry](uint64_t page) {
 		m_image_page_table[page].entries.push_back(entry);
 	});
+	TouchResolutionGenerationLocked(data.address, data.size);
 	image.registered = true;
 	image.lru_id     = m_lru_cache.Insert(id, m_gc_tick);
 	m_resolve_cache.Invalidate();
@@ -247,10 +248,40 @@ void TextureCache::UnregisterImage(ImageId id) {
 		}
 		entries.erase(entry);
 	});
+	TouchResolutionGenerationLocked(image.info.data.address, image.info.data.size);
 	m_lru_cache.Free(image.lru_id);
 	m_total_used_memory -= image.AccountedSize();
 	image.registered = false;
 	m_resolve_cache.Invalidate();
+}
+
+void TextureCache::TouchResolutionGenerationLocked(uint64_t address, uint64_t size) {
+	if (!GuestRange {address, size}.Valid()) return;
+	const auto generation = m_resolution_generation.fetch_add(1u, std::memory_order_relaxed) + 1u;
+	ForEachPage(address, size,
+	            [this, generation](uint64_t page) { m_resolution_page_table[page] = generation; });
+}
+
+void TextureCache::TouchResolutionGeneration(uint64_t address, uint64_t size) {
+	std::scoped_lock lock {m_lock};
+	TouchResolutionGenerationLocked(address, size);
+}
+
+bool TextureCache::ResolutionChangedSince(GuestRange data, GuestRange metadata,
+	                                      uint64_t generation, uint64_t& current) {
+	std::scoped_lock lock {m_lock};
+	current = ResolutionGeneration();
+	const auto changed = [&](GuestRange range) {
+		if (range.Empty()) return false;
+		bool result = false;
+		ForEachPage(range.address, range.size, [&](uint64_t page) {
+			const auto* stamp = m_resolution_page_table.Find(page);
+			result            = stamp != nullptr && *stamp > generation;
+			return result;
+		});
+		return result;
+	};
+	return changed(data) || changed(metadata);
 }
 
 void TextureCache::DeleteImage(ImageId id) {
@@ -1301,6 +1332,7 @@ ImageId TextureCache::AssociateStencil(ImageId depth_id, GuestRange stencil) {
 		record.info                 = plane;
 		record.depth_id             = depth_id;
 		record.stencil_subresources = depth.stencil_subresources;
+		TouchResolutionGenerationLocked(stencil.address, stencil.size);
 	}
 
 	return association;
@@ -1967,6 +1999,7 @@ uint64_t TextureCache::WriteBackTick(uint64_t address, uint64_t size) {
 
 void TextureCache::InvalidateMemoryFromGPU(uint64_t address, uint64_t size) {
 	std::scoped_lock lock {m_lock};
+	TouchResolutionGenerationLocked(address, size);
 	ForEachImageInRegion(address, size, [&](ImageId, Image& image) {
 		if (image.info.data.address != address) {
 			return;
@@ -2045,6 +2078,7 @@ bool TextureCache::CopyToImage(uint64_t address, uint64_t source, uint64_t size)
 
 void TextureCache::InvalidateMemory(uint64_t address, uint64_t size) {
 	std::scoped_lock lock {m_lock};
+	TouchResolutionGenerationLocked(address, size);
 	const auto       page_begin = Common::AlignDown(address, TRACKER_PAGE_SIZE);
 	const auto       page_end   = Common::AlignUp(address + size, TRACKER_PAGE_SIZE);
 	Common::SmallVector<ImageId, 8> image_ids;
@@ -2091,6 +2125,7 @@ bool TextureCache::ClearMeta(uint64_t address) {
 		return false;
 	}
 	found->second.clear_mask.set();
+	TouchResolutionGenerationLocked(address, sizeof(uint32_t));
 	return true;
 }
 
@@ -2101,6 +2136,7 @@ bool TextureCache::TouchMeta(uint64_t address, uint32_t slice, bool is_clear) {
 		return false;
 	}
 	found->second.clear_mask.set(slice, is_clear);
+	TouchResolutionGenerationLocked(address, sizeof(uint32_t));
 	return true;
 }
 

@@ -15,6 +15,7 @@
 #include "graphics/host_gpu/renderer/image/tiler.h"
 
 #include <algorithm>
+#include <atomic>
 #include <bitset>
 #include <map>
 #include <mutex>
@@ -76,6 +77,8 @@ public:
 	                                        uint32_t packed_clear);
 	void               InvalidateMemory(uint64_t address, uint64_t size);
 	void               InvalidateMemoryFromGPU(uint64_t address, uint64_t size);
+	// A content change can alter image discovery even when no registered image overlaps it.
+	void TouchResolutionGeneration(uint64_t address, uint64_t size);
 	// Writes a copy into whole levels of one layer of a GPU-written image straight into it, and
 	// returns false for any other copy.
 	[[nodiscard]] bool CopyToImage(uint64_t address, uint64_t source, uint64_t size);
@@ -132,6 +135,9 @@ private:
 	static_assert(sizeof(Bucket) == 64);
 
 	using ImagePageTable = MultiLevelPageTable<Bucket, 20, 44, 14>;
+	using ResolutionPageTable =
+	    MultiLevelPageTable<uint64_t, ImagePageTable::kPageBits,
+	                        ImagePageTable::kAddressSpaceBits, ImagePageTable::kFirstLevelBits>;
 
 	// Callers pass a nonempty, valid guest range.
 	template <typename Func>
@@ -216,6 +222,14 @@ private:
 	void                      DeleteImage(ImageId id);
 	void                      FreeImage(ImageId id);
 	void                      TouchImage(Image& image);
+	void                      TouchResolutionGenerationLocked(uint64_t address, uint64_t size);
+	[[nodiscard]] uint64_t    ResolutionGeneration() const noexcept {
+		return m_resolution_generation.load(std::memory_order_relaxed);
+	}
+	// Reports whether either range changed after generation and returns one coherent current
+	// generation for an entry that can now be skipped.
+	[[nodiscard]] bool ResolutionChangedSince(GuestRange data, GuestRange metadata,
+	                                          uint64_t generation, uint64_t& current);
 	void                      TrackImage(ImageId id);
 	void                      TrackImageHead(ImageId id);
 	void                      TrackImageTail(ImageId id);
@@ -274,6 +288,8 @@ private:
 	ResolveCache&                                     m_resolve_cache;
 	Common::SlotVector<Image>                         m_slot_images;
 	ImagePageTable                                    m_image_page_table;
+	ResolutionPageTable                               m_resolution_page_table;
+	std::atomic<uint64_t>                             m_resolution_generation {1};
 	Common::LeastRecentlyUsedCache<ImageId, uint64_t> m_lru_cache;
 	std::unordered_set<ImageId>                       m_download_images;
 	std::mutex                                        m_write_back_mutex;
