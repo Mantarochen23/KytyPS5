@@ -456,6 +456,7 @@ endfunction()
 add_kyty_full_emulator_test(shader_cfg_tests "${KYTY_TESTS_DIR}/shaderCfgTests.cpp")
 add_kyty_full_emulator_test(shader_store_tests "${KYTY_TESTS_DIR}/ShaderStoreTests.cpp")
 add_kyty_full_emulator_test(shader_corpus_tool "${KYTY_TESTS_DIR}/shaderCorpusTool.cpp")
+target_link_libraries(shader_corpus_tool SPIRV-Tools-opt)
 
 add_executable(scalar_provenance_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/ScalarProvenanceTests.cpp"
