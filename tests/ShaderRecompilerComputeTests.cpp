@@ -55084,7 +55084,8 @@ void CheckImageSamplerSpecialization() {
                 MaterializeResources(plan, runtime, snapshot, specialization) &&
                 snapshot.images.size() == count + 1u,
             "GPU-selected material descriptors did not expand beyond native root capacity");
-    const auto offset = specialization.images[0].indirect_mapping_offset;
+    const auto offset = IndirectMappingStart(specialization.images[0].indirect_mapping_offset,
+                                             snapshot.flattened_srt);
     const auto ordinal = [&](u32 byte_offset) {
       const auto word = byte_offset >> 2u;
       return word < snapshot.flattened_srt[offset]
