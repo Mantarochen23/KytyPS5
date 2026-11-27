@@ -1,5 +1,6 @@
 #include "common/emulatorConfig.h"
 #include "common/recoverable.h"
+#include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
 #include "graphics/shader/recompiler/frontend/cfg/ShaderCFG.h"
 #include "graphics/shader/recompiler/frontend/decode/ShaderDecoder.h"
@@ -9,6 +10,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <chrono>
 #include <cinttypes>
 #include <csignal>
@@ -225,6 +227,82 @@ bool PlanNeedsRuntime(const Recompiler::IR::ResourcePlan& plan) {
 	       !plan.info.buffers.empty() || !plan.info.images.empty() || !plan.info.samplers.empty();
 }
 
+Recompiler::IR::ResourceSpecialization SyntheticSpecialization(
+    const Recompiler::IR::ResourcePlan& plan) {
+	using namespace Recompiler::IR;
+	ResourceSpecialization specialization;
+	std::vector<uint32_t> indirect_buffers;
+	specialization.buffers.reserve(plan.info.buffers.size() * 2u);
+	for (uint32_t index = 0; index < plan.info.buffers.size(); index++) {
+		const auto& buffer = plan.info.buffers[index];
+		ResourceSpecialization::Buffer value;
+		value.packed_stride = buffer.packed_stride != 0u
+		                          ? buffer.packed_stride
+		                          : std::max(4u, buffer.max_byte_extent);
+		value.descriptor_format = buffer.descriptor_format;
+		if (buffer.formatted && value.descriptor_format == Prospero::BufferFormat::kInvalid) {
+			value.descriptor_format = Prospero::BufferFormat::k32_32_32_32UInt;
+		}
+		value.descriptor_swizzle = buffer.descriptor_swizzle;
+		const bool indirect = buffer.source < plan.descriptor_sources.size() &&
+		                      plan.descriptor_sources[buffer.source].indirect_descriptor.has_value();
+		if (indirect) {
+			value.indirect_root              = index;
+			value.indirect_search_iterations = 1;
+			indirect_buffers.push_back(index);
+		}
+		specialization.buffers.push_back(value);
+	}
+	for (const auto root: indirect_buffers) specialization.buffers.push_back(specialization.buffers[root]);
+
+	std::vector<uint32_t> indirect_images;
+	specialization.images.reserve(plan.info.images.size() * 2u);
+	for (uint32_t index = 0; index < plan.info.images.size(); index++) {
+		const auto& image = plan.info.images[index];
+		ResourceSpecialization::Image value;
+		value.numeric_class = image.numeric_class == Prospero::TextureNumericClass::Unsupported
+		                          ? (image.atomic ? Prospero::TextureNumericClass::Uint
+		                                          : Prospero::TextureNumericClass::Float)
+		                          : image.numeric_class;
+		value.dimension = image.dimension == Recompiler::Decoder::ImageDimension::Unknown
+		                      ? Recompiler::Decoder::ImageDimension::Dim2D
+		                      : image.dimension;
+		value.mip_count         = std::max(1u, image.mip_count);
+		value.conversion_format = image.conversion_format;
+		value.shader_swizzle    = image.shader_swizzle;
+		value.srgb_decode       = image.srgb_decode;
+		value.cube              = image.cube;
+		value.skip_degamma      = image.skip_degamma;
+		const bool indirect = image.source < plan.descriptor_sources.size() &&
+		                      plan.descriptor_sources[image.source].indirect_descriptor.has_value();
+		if (indirect) {
+			value.indirect_root              = index;
+			value.indirect_search_iterations = 1;
+			indirect_images.push_back(index);
+		}
+		specialization.images.push_back(value);
+	}
+	for (const auto root: indirect_images) specialization.images.push_back(specialization.images[root]);
+
+	std::vector<uint32_t> indirect_samplers;
+	specialization.samplers.reserve(plan.info.samplers.size() * 2u);
+	for (uint32_t index = 0; index < plan.info.samplers.size(); index++) {
+		const auto& sampler = plan.info.samplers[index];
+		ResourceSpecialization::Sampler value;
+		const bool indirect = sampler.source < plan.descriptor_sources.size() &&
+		                      plan.descriptor_sources[sampler.source].indirect_descriptor.has_value();
+		if (indirect) {
+			value.indirect_root              = index;
+			value.indirect_search_iterations = 1;
+			indirect_samplers.push_back(index);
+		}
+		specialization.samplers.push_back(value);
+	}
+	for (const auto root: indirect_samplers)
+		specialization.samplers.push_back(specialization.samplers[root]);
+	return specialization;
+}
+
 void WriteJson(const std::filesystem::path& path, const Json& value) {
 	std::ofstream output(path, std::ios::trunc);
 	if (!output) throw std::runtime_error("could not create result file");
@@ -250,6 +328,7 @@ Json BaseResult(const CorpusEntry& entry) {
 	        {"blocks", 0},
 	        {"loops", 0},
 	        {"spirv_words", 0},
+	        {"synthetic_specialization", false},
 	        {"wave_size", 0},
 	        {"total_ms", 0.0}};
 }
@@ -332,14 +411,21 @@ void TranslateOne(const CorpusEntry& entry, size_t entry_index, const Options& o
 		} else if (!ComputeInputKnown(entry)) {
 			result["outcome"] = "needs-runtime:compute_stage_input";
 			result["shape"]   = "compute stage state is not known at registration";
-		} else if (PlanNeedsRuntime(plan)) {
+		} else if (PlanNeedsRuntime(plan) && !AnalysisRequested(options)) {
 			result["outcome"] = "needs-runtime:user_data_values";
 			result["shape"]   = "resource specialization consumes registration-time unknown values";
 		} else {
+			const bool synthetic = PlanNeedsRuntime(plan);
+			auto specialization = synthetic ? SyntheticSpecialization(plan)
+			                                : Recompiler::IR::ResourceSpecialization {};
 			begin = std::chrono::steady_clock::now();
-			auto compiled = Recompiler::CompileProgram(std::move(translated), compile, {});
+			auto compiled =
+			    Recompiler::CompileProgram(std::move(translated), compile, specialization);
 			result["phase_ms"]["spirv"] = Milliseconds(std::chrono::steady_clock::now() - begin);
 			result["spirv_words"]        = compiled.spirv.size();
+			result["synthetic_specialization"] = synthetic;
+			result["descriptor_mask"] = compiled.program.bindings.descriptor_mask;
+			result["descriptor_counts"] = compiled.program.bindings.descriptor_counts;
 			result["outcome"]            = "emitted";
 			if (AnalysisRequested(options)) {
 				WriteSpirv(AnalysisModulePath(options, entry_index), compiled.spirv);
@@ -748,7 +834,6 @@ class HeadlessVulkan {
 public:
 	~HeadlessVulkan() {
 		if (m_device != nullptr) {
-			if (m_layout != nullptr) m_device.destroyPipelineLayout(m_layout, nullptr);
 			m_device.destroy(nullptr);
 		}
 		if (m_instance != nullptr) m_instance.destroy(nullptr);
@@ -835,25 +920,60 @@ public:
 		}
 		VULKAN_HPP_DEFAULT_DISPATCHER.init(m_device);
 
-		vk::PipelineLayoutCreateInfo layout_info {};
-		result = m_device.createPipelineLayout(&layout_info, nullptr, &m_layout);
-		if (result != vk::Result::eSuccess) {
-			error = "vkCreatePipelineLayout: " + vk::to_string(result);
-			return false;
-		}
 		return true;
 	}
 
-	PipelineMeasurement Measure(std::span<const uint32_t> words) const {
+	PipelineMeasurement Measure(std::span<const uint32_t> words, uint64_t descriptor_mask,
+	                            std::span<const uint32_t> descriptor_counts) const {
 		PipelineMeasurement measurement;
+		using BindingKind = Recompiler::IR::DescriptorBindingKind;
+		std::vector<vk::DescriptorSetLayoutBinding> bindings;
+		for (auto mask = descriptor_mask; mask != 0; mask &= mask - 1u) {
+			const auto index = static_cast<uint32_t>(std::countr_zero(mask));
+			if (index >= descriptor_counts.size()) {
+				measurement.error = "descriptor binding index is out of range";
+				return measurement;
+			}
+			const auto kind = static_cast<BindingKind>(index);
+			bindings.push_back({Recompiler::IR::NativeBinding(ShaderType::Compute, kind),
+			                    Libs::Graphics::NativeDescriptorType(kind), descriptor_counts[index],
+			                    vk::ShaderStageFlagBits::eCompute, nullptr});
+		}
+		vk::DescriptorSetLayoutCreateInfo descriptor_info {};
+		descriptor_info.bindingCount = static_cast<uint32_t>(bindings.size());
+		descriptor_info.pBindings    = bindings.data();
+		vk::DescriptorSetLayout descriptor_layout = nullptr;
+		auto result =
+		    m_device.createDescriptorSetLayout(&descriptor_info, nullptr, &descriptor_layout);
+		if (result != vk::Result::eSuccess) {
+			measurement.error = "vkCreateDescriptorSetLayout: " + vk::to_string(result);
+			return measurement;
+		}
+		const vk::PushConstantRange push_constants {vk::ShaderStageFlagBits::eCompute, 0,
+		                                              Recompiler::IR::NativePushConstantSize};
+		vk::PipelineLayoutCreateInfo layout_info {};
+		layout_info.setLayoutCount         = 1;
+		layout_info.pSetLayouts            = &descriptor_layout;
+		layout_info.pushConstantRangeCount = 1;
+		layout_info.pPushConstantRanges    = &push_constants;
+		vk::PipelineLayout layout = nullptr;
+		result = m_device.createPipelineLayout(&layout_info, nullptr, &layout);
+		if (result != vk::Result::eSuccess) {
+			m_device.destroyDescriptorSetLayout(descriptor_layout, nullptr);
+			measurement.error = "vkCreatePipelineLayout: " + vk::to_string(result);
+			return measurement;
+		}
+
 		vk::ShaderModuleCreateInfo module_info {};
 		module_info.codeSize = words.size_bytes();
 		module_info.pCode    = words.data();
 		vk::ShaderModule module = nullptr;
 		auto begin = std::chrono::steady_clock::now();
-		auto result = m_device.createShaderModule(&module_info, nullptr, &module);
+		result = m_device.createShaderModule(&module_info, nullptr, &module);
 		measurement.module_ms = Milliseconds(std::chrono::steady_clock::now() - begin);
 		if (result != vk::Result::eSuccess) {
+			m_device.destroyPipelineLayout(layout, nullptr);
+			m_device.destroyDescriptorSetLayout(descriptor_layout, nullptr);
 			measurement.error = "vkCreateShaderModule: " + vk::to_string(result);
 			return measurement;
 		}
@@ -862,13 +982,15 @@ public:
 		pipeline_info.stage.stage  = vk::ShaderStageFlagBits::eCompute;
 		pipeline_info.stage.module = module;
 		pipeline_info.stage.pName  = "main";
-		pipeline_info.layout       = m_layout;
+		pipeline_info.layout       = layout;
 		vk::Pipeline pipeline      = nullptr;
 		begin = std::chrono::steady_clock::now();
 		result = m_device.createComputePipelines(nullptr, 1, &pipeline_info, nullptr, &pipeline);
 		measurement.pipeline_ms = Milliseconds(std::chrono::steady_clock::now() - begin);
 		if (pipeline != nullptr) m_device.destroyPipeline(pipeline, nullptr);
 		m_device.destroyShaderModule(module, nullptr);
+		m_device.destroyPipelineLayout(layout, nullptr);
+		m_device.destroyDescriptorSetLayout(descriptor_layout, nullptr);
 		if (result != vk::Result::eSuccess) {
 			measurement.error = "vkCreateComputePipelines: " + vk::to_string(result);
 		}
@@ -879,7 +1001,6 @@ private:
 	vk::Instance       m_instance {};
 	vk::PhysicalDevice m_physical {};
 	vk::Device         m_device {};
-	vk::PipelineLayout m_layout {};
 	uint32_t           m_queue_family = 0;
 };
 
@@ -963,7 +1084,8 @@ void WriteSpirvProfiles(const Options& options, const std::vector<Json>& results
 	}
 }
 
-void WritePipelineTimings(const Options& options, const std::vector<EmittedModule>& modules) {
+void WritePipelineTimings(const Options& options, const std::vector<Json>& results,
+	                      const std::vector<EmittedModule>& modules) {
 	if (!options.time_pipeline) return;
 #if !defined(_WIN32)
 	::setenv("MESA_SHADER_CACHE_DISABLE", "true", 1);
@@ -984,6 +1106,10 @@ void WritePipelineTimings(const Options& options, const std::vector<EmittedModul
 	            "size_words,size_opt_ms,size_pipeline_ms,perf_words,perf_opt_ms,perf_pipeline_ms\n");
 	for (size_t sample_index = 0; sample_index < sample.size(); sample_index++) {
 		const auto& module = sample[sample_index];
+		const auto descriptor_mask =
+		    results[module.result_index].value("descriptor_mask", uint64_t {0});
+		const auto descriptor_counts =
+		    results[module.result_index].value("descriptor_counts", std::vector<uint32_t> {});
 		auto raw = ReadSpirv(AnalysisModulePath(options, module.result_index));
 		double size_opt_ms = 0.0, perf_opt_ms = 0.0;
 		std::string size_error, perf_error, raw_validation, size_validation, perf_validation;
@@ -992,9 +1118,12 @@ void WritePipelineTimings(const Options& options, const std::vector<EmittedModul
 		const bool raw_valid  = ValidateSpirv(raw, raw_validation);
 		const bool size_valid = !size.empty() && ValidateSpirv(size, size_validation);
 		const bool perf_valid = !perf.empty() && ValidateSpirv(perf, perf_validation);
-		const auto raw_time   = raw_valid ? vulkan.Measure(raw) : PipelineMeasurement {};
-		const auto size_time  = size_valid ? vulkan.Measure(size) : PipelineMeasurement {};
-		const auto perf_time  = perf_valid ? vulkan.Measure(perf) : PipelineMeasurement {};
+		const auto raw_time = raw_valid ? vulkan.Measure(raw, descriptor_mask, descriptor_counts)
+		                                : PipelineMeasurement {};
+		const auto size_time = size_valid ? vulkan.Measure(size, descriptor_mask, descriptor_counts)
+		                                  : PipelineMeasurement {};
+		const auto perf_time = perf_valid ? vulkan.Measure(perf, descriptor_mask, descriptor_counts)
+		                                  : PipelineMeasurement {};
 
 		Json record {{"sample", sample_index + 1}, {"corpus_index", module.result_index}};
 		auto add_recipe = [&](const char* name, size_t words, double optimize_ms, bool valid,
@@ -1027,7 +1156,7 @@ void WriteAnalysis(const Options& options, const std::vector<Json>& results) {
 	if (!AnalysisRequested(options)) return;
 	const auto modules = EmittedModules(results);
 	WriteSpirvProfiles(options, results, modules);
-	WritePipelineTimings(options, modules);
+	WritePipelineTimings(options, results, modules);
 	std::error_code ignored;
 	std::filesystem::remove_all(options.output / ".analysis-modules", ignored);
 }
