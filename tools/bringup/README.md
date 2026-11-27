@@ -138,3 +138,27 @@ translations and their slowest passes, totals pass time, and counts compute shad
 runtime input. Graphics registrations normally need later pipeline state; fused stages also need
 their paired bytecode. Compute registrations include their creation-time stage registers, but a
 shader whose resource plan reads user-data values remains runtime-dependent.
+
+### First-use records and fidelity
+
+With the same `--dump-registered-shaders <dir>` option the run also writes, at the first use of each
+(stage, hash) whose resource plan exists, one line in `<dir>/use.jsonl` and one blob
+`<dir>/use_<stage>_<hash>.bin`: the user-data words, the raw stage input struct, the push window,
+fused back code, and every guest memory range the walker read while materializing (bounded to 16 MiB
+and 65,536 ranges per record; `memory_truncated` says so). The queue is bounded in count (128) and
+bytes (256 MiB), never blocks the render thread, and the shutdown ledger prints
+`use dump: written= dropped= queue_high_water= skipped:<reason>=<n>`. Programs with GPU-selected
+calls and stages whose input struct is not trivially copyable are counted as skipped.
+
+The tool attaches a record to its registration by (stage, hash) and replays it for compute and pixel
+shaders: it restores the stage struct (a size mismatch is `needs-runtime:input_layout`), serves the
+recorded memory to the walker, materializes, and emits SPIR-V (`source` is `use` in `results.jsonl`).
+Without a record the stage state is not known, so a resource tracking failure is reported as
+`needs-runtime:use_record` with the full text in `shape`, never as `rejected`; decode, CFG and
+unsupported-instruction failures do not depend on the inputs and stay `rejected`. The summary ranks
+the failure shapes with the hash masked. Image heap kinds are not replayed (`notes` flags such a
+shader).
+
+Fidelity: `--compare-log <run log>` reads the emulator's `translation end ... outcome=` lines and adds
+per stage how many shaders were emitted in both, only live, only in the tool and in neither, and the
+share of live-emitted shaders the tool also emitted.
