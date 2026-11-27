@@ -433,6 +433,7 @@ bool PipelineCache::Program::Materialize(const ShaderRecompiler::IR::SrtRuntime&
 	RecordingImageHeap recorder(runtime.image_heap);
 	WalkReadHashes     walk_hashes;
 	auto               walk = walk_hashes.Wrap(runtime);
+	walk.memory_changes = settings.stamps;
 	// Only a memo that keeps heap plans needs what the heap hands out.
 	if (runtime.image_heap != nullptr && memo.Capacity() >= 2u) walk.image_heap = &recorder;
 	if (!ShaderRecompiler::IR::MaterializeResources(resource_plan, walk, resources,

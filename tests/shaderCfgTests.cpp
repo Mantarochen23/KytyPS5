@@ -14745,7 +14745,7 @@ void TestIndirectBufferRuntimeTableCompilesAndValidates() {
             mat_error.empty(),
         "5000-candidate runtime-table indirect buffer shader failed materialization");
   Check(snapshot.indirect_buffer_tables.size() == 1u &&
-            snapshot.indirect_buffer_tables[0].entries.size() == kRows - 1u,
+            snapshot.indirect_buffer_tables[0].candidates->entries.size() == kRows - 1u,
         "runtime table did not capture all 4999 non-null buffer descriptors");
   Check(specialization.buffers.size() == 5u,
         "runtime table specialization should contain only root + 4 distinct classes");
@@ -14764,7 +14764,7 @@ void TestIndirectBufferRuntimeTableCompilesAndValidates() {
   Check(compiled.spirv.size() < kMaxWords,
         "runtime-table indirect buffer shader exceeded compact SPIR-V word bound");
   std::printf("TestIndirectBufferRuntimeTableCompilesAndValidates: entries=%zu classes=%zu words=%zu\n",
-              snapshot.indirect_buffer_tables[0].entries.size(), specialization.buffers.size() - 1u,
+              snapshot.indirect_buffer_tables[0].candidates->entries.size(), specialization.buffers.size() - 1u,
               compiled.spirv.size());
 }
 

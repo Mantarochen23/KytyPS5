@@ -172,6 +172,9 @@ enum class Counter : uint8_t {
 	TableCandidates,
 	TableDispatches,
 	TableRebuilds,
+	TableEnumerations,
+	TableMarks,
+	TableMarkRanges,
 	// Rebuilt tables of typed or image-synced buffers with a candidate range inside a registered image.
 	TableImageAliased,
 	Count

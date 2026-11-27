@@ -1824,11 +1824,13 @@ DescriptorValue Texture(uint64_t base, BufferFormat format, ImageType type) {
 
 struct Memory {
   std::vector<std::pair<uint64_t, uint32_t>> words;
+  uint64_t reads = 0;
   void Write(uint64_t address, const DescriptorValue &value) {
     for (uint32_t i = 0; i < 4u; ++i) words.emplace_back(address + i * 4u, value.dwords[i]);
   }
   static bool Read(void *userdata, uint64_t address, std::span<uint32_t> values) {
-    const auto &memory = *static_cast<const Memory *>(userdata);
+    auto &memory = *static_cast<Memory *>(userdata);
+    ++memory.reads;
     for (size_t i = 0; i < values.size(); ++i) {
       const auto found = std::ranges::find(memory.words, address + i * 4u,
                                            &std::pair<uint64_t, uint32_t>::first);
@@ -1836,6 +1838,15 @@ struct Memory {
       values[i] = found->second;
     }
     return true;
+  }
+};
+
+struct StableMemoryChanges final : MemoryChangeSource {
+  struct Stamp final : MemoryChangeStamp {
+    bool Unchanged() const override { return true; }
+  };
+  std::shared_ptr<MemoryChangeStamp> Track(uint64_t, uint64_t) override {
+    return std::make_shared<Stamp>();
   }
 };
 
@@ -1957,9 +1968,10 @@ void TestCanonicalSpecializationAcrossBoots() {
 void TestIndirectBufferCandidateBound() {
   Config::SetDisabledPorts({});
   const auto plan = TablePlan(/*indexed_buffer=*/true, /*formatted_buffer=*/true);
+  StableMemoryChanges changes;
   const auto run_rows = [&](uint32_t row_count, uint32_t distinct_count, uint32_t distinct_classes,
                             std::string *error, ResourceSnapshot *out_snapshot,
-                            ResourceSpecialization *out_spec) -> bool {
+                            ResourceSpecialization *out_spec, uint64_t *out_reads = nullptr) -> bool {
     Memory memory;
     const uint64_t base  = 0x0000100000000000ull;
     const uint64_t table = base + 0x10000u;
@@ -1984,10 +1996,12 @@ void TestIndirectBufferCandidateBound() {
     std::copy_n(image_table.dwords.begin(), 4u, user_data.begin() + 4u);
     FakeGuestMemory guard(&Memory::Read, &memory);
     const SrtRuntime runtime{.user_data = user_data, .userdata = &memory,
-                             .read_specialization_memory = &Memory::Read, .image_heap = &heap};
+                             .read_specialization_memory = &Memory::Read, .image_heap = &heap,
+                             .memory_changes = &changes};
     ResourceSnapshot snapshot;
     ResourceSpecialization specialization;
     const bool ok = MaterializeResources(plan, runtime, snapshot, specialization, error);
+    if (out_reads != nullptr) *out_reads = memory.reads;
     if (out_snapshot != nullptr) *out_snapshot = std::move(snapshot);
     if (out_spec != nullptr) *out_spec = std::move(specialization);
     return ok;
@@ -2018,32 +2032,35 @@ void TestIndirectBufferCandidateBound() {
     Check(spec_a.buffers.size() == 5u,
           "runtime-table specialization must keep only root + 4 distinct classes");
     Check(snap_a.indirect_buffer_tables.size() == 1u &&
-              snap_a.indirect_buffer_tables[0].entries.size() == MaxIndirectBufferCandidates + 200u &&
-              snap_a.indirect_buffer_tables[0].class_index.size() ==
+              snap_a.indirect_buffer_tables[0].candidates->entries.size() == MaxIndirectBufferCandidates + 200u &&
+              snap_a.indirect_buffer_tables[0].candidates->class_index.size() ==
                   MaxIndirectBufferCandidates + 200u,
           "runtime table must retain all distinct live buffer descriptors and class indices");
-	    const auto key_a = snap_a.indirect_buffer_tables[0].candidate_key;
+	    const auto key_a = snap_a.indirect_buffer_tables[0].candidates->key;
 	    const auto cached_scan = std::ranges::find_if(plan.scan_cache, [](const auto &entry) {
-	      return !entry.runtime_candidates.empty();
+	      return entry.runtime_candidates != nullptr;
 	    });
 	    Check(cached_scan != plan.scan_cache.end() &&
-	              cached_scan->runtime_classes.size() == MaxIndirectBufferCandidates + 200u,
+	              cached_scan->runtime_candidates->class_index.size() == MaxIndirectBufferCandidates + 200u,
 	          "runtime table materialization did not retain its normalized scan result");
 	    ResourceSnapshot snap_cached;
 	    ResourceSpecialization spec_cached;
+	    uint64_t cached_reads = UINT64_MAX;
 	    Check(run_rows(MaxIndirectBufferCandidates + 200u,
 	                   MaxIndirectBufferCandidates + 200u, 4u, &error, &snap_cached,
-	                   &spec_cached) &&
+	                   &spec_cached, &cached_reads) && cached_reads == 0u &&
 	              spec_cached == spec_a &&
-	              snap_cached.indirect_buffer_tables[0].candidate_key == key_a &&
-	              snap_cached.indirect_buffer_tables[0].entries ==
-	                  snap_a.indirect_buffer_tables[0].entries,
-	          "an unchanged runtime table did not replay the cached candidates exactly");
+	              snap_cached.indirect_buffer_tables[0].candidates ==
+	                  snap_a.indirect_buffer_tables[0].candidates &&
+	              snap_cached.indirect_buffer_tables[0].candidates->key == key_a &&
+	              snap_cached.indirect_buffer_tables[0].candidates->entries ==
+	                  snap_a.indirect_buffer_tables[0].candidates->entries,
+	          "an unchanged runtime table was read/enumerated or did not share its cached candidates");
 
     const bool ok_b = run_rows(MaxIndirectBufferCandidates + 1500u,
                                MaxIndirectBufferCandidates + 1500u, 4u, &error, &snap_b, &spec_b);
 	    Check(ok_b && error.empty() && spec_a == spec_b &&
-	              snap_b.indirect_buffer_tables[0].candidate_key != key_a,
+	              snap_b.indirect_buffer_tables[0].candidates->key != key_a,
           "adding more distinct buffers of existing classes must keep identical specialization");
   }
   // Over 4,096 distinct buffer classes (strides) still refuses with a clear diagnostic.

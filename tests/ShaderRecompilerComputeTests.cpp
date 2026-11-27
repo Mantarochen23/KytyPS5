@@ -7862,17 +7862,17 @@ public:
     snapshot.flattened_srt.resize(3);
     auto &table = snapshot.indirect_buffer_tables.emplace_back();
     table.root_resource = 0;
-    table.candidate_key = {1, 2};
-    table.has_live_range = true;
+    table.candidates->key = {1, 2};
+    table.candidates->has_live_range = true;
     for (const auto address : {base, base + 2 * page}) {
       ShaderBufferResource descriptor{};
       descriptor.UpdateAddress48(address);
       descriptor.fields[1] |= 4u << 16u;
       descriptor.fields[2] = page / 4u;
-      auto &value = table.entries.emplace_back();
+      auto &value = table.candidates->entries.emplace_back();
       value.dword_count = 4;
       std::copy_n(descriptor.fields, 4, value.dwords.begin());
-      table.class_index.push_back(1);
+      table.candidates->class_index.push_back(1);
     }
     ShaderStageRuntime runtime{&module, &snapshot};
     PreparedBindings bindings;
@@ -7920,6 +7920,17 @@ public:
                 cache.WriteStamp(base, page) > low_stamp &&
                 cache.WriteStamp(base + 2 * page, page) > high_stamp,
             "a writable table did not preserve GPU ownership and write stamps for later reads");
+
+    const auto marked_low_stamp = cache.WriteStamp(base, page);
+    const auto marked_high_stamp = cache.WriteStamp(base + 2 * page, page);
+    executor.RebindBuffers(bindings);
+    Require(name, "marked once",
+            cache.WriteStamp(base, page) == marked_low_stamp &&
+                cache.WriteStamp(base + 2 * page, page) == marked_high_stamp,
+            "the same table was marked twice in one command buffer");
+    cache.ReadMemory(base, page);
+    Require(name, "read later", !cache.IsRegionGpuModified(base, page),
+            "a later CPU read did not consume the table's GPU-write ownership");
 
     // A state registered before its buffers are resolved sees an invalidation that lands while
     // the build runs, and its write union is set afterwards.

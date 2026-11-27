@@ -40,6 +40,8 @@ public:
 	bool Track(uint64_t address, uint64_t size, std::vector<PageStamp>& stamps) override;
 	bool Unchanged(std::span<const PageStamp> stamps) override;
 	bool GpuHolds(uint64_t address, uint64_t size) override;
+	[[nodiscard]] std::shared_ptr<ShaderRecompiler::IR::MemoryChangeStamp> Track(
+	    uint64_t address, uint64_t size) override;
 
 	// A write is about to land over the range (CPU fault, host I/O into it, unmap). Releases the
 	// watch of every watched page of it, on any thread.
@@ -52,6 +54,7 @@ public:
 	}
 
 private:
+	class Stamp;
 	struct Page {
 		std::atomic<uint64_t> generation {1};
 		std::atomic<bool>     watched {false};
