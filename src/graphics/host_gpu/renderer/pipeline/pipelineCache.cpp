@@ -429,7 +429,8 @@ bool PipelineCache::Program::Materialize(const ShaderRecompiler::IR::SrtRuntime&
 	// affect bindings but not specialization.
 	resource_plan.capture_specialization_reads = true;
 	RecordingImageHeap recorder(runtime.image_heap);
-	auto               walk = runtime;
+	WalkReadHashes     walk_hashes;
+	auto               walk = walk_hashes.Wrap(runtime);
 	// Only a memo that keeps heap plans needs what the heap hands out.
 	if (runtime.image_heap != nullptr && memo.Capacity() >= 2u) walk.image_heap = &recorder;
 	if (!ShaderRecompiler::IR::MaterializeResources(resource_plan, walk, resources,
@@ -441,7 +442,7 @@ bool PipelineCache::Program::Materialize(const ShaderRecompiler::IR::SrtRuntime&
 	MemoLookupStats store_stats;
 	uint32_t        evicted = 0;
 	if (const auto* stored = memo.Store(runtime, resources, specialization, specialization_hash,
-	                                    recorder, uses_heap, evicted, store_stats)) {
+	                                    recorder, uses_heap, evicted, store_stats, &walk_hashes)) {
 		memo.current = stored->serial;
 		Common::FrameCost::Add(Counter::MemoStored);
 		for (const auto& read: stored->reads) {
@@ -450,6 +451,7 @@ bool PipelineCache::Program::Materialize(const ShaderRecompiler::IR::SrtRuntime&
 		}
 	} else {
 		Common::FrameCost::Add(Counter::MemoNotStored);
+		if (store_stats.walk_changed) Common::FrameCost::Add(Counter::MemoWalkChanged);
 	}
 	Common::FrameCost::Add(Counter::MemoEvicted, evicted);
 	Common::FrameCost::Add(Counter::MemoRangesCompared, store_stats.ranges_compared);

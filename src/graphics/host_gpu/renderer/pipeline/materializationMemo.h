@@ -6,6 +6,7 @@
 #include "graphics/shader/recompiler/ir/passes/SrtWalker.h"
 
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <span>
 #include <vector>
@@ -57,6 +58,28 @@ private:
 	bool                                   m_declined = false;
 };
 
+// Hashes every guest read a materialization walk makes, as the walk sees it. A memo entry is only
+// valid if the bytes it later arms and hashes are the bytes the walk saw: a write between the walk's
+// read and the arming would otherwise be recorded as the entry's content while the snapshot holds
+// the older bytes, and every later lookup would hit on it.
+class WalkReadHashes {
+public:
+	// The runtime with its reader wrapped; this object must outlive the walk.
+	[[nodiscard]] ShaderRecompiler::IR::SrtRuntime Wrap(const ShaderRecompiler::IR::SrtRuntime& runtime);
+	enum class State : uint8_t { NotRead, Stable, Unstable };
+	// Stable: every read of this range returned the hash in `hash`.
+	[[nodiscard]] State Find(uint64_t address, uint64_t size, uint64_t& hash) const;
+
+private:
+	static bool Read(void* user, uint64_t address, std::span<uint32_t> values);
+	struct Seen {
+		uint64_t hash     = 0;
+		bool     unstable = false;
+	};
+	ShaderRecompiler::IR::SrtRuntime                      m_inner;
+	std::map<std::pair<uint64_t, uint64_t>, Seen>         m_seen;
+};
+
 // Why a lookup did not reuse an entry; Hit when it did.
 enum class MemoOutcome : uint8_t {
 	Hit,
@@ -78,6 +101,7 @@ struct MemoLookupStats {
 	uint32_t ranges_compared = 0; // ranges read and hashed
 	uint64_t bytes_compared  = 0;
 	uint32_t entries_tried   = 0; // entries whose key matched
+	bool     walk_changed    = false; // Store: a range held other bytes than the walk read
 };
 
 // What a program remembers of its last materializations. An entry is the full result for one set
@@ -126,7 +150,7 @@ public:
 	             const ShaderRecompiler::IR::ResourceSnapshot&       resources,
 	             const ShaderRecompiler::IR::ResourceSpecialization& specialization,
 	             uint64_t specialization_hash, RecordingImageHeap& heap, bool uses_image_heap,
-	             uint32_t& evicted, MemoLookupStats& stats);
+	             uint32_t& evicted, MemoLookupStats& stats, const WalkReadHashes* walk = nullptr);
 
 	// Serial of the entry whose result the owner holds right now, 0 for none.
 	uint64_t current = 0;

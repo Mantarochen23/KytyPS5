@@ -147,7 +147,7 @@ void FramePresented() noexcept {
 		    "memo_miss_heap_changed={:.2f} memo_stored={:.2f} memo_not_stored={:.2f} "
 		    "memo_evicted={:.2f} memo_heap_plan_calls={:.2f} memo_ranges_stamped={:.2f} "
 		    "memo_ranges_compared={:.2f} memo_bytes_compared={:.0f} memo_ranges_tracked={:.2f} "
-		    "memo_ranges_untracked={:.2f}\n",
+		    "memo_ranges_untracked={:.2f} memo_walk_changed={:.2f}\n",
 		    std::chrono::duration<double>(elapsed).count(), frames,
 		    Mean(delta, Counter::Draws, frames), Mean(delta, Counter::Dispatches, frames),
 		    Mean(delta, Counter::ImageHeapRebindCalls, frames),
@@ -188,7 +188,8 @@ void FramePresented() noexcept {
 		    Mean(delta, Counter::MemoRangesCompared, frames),
 		    Mean(delta, Counter::MemoBytesCompared, frames),
 		    Mean(delta, Counter::MemoRangesTracked, frames),
-		    Mean(delta, Counter::MemoRangesUntracked, frames)));
+		    Mean(delta, Counter::MemoRangesUntracked, frames),
+		    Mean(delta, Counter::MemoWalkChanged, frames)));
 	}
 	if (g_store_loaded.load(std::memory_order_relaxed) && !g_bad_warned) {
 		const auto hits   = delta[static_cast<size_t>(Counter::FindModuleHits)];

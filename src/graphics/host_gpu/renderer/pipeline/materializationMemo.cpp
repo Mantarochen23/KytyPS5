@@ -25,6 +25,33 @@ bool RecordingImageHeap::Acquire(const ShaderRecompiler::IR::ImageHeapRequest& r
 	return true;
 }
 
+ShaderRecompiler::IR::SrtRuntime WalkReadHashes::Wrap(const ShaderRecompiler::IR::SrtRuntime& runtime) {
+	m_inner = runtime;
+	auto wrapped = runtime;
+	if (runtime.read_specialization_memory != nullptr) {
+		wrapped.userdata                   = this;
+		wrapped.read_specialization_memory = &WalkReadHashes::Read;
+	}
+	return wrapped;
+}
+
+bool WalkReadHashes::Read(void* user, uint64_t address, std::span<uint32_t> values) {
+	auto& self = *static_cast<WalkReadHashes*>(user);
+	if (!self.m_inner.read_specialization_memory(self.m_inner.userdata, address, values)) return false;
+	const uint64_t hash = values.empty() ? 0u : XXH3_64bits(values.data(), values.size_bytes());
+	const auto [at, fresh] = self.m_seen.try_emplace(std::pair<uint64_t, uint64_t> {address, values.size_bytes()},
+		                                                 Seen {hash, false});
+	if (!fresh && at->second.hash != hash) at->second.unstable = true;
+	return true;
+}
+
+WalkReadHashes::State WalkReadHashes::Find(uint64_t address, uint64_t size, uint64_t& hash) const {
+	const auto found = m_seen.find(std::pair<uint64_t, uint64_t> {address, size});
+	if (found == m_seen.end()) return State::NotRead;
+	hash = found->second.hash;
+	return found->second.unstable ? State::Unstable : State::Stable;
+}
+
 void MemoizedMaterialization::Configure(uint32_t entries, ReadStamps* stamps) {
 	m_capacity = std::max(entries, 1u);
 	m_stamps   = stamps;
@@ -191,7 +218,8 @@ MemoizedMaterialization::Entry* MemoizedMaterialization::Store(
     const ShaderRecompiler::IR::SrtRuntime&             runtime,
     const ShaderRecompiler::IR::ResourceSnapshot&       resources,
     const ShaderRecompiler::IR::ResourceSpecialization& specialization, uint64_t specialization_hash,
-    RecordingImageHeap& heap, bool uses_image_heap, uint32_t& evicted, MemoLookupStats& stats) {
+    RecordingImageHeap& heap, bool uses_image_heap, uint32_t& evicted, MemoLookupStats& stats,
+    const WalkReadHashes* walk) {
 	if ((uses_image_heap && m_capacity < 2u) || heap.Declined()) return nullptr;
 	// The heap tables are covered by the heap's own change tracking (replayed on a hit).
 	auto ranges = resources.specialization_reads;
@@ -220,6 +248,17 @@ MemoizedMaterialization::Entry* MemoizedMaterialization::Store(
 			                               : 0u;
 		}
 		if (!HashRange(runtime, address, size, read.hash)) return nullptr;
+		if (walk != nullptr) {
+			// The range is armed now. If it holds other bytes than the walk read, a write landed
+			// in between and the snapshot describes the older bytes: keep no entry for it.
+			uint64_t seen = 0;
+			const auto state = walk->Find(address, size, seen);
+			if (state == WalkReadHashes::State::Unstable ||
+			    (state == WalkReadHashes::State::Stable && seen != read.hash)) {
+				stats.walk_changed = true;
+				return nullptr;
+			}
+		}
 		++stats.ranges_compared;
 		stats.bytes_compared += size;
 		fresh->reads.push_back(read);

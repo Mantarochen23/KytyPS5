@@ -386,6 +386,47 @@ void TestClear() {
 
 } // namespace
 
+// A write that lands between the walk's read and the arming must not become the entry's content.
+void TestWriteBetweenWalkAndStore() {
+  Memory memory;
+  FillMemory(memory);
+  Inputs inputs{.memory = &memory};
+  const std::vector<std::pair<uint64_t, uint64_t>> reads{{Table, 64}, {Block, 32}};
+  const auto walk_and_store = [&](bool write_after_walk, bool write_during_walk, bool &changed) {
+    MemoizedMaterialization memo;
+    memo.Configure(2, nullptr);
+    WalkReadHashes hashes;
+    auto walk = hashes.Wrap(inputs.Runtime());
+    std::vector<uint32_t> words(16);
+    for (const auto &[address, size] : reads) {
+      std::vector<uint32_t> data(size / 4);
+      Check(walk.read_specialization_memory(walk.userdata, address, data), "walk read");
+      if (write_during_walk) {
+        memory.Write(address, 1000u);
+        Check(walk.read_specialization_memory(walk.userdata, address, data), "walk read again");
+      }
+    }
+    if (write_after_walk) memory.Write(Block, 77);
+    RecordingImageHeap recorder(nullptr);
+    uint32_t evicted = 0;
+    MemoLookupStats stats;
+    const auto *entry = memo.Store(inputs.Runtime(), Snapshot(reads), IR::ResourceSpecialization{}, 1,
+                                   recorder, false, evicted, stats, &hashes);
+    changed = stats.walk_changed;
+    return entry != nullptr;
+  };
+  bool changed = false;
+  Check(walk_and_store(false, false, changed) && !changed, "bytes as the walk read them: stored");
+  Check(!walk_and_store(true, false, changed) && changed, "a write after the walk's read: not stored");
+  FillMemory(memory);
+  Check(!walk_and_store(false, true, changed) && changed, "a range that changed during the walk: not stored");
+  FillMemory(memory);
+  // Without the walk's hashes the old behaviour holds.
+  MemoizedMaterialization plain;
+  plain.Configure(2, nullptr);
+  Check(Store(plain, inputs, reads) != nullptr, "no walk hashes: stored as before");
+}
+
 int main() {
   TestHitWithoutChange();
   TestStampsSkipReads();
@@ -397,6 +438,7 @@ int main() {
   TestHeapPlans();
   TestUnreadable();
   TestClear();
+  TestWriteBetweenWalkAndStore();
   std::puts("MaterializationMemoTests: ok");
   return 0;
 }
